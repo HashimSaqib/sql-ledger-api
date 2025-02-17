@@ -31,7 +31,8 @@ use SL::RC;
 use DateTime;
 use DateTime::Format::ISO8601;
 use Date::Parse;
-use POSIX qw(strftime);
+use File::Path qw(make_path);
+use POSIX      qw(strftime);
 use Time::Piece;
 app->config( hypnotoad => { listen => ['http://*:3000'] } );
 
@@ -1182,6 +1183,121 @@ $api->delete(
 
         # Return no content (204)
         return $c->rendered(204);
+    }
+);
+$api->get(
+    '/system/companydefaults' => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+
+        my $dbs = $c->dbs($client);
+
+        my $form = Form->new;
+        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+        AM->defaultaccounts( $c->slconfig, $form );
+
+        # Build arrays for "select$key" instead of a string
+        foreach my $key ( keys %{ $form->{accno} } ) {
+            my @select_array;
+
+            foreach my $accno ( sort keys %{ $form->{accno}{$key} } ) {
+                my $acc_entry = {
+                    accno       => $accno,
+                    description => $form->{accno}{$key}{$accno}{description},
+                    id          => $form->{accno}{$key}{$accno}{id},
+                };
+
+                # Check if this is the default selection
+                if ( $form->{accno}{$key}{$accno}{id} ==
+                    $form->{defaults}{$key} )
+                {
+                    # Instead of a string, store the chosen entry as a hash
+                    $form->{$key} = {
+                        accno       => $accno,
+                        description =>
+                          $form->{accno}{$key}{$accno}{description},
+                        id => $form->{accno}{$key}{$accno}{id},
+                    };
+                }
+
+                push @select_array, $acc_entry;
+            }
+
+            # Assign the array to $form->{"select$key"}
+            $form->{$key} = \@select_array;
+        }
+
+        # Remove raw data we no longer need
+        for (qw(accno defaults)) {
+            delete $form->{$_};
+        }
+
+        my %checked;
+        $checked{cash}          = "checked" if $form->{method} eq 'cash';
+        $checked{namesbynumber} = "checked" if $form->{namesbynumber};
+        $checked{company}       = "checked" unless $form->{typeofcontact};
+        $checked{person}      = "checked" if $form->{typeofcontact} eq 'person';
+        $checked{roundchange} = "checked" if $form->{roundchange};
+
+        for (qw(cdt checkinventory hideaccounts forcewarehouse)) {
+            $checked{$_} = "checked" if $form->{$_};
+        }
+
+        for (
+            qw(glnumber sinumber sonumber ponumber sqnumber rfqnumber employeenumber customernumber vendornumber)
+          )
+        {
+            $checked{"lock_$_"} = "checked" if $form->{"lock_$_"};
+        }
+
+        # Combine form data and checked settings.
+        my %form_data = ( %{$form}, checked => \%checked );
+
+        $c->render( json => \%form_data );
+    }
+);
+$api->post(
+    '/system/companydefaults' => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+        my $form   = Form->new;
+
+        # Get form data from JSON request body
+        my $json_data = $c->req->json;
+        warn( Dumper $json_data );
+
+        # Transfer JSON data to form object
+        foreach my $key ( keys %$json_data ) {
+            $form->{$key} = $json_data->{$key};
+        }
+        warn( Dumper $form );
+
+        # Set up configuration for the client
+        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+
+        $form->{optional} =
+"company address tel fax companyemail companywebsite yearend weightunit businessnumber closedto revtrans audittrail method cdt namesbynumber typeofcontact roundchange referenceurl annualinterest latepaymentfee restockingcharge checkinventory hideaccounts forcewarehouse glnumber sinumber sonumber vinumber batchnumber vouchernumber ponumber sqnumber rfqnumber partnumber projectnumber employeenumber customernumber vendornumber lock_glnumber lock_sinumber lock_sonumber lock_ponumber lock_sqnumber lock_rfqnumber lock_employeenumber lock_customernumber lock_vendornumber";
+
+        # Save the defaults
+        my $result = AM->save_defaults( $c->slconfig, $form );
+
+        if ($result) {
+            $c->render(
+                json => {
+                    status  => 'success',
+                    message => 'Company defaults saved successfully'
+                }
+            );
+        }
+        else {
+            $c->render(
+                status => 500,
+                json   => {
+                    status  => 'error',
+                    message => 'Failed to save company defaults'
+                }
+            );
+        }
     }
 );
 
@@ -2816,9 +2932,8 @@ helper upload_to_nextcloud => sub {
     warn("File uploaded to Nextcloud at: $remote_file_url");
 
     # Step 2: Create a shareable link
-    my $share_api_url =
-'';
-    my $share_tx = $ua->post(
+    my $share_api_url = '';
+    my $share_tx      = $ua->post(
         $share_api_url => {
             Authorization => 'Basic '
               . MIME::Base64::encode( "$nextcloud_user:$nextcloud_pw", '' ),
@@ -2862,8 +2977,7 @@ $api->get(
         my $c = shift;
 
         # Nextcloud configuration
-        my $nextcloud_url =
-          '';
+        my $nextcloud_url  = '';
         my $nextcloud_user = '';
         my $nextcloud_pw   = '';
 
@@ -2964,8 +3078,7 @@ $api->get(
         my $dbs    = $c->dbs($client);
 
         # Nextcloud configuration
-        my $nextcloud_url =
-          "";
+        my $nextcloud_url  = "";
         my $nextcloud_user = '';
         my $nextcloud_pw   = '';
 
@@ -3147,9 +3260,8 @@ XML
                 }
 
                 # Step 2: Create a shareable link
-                my $share_api_url =
-'';
-                my $share_tx = $ua->post(
+                my $share_api_url = '';
+                my $share_tx      = $ua->post(
                     $share_api_url => {
                         Authorization => 'Basic '
                           . MIME::Base64::encode(
@@ -3159,8 +3271,8 @@ XML
                         'Content-Type'   => 'application/x-www-form-urlencoded',
                     } => form => {
                         path        => '//' . $file->{filename},
-                        shareType   => 3,    # user link
-                        permissions => 1,    # Read-only
+                        shareType   => 3,                          # user link
+                        permissions => 1,                          # Read-only
 
                     }
                 );
@@ -3615,5 +3727,49 @@ $api->post(
     }
 );
 
+$api->get(
+    '/print_test' => sub {
+        my $c    = shift;
+        my $form = new Form;
+
+        # Configure invoice data
+        $form->{vc}               = 'customer';
+        $form->{id}               = 10259;
+        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=neoledger";
+
+        # Fetch invoice data
+        IS->retrieve_invoice( $c->slconfig, $form );
+        IS->invoice_details( $c->slconfig, $form );
+
+        # Configure template settings
+        $form->{templates}     = './templates/neoledger';    # Use relative path
+        $form->{language_code} = "en";
+        $form->{format}        = "pdf";
+        $form->{tmpfile}       = "invoice.tex";
+
+        # Load and process template
+        my $template_path = "./templates/neoledger/invoice.tex";
+        open my $fh, '<', $template_path or die "Template error: $!";
+        my @template_lines = <$fh>;
+        close $fh;
+        my $processed_content =
+          $form->process_template( $c->slconfig, @template_lines );
+
+        warn( Dumper $processed_content );
+
+        # Generate PDF
+        open $fh, '>', './invoice.tex' or die "Could not write LaTeX: $!";
+        print $fh $processed_content;
+        close $fh;
+        $form->run_latex( "./output/", 0, 1 );    # Use XeLaTeX
+
+        # Return PDF
+        $c->render_file(
+            filepath => "./output/invoice.pdf",
+            filename => "invoice_$form->{id}.pdf",
+            format   => 'pdf'
+        );
+    }
+);
 app->start;
 
