@@ -1301,6 +1301,53 @@ $api->post(
     }
 );
 
+$api->get(
+    '/system/chart/accounts' => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+        my $form   = Form->new;
+        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+
+        my $result = CA->all_accounts( $c->slconfig, $form );
+        if ($result) {
+            $c->render( json => $form->{CA} );
+        }
+        else {
+            $c->render(
+                status => 500,
+                json   => {
+                    status  => 'error',
+                    message => 'Failed to save company defaults'
+                }
+            );
+        }
+    }
+);
+
+$api->get(
+    '/system/chart/accounts/:id' => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+        my $id     = $c->param('id');
+        my $form   = Form->new;
+        $form->{id} = $id;
+        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+
+        my $result = AM->get_account( $c->slconfig, $form );
+        if ($result) {
+            $c->render( json => {%$form} );
+        }
+        else {
+            $c->render(
+                status => 500,
+                json   => {
+                    status  => 'error',
+                    message => 'Failed to save company defaults'
+                }
+            );
+        }
+    }
+);
 ##########################
 ####                  ####
 #### Goods & Services ####
