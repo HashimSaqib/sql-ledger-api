@@ -1330,10 +1330,25 @@ $api->get(
         my $client = $c->param('client');
         my $id     = $c->param('id');
         my $form   = Form->new;
+        my $dbs    = $c->dbs($client);
+
+        # Execute queries and check for records
+        my $transactions =
+          $dbs->query( "SELECT * FROM acc_trans WHERE chart_id = ? ", $id );
+        my $defaults =
+          $dbs->query( "SELECT * FROM defaults WHERE fldvalue = ? ", $id );
+        my $parts = $dbs->query(
+"SELECT * FROM parts WHERE inventory_accno_id = ? OR income_accno_id = ? OR expense_accno_id = ?",
+            $id, $id, $id );
+
         $form->{id} = $id;
         $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
 
         my $result = AM->get_account( $c->slconfig, $form );
+
+        $form->{has_transactions} = $transactions->rows > 0 ? \1 : \0;
+        $form->{has_defaults}     = $defaults->rows > 0     ? \1 : \0;
+        $form->{has_parts}        = $parts->rows > 0        ? \1 : \0;
         if ($result) {
             $c->render( json => {%$form} );
         }
@@ -1342,12 +1357,107 @@ $api->get(
                 status => 500,
                 json   => {
                     status  => 'error',
-                    message => 'Failed to save company defaults'
+                    message => 'Failed to get chart'
                 }
             );
         }
     }
 );
+
+$api->post(
+    '/system/chart/accounts/:id' => { id => undef } => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+        my $form   = Form->new;
+        my $id     = $c->param("id");
+        my $params = $c->req->json;
+        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+        for ( keys %$params ) { $form->{$_} = $params->{$_} if $params->{$_} }
+        $form->{id} = $id // undef;
+
+        my $result = AM->save_account( $c->slconfig, $form );
+
+        if ($result) {
+            $c->render( json => {%$form} );
+        }
+        else {
+            $c->render(
+                status => 500,
+                json   => {
+                    status  => 'error',
+                    message => 'Failed to save account'
+                }
+            );
+        }
+    }
+);
+$api->delete(
+    '/system/chart/accounts/:id' => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+        my $id     = $c->param('id');
+        my $dbs    = $c->dbs($client);
+
+        # Execute queries to check for related records
+        my $transactions =
+          $dbs->query( "SELECT 1 FROM acc_trans WHERE chart_id = ? LIMIT 1",
+            $id );
+        my $defaults =
+          $dbs->query( "SELECT 1 FROM defaults WHERE fldvalue = ? LIMIT 1",
+            $id );
+        my $parts = $dbs->query(
+"SELECT 1 FROM parts WHERE inventory_accno_id = ? OR income_accno_id = ? OR expense_accno_id = ? LIMIT 1",
+            $id, $id, $id );
+
+        if ( $transactions->rows > 0 ) {
+            return $c->render(
+                status => 400,
+                json   => {
+                    status  => 'error',
+                    message => 'Cannot delete account: transactions exist'
+                }
+            );
+        }
+        if ( $defaults->rows > 0 ) {
+            return $c->render(
+                status => 400,
+                json   => {
+                    status  => 'error',
+                    message => 'Cannot delete account: used in defaults'
+                }
+            );
+        }
+        if ( $parts->rows > 0 ) {
+            return $c->render(
+                status => 400,
+                json   => {
+                    status  => 'error',
+                    message => 'Cannot delete account: linked to parts'
+                }
+            );
+        }
+
+        my $form = new Form;
+        $form->{id} = $id;
+        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+        my $delete = AM->delete_account( $c->slconfig, $form );
+
+        if ($delete) {
+            $c->render(
+                json => { status => 'success', message => 'Account deleted' } );
+        }
+        else {
+            $c->render(
+                status => 500,
+                json   => {
+                    status  => 'error',
+                    message => 'Failed to delete account'
+                }
+            );
+        }
+    }
+);
+
 ##########################
 ####                  ####
 #### Goods & Services ####
