@@ -1673,76 +1673,7 @@ $api->get(
 );
 
 # Used for Customer/Vendor Forms
-$api->get(
-    '/arap/:vc/:id' => sub {
-        my $c      = shift;
-        my $id     = $c->param('id');
-        my $vc     = $c->param('vc');
-        my $client = $c->param('client');
 
-        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
-
-        my $form = Form->new;
-        $form->{id} = $id;
-        $form->{db} = $vc;
-
-        CT->create_links( $c->slconfig, $form );
-
-        delete $form->{arap_accounts};
-        delete $form->{payment_accounts};
-
-        if ( defined $form->{taxaccounts} ) {
-            my @tax_codes = split ' ', $form->{taxaccounts};
-            foreach my $code (@tax_codes) {
-                my $description_key = "tax_${code}_description";
-                delete $form->{$description_key}
-                  if exists $form->{$description_key};
-            }
-        }
-
-        $form->{discount} *= 100;
-
-        # Render the filtered JSON response
-        $c->render( json => {%$form} );
-    }
-);
-
-# Used for Customer/Vendor Forms
-$api->get(
-    '/arap/:vc/:id' => sub {
-        my $c      = shift;
-        my $id     = $c->param('id');
-        my $vc     = $c->param('vc');
-        my $client = $c->param('client');
-
-        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
-
-        my $form = Form->new;
-        $form->{id} = $id;
-        $form->{db} = $vc;
-
-        CT->create_links( $c->slconfig, $form );
-
-        delete $form->{arap_accounts};
-        delete $form->{payment_accounts};
-
-        if ( defined $form->{taxaccounts} ) {
-            my @tax_codes = split ' ', $form->{taxaccounts};
-            foreach my $code (@tax_codes) {
-                my $description_key = "tax_${code}_description";
-                delete $form->{$description_key}
-                  if exists $form->{$description_key};
-            }
-        }
-
-        $form->{discount} *= 100;
-
-        # Render the filtered JSON response
-        $c->render( json => {%$form} );
-    }
-);
-
-# Used for Customer/Vendor Forms
 $api->get(
     '/arap/:vc/' => sub {
         my $c      = shift;
@@ -1760,6 +1691,39 @@ $api->get(
 
         # Render the filtered JSON response
         $c->render( json => @results );
+    }
+);
+$api->get(
+    '/arap/:vc/:id' => sub {
+        my $c      = shift;
+        my $id     = $c->param('id');
+        my $vc     = $c->param('vc');
+        my $client = $c->param('client');
+
+        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+
+        my $form = Form->new;
+        $form->{id} = $id;
+        $form->{db} = $vc;
+
+        CT->create_links( $c->slconfig, $form );
+
+        delete $form->{arap_accounts};
+        delete $form->{payment_accounts};
+
+        if ( defined $form->{taxaccounts} ) {
+            my @tax_codes = split ' ', $form->{taxaccounts};
+            foreach my $code (@tax_codes) {
+                my $description_key = "tax_${code}_description";
+                delete $form->{$description_key}
+                  if exists $form->{$description_key};
+            }
+        }
+
+        $form->{discount} *= 100;
+
+        # Render the filtered JSON response
+        $c->render( json => {%$form} );
     }
 );
 
@@ -1783,6 +1747,55 @@ $api->post(
         $c->render( json => @results );
     }
 );
+$api->get(
+    '/:vc/history/' => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+        my $vc     = $c->param('vc');       # Either 'customer' or 'vendor'
+
+        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+
+        my $form = new Form;
+        $form->{db} = $vc;
+
+        $form->{transdatefrom} = $c->param('transdatefrom')
+          // '';                            # Start date (YYYY-MM-DD)
+        $form->{transdateto} = $c->param('transdateto')
+          // '';                            # End date (YYYY-MM-DD)
+        $form->{sort} = $c->param('sort')
+          // 'partnumber';    # Sorting field (e.g., 'name', 'date')
+        $form->{direction} = $c->param('direction')
+          // 'ASC';           # Sorting order ('ASC' or 'DESC')
+        $form->{employee} = $c->param('employee') // '';   # Employee ID or Name
+        $form->{business} = $c->param('business') // '';   # Business ID or Name
+        $form->{open}     = $c->param('open')
+          // '';    # Open transactions filter (1 or 0)
+        $form->{closed} = $c->param('closed')
+          // '';    # Closed transactions filter (1 or 0)
+        $form->{customernumber} = $c->param('customernumber') // ''
+          if $vc eq 'customer';
+        $form->{vendornumber} = $c->param('vendornumber') // ''
+          if $vc eq 'vendor';
+        $form->{name}    = $c->param('name')    // '';    # Customer/Vendor name
+        $form->{contact} = $c->param('contact') // '';    # Contact person name
+        $form->{email}   = $c->param('email')   // '';    # Email address
+        $form->{phone}   = $c->param('phone')   // '';    # Phone number
+        $form->{city}    = $c->param('city')    // '';    # City
+        $form->{state}   = $c->param('state')   // '';    # State/Province
+        $form->{zipcode} = $c->param('zipcode') // '';    # Zip/Postal Code
+        $form->{country} = $c->param('country') // '';    # Country
+        $form->{notes}   = $c->param('notes')   // '';
+        $form->{type}    = $c->param('type')    // 'invoice';
+        $form->{history} = 'summary';
+
+        # Notes or additional information
+
+        CT->get_history( $c->slconfig, $form );
+
+        # Format the response as JSON
+        $c->render( json => $form->{CT} );
+    }
+);
 
 $api->get(
     '/arap/transaction/:vc/:id' => sub {
@@ -1804,6 +1817,7 @@ $api->get(
         $form->{id} = $id;
         $form->{vc} = $vc;
         $form->create_links( $transaction_type, $c->slconfig, $vc );
+        Dumper( warn $form );
 
         # Amount multiplier for AR transactions
         my $amount_multiplier = $transaction_type eq 'AR' ? -1 : 1;
@@ -1839,11 +1853,12 @@ $api->get(
                   $form->{acc_trans}{"${transaction_type}_paid"}[ $i - 1 ];
                 push @payments,
                   {
-                    date    => $payment->{transdate},
-                    source  => $payment->{source},
-                    memo    => $payment->{memo},
-                    amount  => $amount_multiplier * $payment->{amount},
-                    account => "$payment->{accno}--$payment->{description}"
+                    date         => $payment->{transdate},
+                    source       => $payment->{source},
+                    memo         => $payment->{memo},
+                    exchangerate => $payment->{exchangerate},
+                    amount       => $amount_multiplier * $payment->{amount},
+                    account      => "$payment->{accno}--$payment->{description}"
                   };
             }
         }
@@ -1877,6 +1892,8 @@ $api->get(
             invDate       => $form->{transdate},
             dueDate       => $form->{duedate},
             poNumber      => $form->{ponumber},
+            currency      => $form->{currency},
+            exchangerate  => $form->{exchangerate},
             salesAccount  => $form->{acc_trans}{$transaction_type}[0],
             $vc_id_field  => $form->{$vc_id_field},
             lineitems     => \@line_items,
@@ -2207,11 +2224,12 @@ $api->post(
         $form->{vc}   = $vc eq 'vendor' ? 'vendor' : 'customer';
 
         # Basic transaction details
-        $form->{id}          = $id if $id;
-        $form->{invnumber}   = $data->{invNumber}   || '';
-        $form->{description} = $data->{description} || '';
-        $form->{transdate}   = $data->{invDate};
-        $form->{duedate}     = $data->{dueDate};
+        $form->{id}           = $id if $id;
+        $form->{invnumber}    = $data->{invNumber}   || '';
+        $form->{description}  = $data->{description} || '';
+        $form->{transdate}    = $data->{invDate};
+        $form->{duedate}      = $data->{dueDate};
+        $form->{exchangerate} = $data->{exchangerate} || 1;
 
         # Handle vendor/customer specific fields
         if ( $vc eq 'vendor' ) {
@@ -2255,10 +2273,11 @@ $api->post(
             $form->{paidaccounts}++;
             my $i = $form->{paidaccounts};
 
-            $form->{"datepaid_$i"} = $payment->{date};
-            $form->{"source_$i"}   = $payment->{source} || '';
-            $form->{"memo_$i"}     = $payment->{memo}   || '';
-            $form->{"paid_$i"}     = $payment->{amount};
+            $form->{"datepaid_$i"}     = $payment->{date};
+            $form->{"source_$i"}       = $payment->{source} || '';
+            $form->{"memo_$i"}         = $payment->{memo}   || '';
+            $form->{"paid_$i"}         = $payment->{amount};
+            $form->{"exchangerate_$i"} = $payment->{exchangerate} || 1;
 
             # Payment account with -- suffix
             $form->{ $form->{vc} eq 'vendor' ? "AP_paid_$i" : "AR_paid_$i" } =
