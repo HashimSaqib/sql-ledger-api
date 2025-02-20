@@ -9,6 +9,7 @@
 
 package Form;
 
+use DBIx::Simple;
 
 sub new {
   my ($type, $userspath) = @_;
@@ -467,13 +468,94 @@ sub header {
     print qq|Content-Type: text/html
 
 <head>
-  <title>$title</title>
-  <META NAME="robots" CONTENT="noindex,nofollow" />
+  <title>$self->{titlebar}</title>
+  <meta name="robots" content="noindex,nofollow" />
   $favicon
-  $stylesheet
-  $charset
-</head>
 
+  <link rel="stylesheet" href="css/select2-4.0.13.min.css" type="text/css"/>
+  <link rel="stylesheet" href="css/jquery-ui-1.12.1.min.css" type="text/css"/>
+
+  $stylesheet
+
+  $charset
+
+  <script src="js/jquery-3.6.0.min.js" type="text/javascript"></script>
+  <script src="js/jquery-ui-1.12.1.min.js" type="text/javascript"></script>
+
+  <script src="js/select2-4.0.13.min.js" type="text/javascript"></script>
+
+  <script src="js/rma.js" type="text/javascript"></script>
+|;
+		print q|
+<script>
+$(document).ready(function() {
+	var select2Config = {
+		dropdownAutoWidth : false,
+    	width: 'resolve',
+    	matcher: matchStartStringOnly,
+    	language: {
+       		noResults: function() {
+           		return "|;print qq|$selectNoEntriesText|;print q|";
+       		}
+   		}
+	};
+
+	$('select').select2(select2Config);
+});
+
+function matchStartStringOnly(params, data) {
+  // If there are no search terms, return all of the data
+  if ($.trim(params.term) === '') {
+    return data;
+  }
+
+  // Skip if there is no 'children' property
+  if (typeof data.id === 'undefined') {
+    return null;
+  }
+  	// most accountans pref to search for chart number, and display results by that, while others prefer the description of the chart, therefor we distinguish between number or text search an return different results
+	if(isNaN(params.term)){
+		if (data.id.toUpperCase().includes(params.term.toUpperCase())) {
+    		return data;
+  		}
+  	} else {
+  		if (data.id.toUpperCase().indexOf(params.term.toUpperCase()) == 0) {
+    		return data;
+  		}
+  	}
+
+  // Return `null` if the term should not be displayed
+  return null;
+}
+
+
+$(document).on('select2:open', () => {
+    document.querySelector('.select2-search__field').focus();
+});
+$(document).ready(function(){
+    var str = $('div.redirectmsg').text();
+    if ( str.length > 0 ) {
+    	setTimeout(function(){
+    	
+	    	$('div.redirectmsg').show();
+	        $('div.redirectmsg').fadeOut('slow', function () {
+	            $('div.redirectmsg').remove();
+	        });
+		}, 2000);
+	} else {
+	   	$('div.redirectmsg').hide();
+	}
+|;
+
+		@menuids = split( ':', $self->{menuids} );
+		for (@menuids) { print q|$("#menu| . $_ . qq|").trigger("click");\n|; }
+
+		print q|
+});
+</script>
+</head>
+|;
+		print qq|
 $self->{pre}
 |;
   }
@@ -2187,6 +2269,11 @@ sub dbconnect_noauto {
 
 }
 
+sub db_init {
+    my ( $self, $myconfig ) = @_;
+    $self->{dbh}       = $self->dbconnect_noauto($myconfig);
+    $self->{dbs}       = DBIx::Simple->connect( $self->{dbh} );
+}
 
 sub dbquote {
   my ($self, $var, $type) = @_;
@@ -2459,6 +2546,26 @@ sub get_employee {
   
   @name;
 
+}
+
+
+# linetax
+sub selecttax {
+  my ($self, $myconfig) = @_;
+
+  my $dbh = $self->dbconnect($myconfig);
+
+  $self->{linetax} = $dbh->selectrow_array("SELECT fldvalue FROM defaults WHERE fldname='linetax'");
+
+  return if !$self->{linetax};
+
+  $self->{selecttax} = "\n";
+  my $query = qq|SELECT accno, description FROM chart WHERE link LIKE '%$self->{ARAP}_tax%' ORDER BY accno|;
+  my $sth   = $dbh->prepare($query);
+  $sth->execute || $self->dberror($query);
+  while ( $ref = $sth->fetchrow_hashref(NAME_lc) ) {
+    $self->{selecttax} .= "$ref->{accno}--$ref->{description}\n" if index( $self->{taxaccounts}, $ref->{accno} ) != -1;
+  }
 }
 
 
@@ -3074,6 +3181,53 @@ sub all_business {
 }
 
 
+sub check_serialnumber {
+  my ($self, $module, $myconfig) = @_;
+  $self->db_init($myconfig);
+
+  my $query;
+
+  for my $i (1 .. $self->{rowcount} - 1){
+      next if !$self->{"serialnumber_$i"};
+      my $serialnumber = uc $self->{"serialnumber_$i"};
+      $serialnumber = $self->like($serialnumber);
+      if ($module eq 'ar'){
+        $query = qq|
+            SELECT invnumber
+            FROM invoice i
+            JOIN ap ON ap.id = i.trans_id
+            WHERE serialnumber LIKE ?
+            LIMIT 1
+        |;
+        my $invnumber = $self->{dbs}->query($query, $serialnumber)->list;
+        $self->info("Item with this serial number has not been purchased ..." . $self->{"serialnumber_$i"}) if !$invnumber;
+      }
+
+      if ($form->{id}){
+        $query = qq|
+            SELECT invnumber
+            FROM invoice i
+            JOIN $module ON $module.id = i.trans_id
+            WHERE serialnumber LIKE ?
+            AND id <> $form->{id}
+        |;
+      } else {
+        $query = qq|
+            SELECT invnumber
+            FROM invoice i
+            JOIN $module ON $module.id = i.trans_id
+            WHERE serialnumber LIKE ?
+        |;
+      }
+      my @invoices = $self->{dbs}->query($query, $serialnumber)->hashes;
+      for my $invoice (@invoices){
+          $self->info("Serial number already exists in invoice " . $invoice->{invnumber} . " ...");
+      }
+  }
+}
+
+
+
 sub create_links {
   my ($self, $module, $myconfig, $vc) = @_;
  
@@ -3208,9 +3362,11 @@ sub create_links {
                 ac.memo, ac.transdate, ac.cleared, ac.project_id,
 		p.projectnumber, ac.id, y.exchangerate,
 		l.description AS translation,
-		pm.description AS paymentmethod, y.paymentmethod_id
+		pm.description AS paymentmethod, y.paymentmethod_id,
+        ac.tax_chart_id, ac.linetaxamount, ctax.accno AS tax_accno, ctax.description AS tax_description
 		FROM acc_trans ac
 		JOIN chart c ON (c.id = ac.chart_id)
+        LEFT JOIN chart ctax ON (ctax.id = ac.tax_chart_id)
 		LEFT JOIN project p ON (p.id = ac.project_id)
 		LEFT JOIN payment y ON (y.trans_id = ac.trans_id AND ac.id = y.id)
 		LEFT JOIN paymentmethod pm ON (pm.id = y.paymentmethod_id)
@@ -5333,4 +5489,3 @@ sub date {
 
 
 1;
-
