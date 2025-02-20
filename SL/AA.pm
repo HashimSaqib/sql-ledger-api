@@ -1457,10 +1457,10 @@ sub all_names {
   
   $form->retrieve_report($myconfig, $dbh);
 
-  if (! $form->{id}) {
-    for (qw(sort direction initreport)) { delete $form->{$_} }
-    $form->save_form($myconfig, $dbh);
-  }
+#  if (! $form->{id}) {
+#    for (qw(sort direction initreport)) { delete $form->{$_} }
+#    $form->save_form($myconfig, $dbh);
+#  }
 
   my %defaults = $form->get_defaults($dbh, \@{['precision', 'company']});
   for (keys %defaults) { $form->{$_} = $defaults{$_} }

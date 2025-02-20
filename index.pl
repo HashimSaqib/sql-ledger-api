@@ -1851,10 +1851,10 @@ $api->get(
         my @line_items;
 
         # For each transaction item
-        for
-          my $i ( 0 .. $#{ $form->{acc_trans}{"${transaction_type}_amount"} } )
-        {
-            my $entry = $form->{acc_trans}{"${transaction_type}_amount"}[$i];
+        my @sorted_entries = sort { $a->{id} <=> $b->{id} }
+          @{ $form->{acc_trans}{"${transaction_type}_amount"} };
+
+        for my $entry (@sorted_entries) {
             push @line_items,
               {
                 accno       => $entry->{accno},

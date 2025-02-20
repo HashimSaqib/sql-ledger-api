@@ -3373,7 +3373,7 @@ sub create_links {
 		LEFT JOIN translation l ON (l.trans_id = c.id AND l.language_code = '$myconfig->{countrycode}')
 		WHERE ac.trans_id = $self->{id}
 		AND ac.fx_transaction = '0'
-		ORDER BY ac.transdate|;
+		ORDER BY ac.transdate, ac.id|;
     $sth = $dbh->prepare($query);
     $sth->execute || $self->dberror($query);
 
