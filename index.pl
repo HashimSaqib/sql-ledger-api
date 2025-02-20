@@ -1491,6 +1491,32 @@ $api->get(
 
 ###############################
 ####                       ####
+####        LINKS          ####
+####                       ####
+###############################
+
+$api->get(
+    '/create_links/:module' => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+        my $dbs    = $c->dbs($client);
+
+        my $line_tax_q =
+          $dbs->query( "SELECT fldvalue FROM defaults WHERE fldname = ?",
+            'linetax' )->hash;
+
+        my $line_tax = $line_tax_q ? 1 : 0;
+
+        $c->render(
+            json => {
+                linetax => $line_tax
+            }
+        );
+    }
+);
+
+###############################
+####                       ####
 ####         ARAP          ####
 ####                       ####
 ###############################
@@ -3899,51 +3925,6 @@ $api->post(
                 account             => $form->{accno},
                 reconciliation_date => $form->{recdate}
             }
-        );
-    }
-);
-
-$api->get(
-    '/print_test' => sub {
-        my $c    = shift;
-        my $form = new Form;
-
-        # Configure invoice data
-        $form->{vc}               = 'customer';
-        $form->{id}               = 10259;
-        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=neoledger";
-
-        # Fetch invoice data
-        IS->retrieve_invoice( $c->slconfig, $form );
-        IS->invoice_details( $c->slconfig, $form );
-
-        # Configure template settings
-        $form->{templates}     = './templates/neoledger';    # Use relative path
-        $form->{language_code} = "en";
-        $form->{format}        = "pdf";
-        $form->{tmpfile}       = "invoice.tex";
-
-        # Load and process template
-        my $template_path = "./templates/neoledger/invoice.tex";
-        open my $fh, '<', $template_path or die "Template error: $!";
-        my @template_lines = <$fh>;
-        close $fh;
-        my $processed_content =
-          $form->process_template( $c->slconfig, @template_lines );
-
-        warn( Dumper $processed_content );
-
-        # Generate PDF
-        open $fh, '>', './invoice.tex' or die "Could not write LaTeX: $!";
-        print $fh $processed_content;
-        close $fh;
-        $form->run_latex( "./output/", 0, 1 );    # Use XeLaTeX
-
-        # Return PDF
-        $c->render_file(
-            filepath => "./output/invoice.pdf",
-            filename => "invoice_$form->{id}.pdf",
-            format   => 'pdf'
         );
     }
 );

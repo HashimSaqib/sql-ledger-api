@@ -95,7 +95,11 @@ sub post_transaction {
   my $fxinvamount = 0;
   for (1 .. $form->{rowcount}) {
     $fxinvamount += $amount{fxamount}{$_} = $form->parse_amount($myconfig, $form->{"amount_$_"});
+    $form->{"linetaxamount_$_"} = $form->parse_amount( $myconfig, $form->{"linetaxamount_$_"} );
+    # set $form->{linetax} = 1 if linetax is enabled
+    $form->{linetax} = ($form->{"linetaxamount_$_"} > 0) if !$form->{linetax}; 
   }
+    $form->{linetax} *= 1; # set to 0 if null;
 
   for (qw(taxincluded onhold)) { $form->{$_} *= 1 }
   
@@ -133,6 +137,10 @@ sub post_transaction {
         $cleared = $form->dbquote($form->{"cleared_$i"}, SQL_DATE);
       }
 
+      # linetax accounts
+      my ($tax_accno) = split /--/, $form->{"tax_$i"};
+      my ($tax_chart_id) = $dbh->selectrow_array("SELECT id FROM chart WHERE accno = '$tax_accno'");
+
       push @{ $form->{acc_trans}{lineitems} }, {
         accno => $accno,
         amount => $amount{fxamount}{$i},
@@ -140,6 +148,8 @@ sub post_transaction {
         description => $form->{"description_$i"},
         cleared => $cleared,
         fx_transaction => 0,
+        tax_chart_id => $tax_chart_id,
+        linetaxamount => $form->{"linetaxamount_$i"},
         id => $i };
 
       if ($form->{currency} ne $form->{defaultcurrency}) {
@@ -297,7 +307,8 @@ sub post_transaction {
 	      dcn = |.$dbh->quote($form->{dcn}).qq|,
 	      bank_id = (SELECT id FROM chart WHERE accno = '$paymentaccno'),
 	      paymentmethod_id = $paymentmethod_id,
-	      language_code = '$form->{language_code}'
+	      language_code = '$form->{language_code}',
+        linetax = $form->{linetax}
 	      WHERE id = $form->{id}|;
   $dbh->do($query) || $form->dberror($query);
 
@@ -329,14 +340,16 @@ sub post_transaction {
     # insert detail records in acc_trans
     $ref->{amount} = $form->round_amount($ref->{amount}, $form->{precision});
     if ($ref->{amount}) {
+      $ref->{tax_chart_id} *= 1;
+      $ref->{linetaxamount} *= 1;
       $query = qq|INSERT INTO acc_trans (trans_id, chart_id, amount, transdate,
-		  project_id, memo, fx_transaction, cleared, approved, id)
+		  project_id, memo, fx_transaction, cleared, approved, id, tax_chart_id, linetaxamount)
 		  VALUES ($form->{id}, (SELECT id FROM chart
 					WHERE accno = '$ref->{accno}'),
 		  $ref->{amount} * $ml * $arapml, '$form->{transdate}',
 		  $ref->{project_id}, |.$dbh->quote($ref->{description}).qq|,
 		  '$ref->{fx_transaction}', $ref->{cleared}, '$approved',
-		  $ref->{id})|;
+      $ref->{id}, $ref->{tax_chart_id}, $ref->{linetaxamount})|;
       $dbh->do($query) || $form->dberror($query);
     }
   }
