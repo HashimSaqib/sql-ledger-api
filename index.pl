@@ -1239,7 +1239,7 @@ $api->get(
         $checked{person}      = "checked" if $form->{typeofcontact} eq 'person';
         $checked{roundchange} = "checked" if $form->{roundchange};
 
-        for (qw(cdt checkinventory hideaccounts forcewarehouse)) {
+        for (qw(cdt checkinventory hideaccounts linetax forcewarehouse)) {
             $checked{$_} = "checked" if $form->{$_};
         }
 
@@ -1276,7 +1276,7 @@ $api->post(
         $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
 
         $form->{optional} =
-"company address tel fax companyemail companywebsite yearend weightunit businessnumber closedto revtrans audittrail method cdt namesbynumber typeofcontact roundchange referenceurl annualinterest latepaymentfee restockingcharge checkinventory hideaccounts forcewarehouse glnumber sinumber sonumber vinumber batchnumber vouchernumber ponumber sqnumber rfqnumber partnumber projectnumber employeenumber customernumber vendornumber lock_glnumber lock_sinumber lock_sonumber lock_ponumber lock_sqnumber lock_rfqnumber lock_employeenumber lock_customernumber lock_vendornumber";
+"company address tel fax companyemail companywebsite yearend weightunit businessnumber closedto revtrans audittrail method cdt namesbynumber typeofcontact roundchange referenceurl annualinterest latepaymentfee restockingcharge checkinventory hideaccounts linetax forcewarehouse glnumber sinumber sonumber vinumber batchnumber vouchernumber ponumber sqnumber rfqnumber partnumber projectnumber employeenumber customernumber vendornumber lock_glnumber lock_sinumber lock_sonumber lock_ponumber lock_sqnumber lock_rfqnumber lock_employeenumber lock_customernumber lock_vendornumber";
 
         # Save the defaults
         my $result = AM->save_defaults( $c->slconfig, $form );
@@ -1859,7 +1859,9 @@ $api->get(
               {
                 accno       => $entry->{accno},
                 description => $entry->{memo} || '',
-                amount      => $amount_multiplier * ( -$entry->{amount} )
+                amount      => $amount_multiplier * ( -$entry->{amount} ),
+                taxAccount  => $entry->{tax_accno},
+                taxAmount   => $entry->{linetaxamount},
               };
         }
 
@@ -2280,8 +2282,10 @@ $api->post(
         for my $i ( 1 .. $form->{rowcount} ) {
             my $line   = $data->{lines}[ $i - 1 ];
             my $amount = $line->{amount};
-            $form->{"amount_$i"}      = $amount;
-            $form->{"description_$i"} = $line->{description};
+            $form->{"amount_$i"}        = $amount;
+            $form->{"description_$i"}   = $line->{description};
+            $form->{"tax_$i"}           = $line->{taxAccount};
+            $form->{"linetaxamount_$i"} = $line->{taxAmount};
             $form->{ $form->{vc} eq 'vendor' ? "AP_amount_$i" : "AR_amount_$i" }
               = $line->{account};
 
