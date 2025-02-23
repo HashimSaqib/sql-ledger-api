@@ -26,6 +26,7 @@ use SL::AA;
 use SL::IS;
 use SL::IR;
 use SL::CA;
+use SL::CP;
 use SL::GL;
 use SL::RC;
 use DateTime;
@@ -36,129 +37,6 @@ use POSIX      qw(strftime);
 use Time::Piece;
 use Mojo::Template;
 use File::Slurp;
-
-sub num2text {
-    my ($amount) = @_;
-
-    # Define mapping for digits, teens, tens, and scale words.
-    my %numbername = (
-        0          => 'zero',
-        1          => 'one',
-        2          => 'two',
-        3          => 'three',
-        4          => 'four',
-        5          => 'five',
-        6          => 'six',
-        7          => 'seven',
-        8          => 'eight',
-        9          => 'nine',
-        10         => 'ten',
-        11         => 'eleven',
-        12         => 'twelve',
-        13         => 'thirteen',
-        14         => 'fourteen',
-        15         => 'fifteen',
-        16         => 'sixteen',
-        17         => 'seventeen',
-        18         => 'eighteen',
-        19         => 'nineteen',
-        20         => 'twenty',
-        30         => 'thirty',
-        40         => 'forty',
-        50         => 'fifty',
-        60         => 'sixty',
-        70         => 'seventy',
-        80         => 'eighty',
-        90         => 'ninety',
-        100        => 'hundred',
-        1000       => 'thousand',
-        1000000    => 'million',
-        1000000000 => 'billion',
-
-        # Extend further if needed.
-    );
-
-    # Anonymous sub to handle numbers in the tens (and ones)
-    my $format_ten = sub {
-        my ($num)  = @_;
-        my $text   = "";
-        my @digits = split //, $num;
-        if ( $num > 20 ) {
-
-            # For numbers greater than 20, take the tens digit.
-            $text = $numbername{ $digits[0] * 10 };
-
-            # The ones digit
-            $num = $digits[1];
-        }
-        else {
-            # For numbers 20 or below, the number is directly in the hash.
-            $text = $numbername{$num};
-            $num  = 0;
-        }
-        $text .= " " . $numbername{$num} if $num;
-        return $text;
-    };
-
-    # Special case for zero
-    return $numbername{0} unless $amount;
-
-    my @textnumber = ();
-
-    # Work with the absolute value of the number.
-    my @digits = reverse split //, abs($amount);
-    my @numblock;
-
-    # Break the number into groups of 3 digits (from right to left)
-    while (@digits) {
-        my @group;
-        for ( 1 .. 3 ) {
-            push @group, shift @digits if @digits;
-        }
-
-        # Reversing to restore the original order in the chunk.
-        push @numblock, join( '', reverse @group );
-    }
-
-    # Process each 3-digit block starting with the most significant
-    while (@numblock) {
-        my $i =
-          $#numblock; # Current block index (0 for units, 1 for thousands, etc.)
-        my $block = $numblock[$i] + 0;    # Convert to number
-
-        # Skip the block if it is zero.
-        if ( $block == 0 ) {
-            pop @numblock;
-            next;
-        }
-
-        # Process hundreds (if block is 100 or more)
-        if ( $block > 99 ) {
-            my @block_digits = split //, $numblock[$i];
-            push @textnumber, $numbername{ $block_digits[0] };
-            push @textnumber, $numbername{100};
-            $block -= $block_digits[0] * 100;
-        }
-
-        # Process tens and ones
-        if ( $block > 9 ) {
-            push @textnumber, $format_ten->($block);
-        }
-        elsif ( $block > 0 ) {
-            push @textnumber, $numbername{$block};
-        }
-
-       # Add the scale (thousand, million, etc.) if this is not the units block.
-        if ( $i > 0 ) {
-            my $scale = 10**( $i * 3 );
-            push @textnumber, $numbername{$scale} if exists $numbername{$scale};
-        }
-
-        pop @numblock;
-    }
-
-    return join( ' ', @textnumber );
-}
 
 app->config( hypnotoad => { listen => ['http://*:3000'] } );
 
@@ -3691,9 +3569,8 @@ sub build_vc {
     my ( $c, $id, $vc ) = @_;
 
     my $client = $c->param('client');
-    my $dbs    = $c->app->dbs($client);
+    my $dbs    = $c->dbs($client);
 
-    # Decide which ledger table and ID field to look up from
     my ( $ledger_table, $vc_id_col, $vc_table );
     if ( $vc eq 'customer' ) {
         $ledger_table = 'ar';
@@ -3706,96 +3583,76 @@ sub build_vc {
         $vc_table     = 'vendor';
     }
 
-    # 1) Find the linked ID in the ledger (ar/ap)
     my $ledger_row =
       $dbs->query( "SELECT $vc_id_col FROM $ledger_table WHERE id = ?", $id )
       ->hash;
+    return {} unless $ledger_row && $ledger_row->{$vc_id_col};
 
-    return {} unless $ledger_row;
-    my $trans_id = $ledger_row->{$vc_id_col} or return {};
-
-    # 2) Main customer/vendor row
+    my $trans_id = $ledger_row->{$vc_id_col};
     my $vc_row =
       $dbs->query( "SELECT * FROM $vc_table WHERE id = ?", $trans_id )->hash
       // {};
 
-    # 3) Address row (if multiple, pick one by your own criteria)
     my $address_row =
       $dbs->query( "SELECT * FROM address WHERE trans_id = ? LIMIT 1",
         $trans_id )->hash // {};
-
-    # 4) Contact row (if multiple, pick one by your own criteria)
     my $contact_row =
       $dbs->query( "SELECT * FROM contact WHERE trans_id = ? LIMIT 1",
         $trans_id )->hash // {};
 
-    # Utility to pick contact's non-empty field over vendor/customer field
-    sub prefer_contact {
-        my ( $contact_val, $vc_val ) = @_;
-        return ( defined($contact_val) && length($contact_val) )
-          ? $contact_val
-          : $vc_val;
-    }
+    my $phone = $contact_row->{phone} || $vc_row->{phone} || '';
+    my $fax   = $contact_row->{fax}   || $vc_row->{fax}   || '';
+    my $email = $contact_row->{email} || $vc_row->{email} || '';
 
-# Build contact name from contact row first; fallback to 'contact' field in vc table
     my $contact_name = '';
-    if ( defined $contact_row->{firstname} || defined $contact_row->{lastname} )
-    {
-        $contact_name = join( " ",
-            grep { defined $_ && length $_ }
+    if ( $contact_row->{firstname} || $contact_row->{lastname} ) {
+        $contact_name = join( ' ',
+            grep { $_ }
               ( $contact_row->{firstname}, $contact_row->{lastname} ) );
     }
-    $contact_name ||= ( $vc_row->{contact} // '' );
-
-    my $phone = prefer_contact( $contact_row->{phone}, $vc_row->{phone} );
-    my $fax   = prefer_contact( $contact_row->{fax},   $vc_row->{fax} );
-    my $email = prefer_contact( $contact_row->{email}, $vc_row->{email} );
+    $contact_name ||= $vc_row->{contact} // '';
 
     my %result = (
-        address1      => $address_row->{address1} // '',
-        address2      => $address_row->{address2} // '',
-        city          => $address_row->{city}     // '',
-        state         => $address_row->{state}    // '',
-        zipcode       => $address_row->{zipcode}  // '',
-        country       => $address_row->{country}  // '',
-        contact       => $contact_name,
-        customerphone => $phone // '',
-        customerfax   => $fax   // '',
-        email         => $email // '',
+        name     => $vc_row->{name}          // '',
+        address1 => $address_row->{address1} // '',
+        address2 => $address_row->{address2} // '',
+        city     => $address_row->{city}     // '',
+        state    => $address_row->{state}    // '',
+        zipcode  => $address_row->{zipcode}  // '',
+        country  => $address_row->{country}  // '',
+        contact  => $contact_name,
+        email    => $email,
+        (
+            $vc eq 'customer'
+            ? (
+                customerphone => $phone,
+                customerfax   => $fax,
+              )
+            : (
+                vendorphone     => $phone,
+                vendorfax       => $fax,
+                vendortaxnumber => $vc_row->{taxnumber} // '',
+            )
+        ),
     );
 
     return \%result;
 }
 
-# ---------------------------------------
-# Integrating build_vc into build_invoice
-# ---------------------------------------
 sub build_invoice {
     my ( $c, $client, $vc, $id ) = @_;
 
     my $invoice_type = $vc eq 'vendor' ? 'AP' : 'AR';
-    my $arap_key     = $invoice_type;                   # 'AR' or 'AP'
+    my $arap_key     = $invoice_type;
 
-    # Prepare to retrieve from Ledger
-    $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
     my $form = Form->new;
     $form->{id} = $id;
     $form->{vc} = $vc;
 
-    # ------------------------------
-    # 1) Build letterhead defaults
-    # ------------------------------
     my $letterhead = build_letterhead($c);
+    $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
 
-    # This returns a hashref like {
-    #   company        => 'My Company Inc',
-    #   address        => '123 Main St.\nCity, State Zip',
-    #   tel            => '555-123-4567',
-    #   companyemail   => 'info@mycompany.com',
-    #   companywebsite => 'www.mycompany.com'
-    # }
-
-    # Retrieve invoice data via SL
+    # Retrieve & populate $form->{invoice_details}, etc.
     if ( $invoice_type eq 'AR' ) {
         IS->retrieve_invoice( $c->slconfig, $form );
         IS->invoice_details( $c->slconfig, $form );
@@ -3804,135 +3661,88 @@ sub build_invoice {
         IR->retrieve_invoice( $c->slconfig, $form );
         IR->invoice_details( $c->slconfig, $form );
     }
-    warn( Dumper $form );
 
-    # Build invoice items into the "number" array for TeX
-    my @number_array;
+    # Flatten line items into parallel arrays.
+    my (
+        @items,      @numbers,       @descriptions, @deliverydates,
+        @qtys,       @units,         @makes,        @models,
+        @sellprices, @discountrates, @linetotals
+    );
+
     my $subtotal = 0;
+    my $i        = 1;
+    foreach my $item ( @{ $form->{invoice_details} } ) {
+        my $qty      = $item->{qty}         || 0;
+        my $price    = $item->{fxsellprice} || $item->{sellprice} || 0;
+        my $discount = $item->{discount}    || 0;
 
-    if ( $form->{invoice_details} && ref $form->{invoice_details} eq 'ARRAY' ) {
-        foreach my $item ( @{ $form->{invoice_details} } ) {
-            my $qty       = $item->{qty}         || 0;
-            my $price     = $item->{fxsellprice} || $item->{sellprice} || 0;
-            my $discount  = $item->{discount}    || 0;
-            my $linetotal = $qty * $price * ( 1 - $discount );
-            $subtotal += $linetotal;
-            push @number_array,
-              {
-                number       => $item->{partnumber}  || '',
-                description  => $item->{description} || '',
-                deliverydate => $form->{transdate}   || '',
-                qty          => "$qty",
-                unit         => $item->{unit} || '',
-                make         => defined $item->{make}  ? $item->{make}  : '',
-                model        => defined $item->{model} ? $item->{model} : '',
-                sellprice    => sprintf( "%.2f", $price ),
-                discountrate => $discount ? $discount * 100 : '0%',
-                linetotal    => sprintf( "%.2f", $linetotal ),
-              };
-        }
+        my $linetotal = $qty * $price * ( 1 - $discount );
+        $subtotal += $linetotal;
+        push @items, $i;
+        push @numbers,       ( $item->{partnumber}  || '' );
+        push @descriptions,  ( $item->{description} || '' );
+        push @deliverydates, ( $form->{transdate}   || '' );
+        push @qtys, $form->format_amount( $c->slconfig, $qty );
+        push @units,  ( $item->{unit}  || '' );
+        push @makes,  ( $item->{make}  || '' );
+        push @models, ( $item->{model} || '' );
+        push @sellprices, $form->format_amount( $c->slconfig, $price );
+        push @discountrates, ( $discount ? $discount * 100 : '0' );
+        push @linetotals, $form->format_amount( $c->slconfig, $linetotal );
+        $i++;
     }
 
-    # Build the "tax" array from acc_trans
-    my @tax_array;
-    my $taxtotal;
-    if ( $form->{acc_trans}{ $arap_key . '_tax' }
-        && ref $form->{acc_trans}{ $arap_key . '_tax' } eq 'ARRAY' )
-    {
-        foreach my $t ( @{ $form->{acc_trans}{ $arap_key . '_tax' } } ) {
-            my $desc    = $t->{description} || '';
-            my $accno   = $t->{accno}       || '';
-            my $tax_amt = $t->{amount}      || 0;
-            my ($rate)  = ( $desc =~ /(\d+)%/ );
-            $rate ||= 0;
-            my $base = $form->{netamount} || 0;
-            $taxtotal += $tax_amt;
-            push @tax_array,
-              {
-                taxdescription => $desc,
-                taxbase        => sprintf( "%.2f", $base ),
-                taxrate        => "$rate",
-                tax            => sprintf( "%.2f", $tax_amt ),
-                taxnumber      => $accno,
-              };
-        }
+    # Flatten tax data into parallel arrays.
+    my ( @taxdescriptions, @taxbases, @taxrates, @taxamounts );
+    my $taxtotal = 0;
+    foreach my $t ( @{ $form->{acc_trans}{ $arap_key . '_tax' } } ) {
+        my $tax_amt = $t->{amount} || 0;
+        $taxtotal += $tax_amt;
+
+        push @taxdescriptions, ( $t->{description} =~ s/%//gr || '' );
+
+        push @taxbases,
+          $form->format_amount( $c->slconfig, $form->{netamount} || 0 );
+        push @taxrates, ( $t->{description} =~ /(\d+)%/ ? $1 : 0 );
+        push @taxamounts, $form->format_amount( $c->slconfig, $tax_amt );
     }
 
-    # $ml will be -1 if it's a credit or debit invoice
-    my $ml = 1;
-    if (
-        $form->{type}
-        && (   $form->{type} eq 'credit_invoice'
+    # Determine multiplier for payments if needed:
+    my $ml = (
+        $form->{type} && ( $form->{type} eq 'credit_invoice'
             || $form->{type} eq 'debit_invoice' )
-      )
-    {
-        $ml = -1;
-    }
+    ) ? -1 : 1;
+    $ml *= -1 if $vc eq 'customer';
 
-    if ( $vc eq 'customer' ) { $ml = -1; }
-
-    # Payment info: Normalize keys to match the template's expectations.
-    # Keep track of the total paid here.
-    my @payment_array;
+    # Flatten payment data into parallel arrays.
+    my ( @paymentdates, @paymentaccounts, @paymentsources, @paymentamounts );
     my $paid_sum = 0;
+    foreach my $pay ( @{ $form->{acc_trans}{ $arap_key . '_paid' } } ) {
+        my $payment_amount = ( $pay->{amount} || 0 ) * $ml;
 
-    if ( $form->{acc_trans}{ $arap_key . '_paid' }
-        && ref $form->{acc_trans}{ $arap_key . '_paid' } eq 'ARRAY' )
-    {
-        foreach my $pay ( @{ $form->{acc_trans}{ $arap_key . '_paid' } } ) {
-            my $payment_amount = ( $pay->{amount} || 0 ) * $ml;
-            push @payment_array,
-              {
-                paymentdate    => $pay->{transdate}   || "",
-                paymentaccount => $pay->{description} || "",
-                paymentsource  => $pay->{source}      || "",
-                payment        => $payment_amount,
-                exchangerate   => $pay->{exchangerate} || "",
-                memo           => $pay->{memo}         || "",
-              };
-            $paid_sum += $payment_amount;
-        }
-    }
-    elsif ( $form->{payment} && ref $form->{payment} eq 'ARRAY' ) {
-        foreach my $pay ( @{ $form->{payment} } ) {
-            my $payment_amount = ( $pay->{amount} || 0 ) * $ml;
-            push @payment_array,
-              {
-                paymentdate    => $pay->{date}        || "",
-                paymentaccount => $pay->{description} || "",
-                paymentsource  => $pay->{source}      || "",
-                payment        => $payment_amount,
-                exchangerate   => $pay->{exchangerate} || "",
-                memo           => $pay->{memo}         || "",
-              };
-            $paid_sum += $payment_amount;
-        }
+        push @paymentdates,    ( $pay->{transdate}   || '' );
+        push @paymentaccounts, ( $pay->{description} || '' );
+        push @paymentsources,  ( $pay->{source}      || '' );
+        push @paymentamounts,
+          $form->format_amount( $c->slconfig, $payment_amount );
+
+        $paid_sum += $payment_amount;
     }
 
-    # If no payments, paid = 0
-    my $paid = scalar(@payment_array) ? $paid_sum : 0;
-
-    # total = subtotal - paid
+    my $paid  = $paid_sum;
     my $total = ( $subtotal + $taxtotal ) - $paid;
 
-    # --------------------------------------------------------
-    # 2) Get Bill-to data from build_vc (ar/ap -> customer/vendor)
-    # --------------------------------------------------------
+    # Grab vendor/customer info
     my $vc_data = build_vc( $c, $id, $vc );
 
-    # --------------------------------------------------------
-    # 3) Get Ship-to data from the shipto table
-    # --------------------------------------------------------
-    my $dbs = $c->app->dbs($client);
-
+    # Attempt to get one row from "shipto"
+    my $dbs = $c->dbs($client);
     my $shipto_row =
       $dbs->query( "SELECT * FROM shipto WHERE trans_id = ? LIMIT 1", $id )
       ->hash;
 
     my %shipto_data;
     if ($shipto_row) {
-
-        # Use the explicit shipto row
         %shipto_data = (
             shiptoname     => $shipto_row->{shiptoname}     || "",
             shiptoaddress1 => $shipto_row->{shiptoaddress1} || "",
@@ -3948,10 +3758,8 @@ sub build_invoice {
         );
     }
     else {
-        # No explicit shipto row. Fallback logic:
+        # Fallback if no shipto row
         if ( $vc eq 'customer' ) {
-
-            # Copy from vc_data (bill-to) fields
             %shipto_data = (
                 shiptoname     => $form->{customer}         || '',
                 shiptoaddress1 => $vc_data->{address1}      || '',
@@ -3967,298 +3775,198 @@ sub build_invoice {
             );
         }
         else {
-            # vc = vendor -> use letterhead data as fallback
+            my @address_lines = split( /\n/, $letterhead->{address} || '' );
             %shipto_data = (
                 shiptoname     => $letterhead->{company} || '',
-                shiptoaddress1 => $letterhead->{address} || '',
-                shiptoaddress2 => '',
-                shiptocity     => '',
+                shiptoaddress1 => $address_lines[0]      || '',
+                shiptoaddress2 => $address_lines[1]      || '',
+                shiptocity     => $address_lines[2]      || '',
                 shiptostate    => '',
                 shiptozipcode  => '',
-                shiptocountry  => '',
-                shiptocontact  =>
-                  '',    # or $letterhead->{company} again, if desired
-                shiptophone => $letterhead->{tel} || '',
-                shiptofax   => '',    # only if you have fax in letterhead
-                shiptoemail => $letterhead->{companyemail} || '',
+                shiptocountry  => $address_lines[3] || '',
+                shiptocontact  => '',
+                shiptophone    => $letterhead->{tel} || '',
+                shiptofax      => '',
+                shiptoemail    => $letterhead->{companyemail} || '',
             );
         }
     }
 
-    # --------------------------------------------------------
-    # 4) Map everything into %data for your template
-    #    and also incorporate letterhead for "company", "address", etc.
-    # --------------------------------------------------------
-
-    # If $form->{company} is empty, fallback to letterhead's "company".
-    # Same for address, tel, companyemail, etc.
-    # (Adjust as needed if you want letterhead to always override!)
-    my $final_company        = $form->{company} || $letterhead->{company} || '';
-    my $final_address        = $letterhead->{address}        || '';
-    my $final_tel            = $letterhead->{tel}            || '';
-    my $final_companyemail   = $letterhead->{companyemail}   || '';
-    my $final_companywebsite = $letterhead->{companywebsite} || '';
+    my $num2text;
+    if ( $form->{language_code} ne "" ) {
+        $num2text = new CP $form->{language_code};
+    }
+    else {
+        $num2text = new CP $c->slconfig->{countrycode};
+    }
+    $num2text->init;
 
     my %data = (
-        "templates" => "./templates/neoledger",
 
-        # --- Bill-to fields ---
-        "name"          => $form->{customer}         || '',
-        "address1"      => $vc_data->{address1}      || "",
-        "address2"      => $vc_data->{address2}      || "",
-        "city"          => $vc_data->{city}          || "",
-        "state"         => $vc_data->{state}         || "",
-        "zipcode"       => $vc_data->{zipcode}       || "",
-        "country"       => $vc_data->{country}       || "",
-        "contact"       => $vc_data->{contact}       || "",
-        "customerphone" => $vc_data->{customerphone} || "",
-        "customerfax"   => $vc_data->{customerfax}   || "",
-        "email"         => $vc_data->{email}         || "",
+        # Basic address / vendor-customer info
+        name => $vc_data->{name}
+          || '',
+        address1 => $vc_data->{address1}
+          || '',
+        address2 => $vc_data->{address2}
+          || '',
+        city => $vc_data->{city}
+          || '',
+        state => $vc_data->{state}
+          || '',
+        zipcode => $vc_data->{zipcode}
+          || '',
+        country => $vc_data->{country}
+          || '',
+        contact => $vc_data->{contact}
+          || '',
+        email => $vc_data->{email}
+          || '',
+        vendortaxnumber => $vc_data->{vendortaxnumber}
+          || '',
+        (
+            $vc eq 'customer'
+            ? (
+                customerphone => $vc_data->{customerphone}
+                  || '',
+                customerfax => $vc_data->{customerfax}
+                  || '',
+              )
+            : (
+                vendorphone => $vc_data->{vendorphone}
+                  || '',
+                vendorfax => $vc_data->{vendorfax}
+                  || '',
+            )
+        ),
 
-        # --- Ship-to fields ---
-        "shiptoname"     => $shipto_data{shiptoname},
-        "shiptoaddress1" => $shipto_data{shiptoaddress1},
-        "shiptoaddress2" => $shipto_data{shiptoaddress2},
-        "shiptocity"     => $shipto_data{shiptocity},
-        "shiptostate"    => $shipto_data{shiptostate},
-        "shiptozipcode"  => $shipto_data{shiptozipcode},
-        "shiptocountry"  => $shipto_data{shiptocountry},
-        "shiptocontact"  => $shipto_data{shiptocontact},
-        "shiptophone"    => $shipto_data{shiptophone},
-        "shiptofax"      => $shipto_data{shiptofax},
-        "shiptoemail"    => $shipto_data{shiptoemail},
+        # Shipto data
+        shiptoname     => $shipto_data{shiptoname},
+        shiptoaddress1 => $shipto_data{shiptoaddress1},
+        shiptoaddress2 => $shipto_data{shiptoaddress2},
+        shiptocity     => $shipto_data{shiptocity},
+        shiptostate    => $shipto_data{shiptostate},
+        shiptozipcode  => $shipto_data{shiptozipcode},
+        shiptocountry  => $shipto_data{shiptocountry},
+        shiptocontact  => $shipto_data{shiptocontact},
+        shiptophone    => $shipto_data{shiptophone},
+        shiptofax      => $shipto_data{shiptofax},
+        shiptoemail    => $shipto_data{shiptoemail},
 
-        # --- Invoice meta ---
-        "invnumber"     => $form->{invnumber}     || '',
-        "invdate"       => $form->{transdate}     || '',
-        "duedate"       => $form->{duedate}       || '',
-        "ordnumber"     => $form->{ordnumber}     || '',
-        "employee"      => $form->{employee}      || '',
-        "shippingpoint" => $form->{shippingpoint} || '',
-        "shipvia"       => $form->{shipvia}       || '',
-        "taxincluded"   => $form->{taxincluded}   || 0,
+        # Invoice meta
+        invnumber     => $form->{invnumber}     || '',
+        invdate       => $form->{transdate}     || '',
+        duedate       => $form->{duedate}       || '',
+        ordnumber     => $form->{ordnumber}     || '',
+        employee      => $form->{employee}      || '',
+        shippingpoint => $form->{shippingpoint} || '',
+        shipvia       => $form->{shipvia}       || '',
+        taxincluded   => $form->{taxincluded}   || 0,
 
-        # --- Totals ---
-        "subtotal" => sprintf( "%.2f", $subtotal ),
-        "paid"     => sprintf( "%.2f", $paid ),
-        "invtotal" => sprintf( "%.2f", $total ),
-        "total"    => sprintf( "%.2f", $total ),
+        # Totals
+        subtotal    => $form->format_amount( $c->slconfig, $subtotal ),
+        paid        => $form->format_amount( $c->slconfig, $paid ),
+        invtotal    => $form->format_amount( $c->slconfig, $total ),
+        total       => $form->format_amount( $c->slconfig, $total ),
+        text_amount => $num2text->num2text($total),
+        decimal     => $form->{decimal}  || '00',
+        currency    => $form->{currency} || '',
+        notes       => $form->{notes}    || '',
+        terms       => $form->{terms}    || '0',
 
-        "text_amount" => &num2text($total),
-        "decimal"     => $form->{decimal}  || '00',
-        "currency"    => $form->{currency} || '',
+        # Letterhead
+        company      => $letterhead->{company}      || '',
+        address      => $letterhead->{address}      || '',
+        tel          => $letterhead->{tel}          || '',
+        companyemail => $letterhead->{companyemail} || '',
 
-        # --- Notes, Terms, etc. ---
-        "notes"             => join( "\n", grep { $_ } ( $form->{notes} ) ),
-        "terms"             => $form->{terms}            || '0',
-        "latepaymentfee"    => $form->{latepaymentfee}   || "",
-        "annualinterest"    => $form->{annualinterest}   || "",
-        "restockingcharge"  => $form->{restockingcharge} || "",
-        "sumcarriedforward" => sprintf( "%.2f", 0 ),
+        # ---- PARALLEL ARRAYS FOR LINE ITEMS ----
+        runningnumber => \@items,
+        number        => \@numbers,
+        description   => \@descriptions,
+        deliverydate  => \@deliverydates,
+        qty           => \@qtys,
+        unit          => \@units,
+        make          => \@makes,
+        model         => \@models,
+        sellprice     => \@sellprices,
+        discountrate  => \@discountrates,
+        linetotal     => \@linetotals,
 
-        # --- Company data (from letterhead if form is missing) ---
-        "company"        => $final_company,
-        "address"        => $final_address,
-        "tel"            => $final_tel,
-        "fax"            => "",
-        "companyemail"   => $final_companyemail,
-        "companywebsite" => $final_companywebsite,
-        "language_code"  => $form->{language_code} || '',
+        # ---- PARALLEL ARRAYS FOR TAXES ----
+        taxdescription => \@taxdescriptions,
+        taxbase        => \@taxbases,
+        taxrate        => \@taxrates,
+        tax            => \@taxamounts,
 
-        # --- Invoice items, taxes, and payments ---
-        "number"  => \@number_array,
-        "tax"     => \@tax_array,
-        "payment" => \@payment_array,
+        # ---- PARALLEL ARRAYS FOR PAYMENTS ----
+        paymentdate    => \@paymentdates,
+        paymentaccount => \@paymentaccounts,
+        paymentsource  => \@paymentsources,
+        payment        => \@paymentamounts,
 
-        # Paid flag used in some templates
-        "paid_1" => scalar(@payment_array) ? 1 : "",
+        # This indicates there's at least 1 payment
+        paid_1 => @paymentamounts ? 1 : "",
     );
 
     return \%data;
 }
-
-sub process_template {
-    my ( $template, $data ) = @_;
-    my @lines  = split /\n/, $template;
-    my $result = "";
-    my %include_counter;    # to prevent runaway includes
-    my ( $chars_per_line, $lines_on_first_page, $lines_on_second_page ) =
-      ( 0, 0, 0 );
-    my ( $current_page, $current_line, $sum ) = ( 1, 1, 0 );
-    my $pagebreak_block = "";
-    my $line_index      = 0;
-
-    while ( $line_index <= $#lines ) {
-        my $line = $lines[ $line_index++ ];
-
-        # --- Pagebreak block handling ---
-        if ( $line =~ /<%pagebreak\s+(\d+)\s+(\d+)\s+(\d+)%>/ ) {
-            ( $chars_per_line, $lines_on_first_page, $lines_on_second_page ) =
-              ( $1, $2, $3 );
-            $pagebreak_block = "";
-
-            # accumulate all lines until the end of the pagebreak block
-            while ( $line_index <= $#lines ) {
-                $line = $lines[ $line_index++ ];
-                last if $line =~ /<%end\s+pagebreak%>/;
-                $pagebreak_block .= "$line\n";
-            }
-
-# In a more complete implementation you���d calculate if a manual break is needed.
-# For now we simply ignore the pagebreak block.
-            next;
-        }
-
-        # --- Foreach loops ---
-        if ( $line =~ /<%foreach\s+(\w+)%>/ ) {
-            my $var   = $1;
-            my $block = "";
-
-            # accumulate the foreach block until its corresponding end tag
-            while ( $line_index <= $#lines ) {
-                $line = $lines[ $line_index++ ];
-                last if $line =~ /<%end\s+\Q$var\E%>/;
-                $block .= "$line\n";
-            }
-            if ( ref( $data->{$var} ) eq 'ARRAY' ) {
-                my $i = 1;
-                for my $item ( @{ $data->{$var} } ) {
-
-                   # merge global data with current item (item overrides global)
-                    my %merged = ( %$data, %$item );
-                    $merged{runningnumber} = $i++;
-                    $result .= process_template( $block, \%merged );
-                }
-            }
-            next;
-        }
-
-        # --- Conditional blocks: if not, if, else ---
-        if ( $line =~ /<%if\s+not\s+(\w+)%>/ ) {
-            my $key   = $1;
-            my $block = "";
-            while ( $line_index <= $#lines ) {
-                $line = $lines[ $line_index++ ];
-                last if $line =~ /<%end\s+\Q$key\E%>/;
-                $block .= "$line\n";
-            }
-            $result .= process_template( $block, $data ) unless $data->{$key};
-            next;
-        }
-        if ( $line =~ /<%if\s+(\w+)%>/ ) {
-            my $key   = $1;
-            my $block = "";
-            while ( $line_index <= $#lines ) {
-                $line = $lines[ $line_index++ ];
-                last if $line =~ /<%end\s+\Q$key\E%>/;
-                $block .= "$line\n";
-            }
-            $result .= process_template( $block, $data ) if $data->{$key};
-            next;
-        }
-        if ( $line =~ /<%else\s+(\w+)%>/ ) {
-            my $key   = $1;
-            my $block = "";
-            while ( $line_index <= $#lines ) {
-                $line = $lines[ $line_index++ ];
-                last if $line =~ /<%end\s+\Q$key\E%>/;
-                $block .= "$line\n";
-            }
-
-            # process the else block if the key is false
-            $result .= process_template( $block, $data ) unless $data->{$key};
-            next;
-        }
-
-        # --- Include directives ---
-        if ( $line =~ /<%include\s+([^\s%>]+)%>/ ) {
-            my $filename = $1;
-
-            # remove any potential directory traversal characters
-            $filename =~ s/(\/|\.\.)//g;
-            $include_counter{$filename}++;
-            next if $include_counter{$filename} > 10;
-            my $filepath = "$data->{templates}/$filename";
-            my $included = "";
-            if ( open my $fh, '<', $filepath ) {
-                local $/;
-                $included = <$fh>;
-                close $fh;
-            }
-            else {
-                die "Cannot open $filepath: $!";
-            }
-            $result .= process_template( $included, $data );
-            next;
-        }
-
-        sub escape_value {
-            my ($val) = @_;
-            $val =~ s/(?<!\\)\$/\\\$/g;    # Escape $
-            $val =~ s/%/\\%/g;             # Escape %
-            return $val;
-        }
-
-        # --- Simple placeholders ---
-        # Replace <%key%> with its value, and escape $ for TeX if needed.
-        $line =~ s/<%\s*(\w+)\s*%>/
-    defined $data->{$1} ? escape_value($data->{$1}) : ""
-/gex;
-
-        # Append the processed line to the result.
-        $result .= $line . "\n";
-    }
-
-    return $result;
-}
 $api->get(
-    "/print_invoice_pdf" => sub {
+    "/print_invoice" => sub {
         my $c = shift;
 
         # Extract parameters
-        my $client = $c->param('client') || die "Missing client parameter";
-        my $vc     = $c->param('vc')     || die "Missing vc parameter";
-        my $id     = $c->param('id')     || die "Missing invoice id";
+        my $client   = $c->param('client') || die "Missing client parameter";
+        my $vc       = $c->param('vc')     || die "Missing vc parameter";
+        my $id       = $c->param('id')     || die "Missing invoice id";
+        my $template = $vc eq 'customer' ? 'invoice' : 'vendor_invoice';
 
         # Fetch invoice data dynamically
         my $invoice_data = build_invoice( $c, $client, $vc, $id );
         my $letterhead   = build_letterhead($c);
 
         # Merge letterhead details into invoice data
-        $invoice_data->{company}        = $letterhead->{company};
-        $invoice_data->{address}        = $letterhead->{address};
-        $invoice_data->{tel}            = $letterhead->{tel};
-        $invoice_data->{companyemail}   = $letterhead->{companyemail};
-        $invoice_data->{companywebsite} = $letterhead->{companywebsite};
+        $invoice_data->{company}           = $letterhead->{company};
+        $invoice_data->{address}           = $letterhead->{address};
+        $invoice_data->{tel}               = $letterhead->{tel};
+        $invoice_data->{companyemail}      = $letterhead->{companyemail};
+        $invoice_data->{companywebsite}    = $letterhead->{companywebsite};
+        $invoice_data->{lastpage}          = 0;
+        $invoice_data->{sumcarriedforward} = 0;
+        $invoice_data->{templates}         = "templates/$client";
+        $invoice_data->{language_code}     = "en";
+        $invoice_data->{IN}                = "$template.tex";
+        $invoice_data->{OUT}               = ">temp/invoice.pdf";
+        $invoice_data->{format}            = "pdf";
+        $invoice_data->{media}             = "screen";
+        $invoice_data->{copies}            = 1;
 
-        # Set templates directory
-        $invoice_data->{"templates"} = "./templates/neoledger";
+        my $form      = new Form;
+        my $user_path = "temp/";
+        for my $k ( keys %$invoice_data ) {
+            $form->{$k} = $invoice_data->{$k};
+        }
+        my $dvipdf    = "";
+        my $xelatex   = "";
+        my $userspath = "temp/";
+        $form->parse_template( $c->slconfig, $userspath, $dvipdf, $xelatex )
+          or die "parse_template failed!";
+        my $pdf_path = "temp/invoice.pdf";
 
-        # Read and parse the TeX invoice template (invoice.tex)
-        my $invoice_tex_path     = "$invoice_data->{templates}/invoice.tex";
-        my $invoice_tex_template = read_file($invoice_tex_path)
-          or die "Cannot open invoice template: $invoice_tex_path";
-        my $parsed_tex =
-          process_template( $invoice_tex_template, $invoice_data );
-
-        # Write the parsed TeX content to a file in the ./test directory.
-        my $output_dir = "./test";
-        my $tex_file   = "$output_dir/invoice.tex";
-        open my $fh, ">", $tex_file
-          or die "Cannot open $tex_file for writing: $!";
-        print $fh $parsed_tex;
+        # Read the PDF file content
+        open my $fh, $pdf_path or die "Cannot open file $pdf_path: $!";
+        binmode $fh;
+        my $pdf_content = do { local $/; <$fh> };
         close $fh;
 
-        # Compile the TeX file into a PDF using pdflatex.
-        my $cmd = "pdflatex -output-directory=$output_dir $tex_file";
-        my $ret = system($cmd);
-        if ( $ret != 0 ) {
-            die "Error compiling TeX file to PDF.";
-        }
+        # Delete the PDF file after reading
+        unlink $pdf_path or warn "Could not delete $pdf_path: $!";
 
-        # Optionally, serve the generated PDF file.
-        $c->render( text =>
-              "PDF invoice created successfully in $output_dir/invoice.pdf" );
+        # Return the PDF content as response
+        $c->res->headers->content_type('application/pdf');
+        $c->res->headers->content_disposition(
+            "attachment; filename=\"$invoice_data->{invnumber}.pdf\"");
+        $c->render( data => $pdf_content );
     }
 );
 
