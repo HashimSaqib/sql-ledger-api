@@ -1769,10 +1769,9 @@ $api->post(
         $form->{ $vc =~ /^vendor$/i ? 'vendornumber' : 'customernumber' } =
           $params->{vcnumber};
         CT->save( $c->slconfig, $form );
-        my @results = $form->{CT};
 
         # Render the filtered JSON response
-        $c->render( json => @results );
+        $c->render( json => {%$form} );
     }
 );
 $api->get(
@@ -2037,8 +2036,22 @@ $api->get(
                     price       => $_->{fxsellprice}
                     ? $_->{fxsellprice}
                     : $_->{sellprice},
-                    discount    => $_->{discount} * 100,
-                    taxaccounts => [ split ' ', $_->{taxaccounts} || '' ],
+                    discount         => $_->{discount} * 100,
+                    taxaccounts      => [ split ' ', $_->{taxaccounts} || '' ],
+                    lineitemdetail   => $_->{lineitemdetail},
+                    deliverydate     => $_->{deliverydate},
+                    itemnotes        => $_->{itemnotes},
+                    ordernumber      => $_->{ordernumber},
+                    serialnumber     => $_->{serialnumber},
+                    customerponumber => $_->{customerponumber},
+                    cost             => $_->{cost},
+                    costvendor       => $_->{costvendor},
+                    costvendorid     => $_->{costvendorid},
+                    package          => $_->{package},
+                    volume           => $_->{volume},
+                    weight           => $_->{weight},
+                    netweight        => $_->{netweight},
+                    volume           => $_->{volume},
                 }
             } @{ $form->{invoice_details} };
         }
@@ -2180,12 +2193,25 @@ $api->post(
         $form->{rowcount} = scalar @{ $data->{lines} || [] };
         for my $i ( 1 .. $form->{rowcount} ) {
             my $line = $data->{lines}[ $i - 1 ];
-            $form->{"id_$i"}          = $line->{number};
-            $form->{"description_$i"} = $line->{description};
-            $form->{"qty_$i"}         = $line->{qty};
-            $form->{"sellprice_$i"}   = $line->{price};
-            $form->{"discount_$i"}    = $line->{discount} || 0;
-            $form->{"unit_$i"}        = $line->{unit}     || '';
+            $form->{"id_$i"}               = $line->{number};
+            $form->{"description_$i"}      = $line->{description};
+            $form->{"qty_$i"}              = $line->{qty};
+            $form->{"sellprice_$i"}        = $line->{price};
+            $form->{"discount_$i"}         = $line->{discount}         || 0;
+            $form->{"unit_$i"}             = $line->{unit}             || '';
+            $form->{"lineitemdetail_$i"}   = $line->{lineitemdetail}   || 0;
+            $form->{"deliverydate_$i"}     = $line->{deliverydate}     || '';
+            $form->{"itemnotes_$i"}        = $line->{itemnotes}        || '';
+            $form->{"ordernumber_$i"}      = $line->{ordernumber}      || '';
+            $form->{"serialnumber_$i"}     = $line->{serialnumber}     || '';
+            $form->{"customerponumber_$i"} = $line->{customerponumber} || '';
+            $form->{"costvendor_$i"}       = $line->{costvendor}       || '';
+            $form->{"package_$i"}          = $line->{package}          || '';
+            $form->{"volume"}              = $line->{volume}           || '';
+            $form->{"weight"}              = $line->{weight}           || '';
+            $form->{"netweight"}           = $line->{netweight}        || '';
+            $form->{"cost"}                = $line->{cost}             || '';
+
         }
 
         # Build payments
@@ -2243,7 +2269,24 @@ $api->post(
         $c->render( json => { id => $form->{id} } );
     }
 );
-
+$api->delete(
+    '/arap/invoice/:vc/:id' => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+        my $id     = $c->param('id');
+        my $vc     = $c->param('vc');
+        my $form   = new Form;
+        $form->{id} = $id;
+        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+        if ( $vc eq 'customer' ) {
+            IS->delete_invoice( $c->slconfig, $form );
+        }
+        else {
+            IR->delete_invoice( $c->slconfig, $form );
+        }
+        $c->render( status => 204, data => '' );
+    }
+);
 $api->post(
     '/arap/transaction/:vc/:id' => { id => undef } => sub {
         my $c      = shift;
