@@ -199,6 +199,7 @@ sub post_transaction {
   my $amount;
   my $debit;
   my $credit;
+  my $linetaxamount;
   my $cleared = 'NULL';
   my $bramount = 0;
  
@@ -209,6 +210,8 @@ sub post_transaction {
     
     $debit = $form->parse_amount($myconfig, $form->{"debit_$i"});
     $credit = $form->parse_amount($myconfig, $form->{"credit_$i"});
+    $linetaxamount = $form->parse_amount($myconfig, $form->{"linetaxamount_$i"});
+    $linetaxamount *= 1;
 
     # extract accno
     ($accno) = split(/--/, $form->{"accno_$i"});
@@ -234,9 +237,13 @@ sub post_transaction {
     }
     
     if ($amount || $form->{"source_$i"} || $form->{"memo_$i"} || ($project_id ne 'NULL')) {
+
+      ( $tax_accno, $null ) = split /--/, $form->{"tax_$i"};
+      ($tax_chart_id) = $dbh->selectrow_array("SELECT id FROM chart WHERE accno = '$tax_accno'");
+
       $query = qq|INSERT INTO acc_trans (trans_id, chart_id, amount, transdate,
-		  source, fx_transaction, project_id, memo, cleared, approved)
-		  VALUES
+		  source, fx_transaction, project_id, memo, cleared, approved, tax_chart_id, linetaxamount)
+      VALUES
 		  ($form->{id}, (SELECT id
 				 FROM chart
 				 WHERE accno = '$accno'),
@@ -244,7 +251,7 @@ sub post_transaction {
 		   $dbh->quote($form->{"source_$i"}) .qq|,
 		  '$form->{"fx_transaction_$i"}',
 		  $project_id, |.$dbh->quote($form->{"memo_$i"}).qq|,
-		  $cleared, '$approved')|;
+		  $cleared, '$approved', $tax_chart_id, $linetaxamount)|;
       $dbh->do($query) || $form->dberror($query);
 
       if ($form->{currency} ne $form->{defaultcurrency}) {
@@ -873,7 +880,7 @@ sub transaction {
 
   $form->remove_locks($myconfig, $dbh, 'gl');
   
-  my %defaults = $form->get_defaults($dbh, \@{[qw(closedto revtrans precision referenceurl lock_%)]});
+  my %defaults = $form->get_defaults($dbh, \@{[qw(closedto revtrans precision referenceurl linetax lock_%)]});
   for (keys %defaults) { $form->{$_} = $defaults{$_} }
 
   $form->{currencies} = $form->get_currencies($myconfig, $dbh);
@@ -897,11 +904,12 @@ sub transaction {
   
     # retrieve individual rows
     $query = qq|SELECT ac.*, c.accno, c.description, p.projectnumber,
-                l.description AS translation
+                    l.description AS translation, tc.accno tax_accno, tc.description tax_description
 	        FROM acc_trans ac
 	        JOIN chart c ON (ac.chart_id = c.id)
 	        LEFT JOIN project p ON (p.id = ac.project_id)
 		LEFT JOIN translation l ON (l.trans_id = c.id AND l.language_code = '$myconfig->{countrycode}')
+        LEFT JOIN chart tc ON tc.id = ac.tax_chart_id
 	        WHERE ac.trans_id = $form->{id}
 	        ORDER BY c.accno|;
     $sth = $dbh->prepare($query);
@@ -964,6 +972,26 @@ sub transaction {
   
   # get projects
   $form->all_projects($myconfig, $dbh, $form->{transdate});
+
+  if ($form->{linetax}) {
+    my $sth = $dbh->prepare(qq|
+         SELECT DISTINCT c.accno, c.description, t.rate
+         FROM chart c
+         JOIN tax t ON t.chart_id = c.id
+         WHERE (t.validto >= '$form->{transdate}' OR t.validto IS NULL)
+         ORDER BY accno
+         |
+    );
+    $sth->execute;
+    $form->{selecttax} = "\n";
+    while ( my $row = $sth->fetchrow_hashref(NAME_lc) ) {
+        $form->{selecttax} .= "$row->{accno}--$row->{description}\n";
+        $form->{taxaccounts} .= "$row->{accno} ";
+        $form->{"$row->{accno}_rate"} = $row->{rate};
+    }
+    chop $form->{taxaccounts};
+    $sth->finish;
+  }
   
   $dbh->disconnect;
 
