@@ -1509,9 +1509,17 @@ $api->get(
 
         my $line_tax = $line_tax_q ? 1 : 0;
 
+        my $tax_accounts = $dbs->query(
+            "SELECT t.rate, t.taxnumber, t.chart_id, c.description
+                FROM tax t
+		JOIN chart c ON (c.id = t.chart_id)
+		ORDER BY c.accno"
+        )->hashes;
+
         $c->render(
             json => {
-                linetax => $line_tax
+                tax_accounts => $tax_accounts,
+                linetax      => $line_tax
             }
         );
     }
