@@ -1913,7 +1913,7 @@ $api->get(
             shippingPoint => $form->{shippingpoint},
             shipVia       => $form->{shipvia},
             wayBill       => $form->{waybill},
-            description   => $form->{invdescription},
+            description   => $form->{description},
             notes         => $form->{notes},
             intnotes      => $form->{intnotes},
             invNumber     => $form->{invnumber},
@@ -1923,6 +1923,7 @@ $api->get(
             poNumber      => $form->{ponumber},
             currency      => $form->{currency},
             exchangerate  => $form->{exchangerate},
+            id            => $form->{id},
             recordAccount => $form->{acc_trans}{$transaction_type}[0],
             $vc_id_field  => $form->{$vc_id_field},
             lineitems     => \@line_items,
@@ -2325,6 +2326,7 @@ $api->post(
         # Currency and other details
         $form->{currency}  = $data->{curr};
         $form->{notes}     = $data->{notes}     || '';
+        $form->{intnotes}  = $data->{intnotes}  || '';
         $form->{ordnumber} = $data->{ordNumber} || '';
         $form->{ponumber}  = $data->{poNumber}  || '';
 
@@ -2392,7 +2394,7 @@ $api->post(
 
         AA->post_transaction( $c->slconfig, $form );
 
-        $c->render( json => { data => Dumper($form) } );
+        $c->render( json => { id => $form->{id} } );
     }
 );
 
