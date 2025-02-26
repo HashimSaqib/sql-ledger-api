@@ -4013,4 +4013,282 @@ $api->get(
     }
 );
 
+sub build_transaction {
+    my ( $c, $client, $vc, $id ) = @_;
+
+    # Determine transaction type and corresponding field names.
+    my $transaction_type = $vc eq 'vendor' ? 'AP'           : 'AR';
+    my $vc_field         = $vc eq 'vendor' ? 'vendornumber' : 'customernumber';
+    my $vc_id_field      = $vc eq 'vendor' ? 'vendor_id'    : 'customer_id';
+
+    # Establish database connection.
+    my $dbs = $c->dbs($client);
+    $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+
+    # Process letterhead.
+    my $letterhead = build_letterhead($c);
+
+    # AR transactions use -1 as a multiplier for amounts.
+    my $amount_multiplier = $transaction_type eq 'AR' ? -1 : 1;
+
+    # Initialize form object.
+    my $form = Form->new;
+    $form->{id} = $id;
+    $form->{vc} = $vc;
+
+    # Prepare the form with transaction links/info.
+    $form->create_links( $transaction_type, $c->slconfig, $vc );
+    warn( Dumper $form );
+    ### --- FLATTEN LINE ITEMS --- ###
+    # Build parallel arrays for line item data (similar to build_invoice)
+    my ( @lineitem_ids, @lineitem_accno, @lineitem_account,
+        @lineitem_amount, @lineitem_description, @lineitem_projectnumber );
+
+    my $subtotal       = 0;
+    my $i              = 1;
+    my @sorted_entries = sort { $a->{id} <=> $b->{id} }
+      @{ $form->{acc_trans}{"${transaction_type}_amount"} || [] };
+
+    foreach my $entry (@sorted_entries) {
+
+        # Calculate adjusted amount.
+        my $amt = $amount_multiplier * ( -$entry->{amount} );
+        $subtotal += $amt;
+
+        push @lineitem_ids,         $i++;
+        push @lineitem_accno,       $entry->{accno};
+        push @lineitem_account,     $entry->{description};
+        push @lineitem_amount,      $form->format_amount( $c->slconfig, $amt );
+        push @lineitem_description, $entry->{memo} // '';
+        push @lineitem_projectnumber, '';
+    }
+
+    ### --- FLATTEN PAYMENTS --- ###
+    # Build parallel arrays for payments.
+    my (
+        @paymentdate, @paymentaccount, @paymentsource,
+        @paymentmemo, @paymentamount
+    );
+    my $payment_total = 0;
+    if ( defined $form->{acc_trans}{"${transaction_type}_paid"}
+        && ref( $form->{acc_trans}{"${transaction_type}_paid"} ) eq 'ARRAY' )
+    {
+        foreach my $pay ( @{ $form->{acc_trans}{"${transaction_type}_paid"} } )
+        {
+            my $p_amt = $amount_multiplier * $pay->{amount};
+            $payment_total += $p_amt;
+
+            push @paymentdate, $pay->{transdate} // '';
+            push @paymentaccount,
+              (
+                defined $pay->{accno} && defined $pay->{description}
+                ? "$pay->{accno}--$pay->{description}"
+                : ''
+              );
+            push @paymentsource, $pay->{source} // '';
+            push @paymentmemo,   $pay->{memo}   // '';
+            push @paymentamount, $form->format_amount( $c->slconfig, $p_amt );
+        }
+    }
+    my $paid_1 = @paymentdate ? 1 : 0;
+
+    ### --- FLATTEN TAX INFORMATION --- ###
+    # Build parallel arrays for tax data.
+    my ( @taxaccno, @taxamount, @taxrate, @taxdescription );
+    my $taxtotal = 0;
+    if ( $form->{acc_trans}{"${transaction_type}_tax"}
+        && ref( $form->{acc_trans}{"${transaction_type}_tax"} ) eq 'ARRAY' )
+    {
+        foreach my $tax ( @{ $form->{acc_trans}{"${transaction_type}_tax"} } ) {
+            my $t_amt = $amount_multiplier * $tax->{amount};
+            $taxtotal += $t_amt;
+
+            push @taxaccno,       $tax->{accno} // '';
+            push @taxamount,      $form->format_amount( $c->slconfig, $t_amt );
+            push @taxrate,        defined $tax->{rate} ? $tax->{rate} : '';
+            push @taxdescription, '';    # Supply tax description if available
+        }
+    }
+
+    my $num2text;
+    if ( $form->{language_code} ne "" ) {
+        $num2text = new CP $form->{language_code};
+    }
+    else {
+        $num2text = new CP $c->slconfig->{countrycode};
+    }
+    $num2text->init;
+
+    # Compute overall invoice total.
+    my $invtotal = ( $subtotal + $taxtotal ) - $payment_total;
+
+    # Compute text representation and decimal portion of the invoice total.
+    my $formatted_total = sprintf( "%.2f", $invtotal );
+    my ( $integer, $decimal ) = split( /\./, $formatted_total );
+    my $text_amount = $num2text->num2text($integer);
+    my $vc_data     = build_vc( $c, $id, $vc );
+
+    ### --- Build the Flattened Transaction Data Structure --- ###
+    my %transaction = (
+
+        # Basic address / vendor-customer info
+        name => $vc_data->{name}
+          || '',
+        address1 => $vc_data->{address1}
+          || '',
+        address2 => $vc_data->{address2}
+          || '',
+        city => $vc_data->{city}
+          || '',
+        state => $vc_data->{state}
+          || '',
+        zipcode => $vc_data->{zipcode}
+          || '',
+        country => $vc_data->{country}
+          || '',
+        contact => $vc_data->{contact}
+          || '',
+        email => $vc_data->{email}
+          || '',
+        vendortaxnumber => $vc_data->{vendortaxnumber}
+          || '',
+        (
+            $vc eq 'customer'
+            ? (
+                customerphone => $vc_data->{customerphone}
+                  || '',
+                customerfax => $vc_data->{customerfax}
+                  || '',
+              )
+            : (
+                vendorphone => $vc_data->{vendorphone}
+                  || '',
+                vendorfax => $vc_data->{vendorfax}
+                  || '',
+            )
+        ),
+        ## Invoice Details
+        invnumber => $form->{invnumber},
+        invdate   => $form->{transdate},
+        duedate   => $form->{duedate},
+        ponumber  => $form->{ponumber},
+        ordnumber => $form->{ordnumber},
+        employee  => $form->{employee} || '',
+
+        ## Line Items as parallel arrays
+        item_id       => \@lineitem_ids,
+        accno         => \@lineitem_accno,
+        account       => \@lineitem_account,
+        amount        => \@lineitem_amount,
+        description   => \@lineitem_description,
+        projectnumber => \@lineitem_projectnumber,
+
+        ## Totals & Amount in Words
+        subtotal    => $form->format_amount( $c->slconfig, $subtotal ),
+        invtotal    => $form->format_amount( $c->slconfig, $invtotal ),
+        text_amount => $text_amount,
+        decimal     => $decimal,
+        currency    => $form->{currency},
+
+        ## Payments as parallel arrays
+        paid_1         => $paid_1,
+        paymentdate    => \@paymentdate,
+        paymentaccount => \@paymentaccount,
+        paymentsource  => \@paymentsource,
+        paymentmemo    => \@paymentmemo,
+        payment        => \@paymentamount,
+
+        ## Tax Information as parallel arrays
+        taxaccno       => \@taxaccno,
+        taxamount      => \@taxamount,
+        taxrate        => \@taxrate,
+        taxdescription => \@taxdescription,
+    );
+
+    # Include tax inclusion flag if applicable.
+    if (@taxaccno) {
+        $transaction{taxincluded} = $form->{taxincluded};
+    }
+
+    # Pass through vendor/customer identifiers.
+    $transaction{$vc_field}    = $form->{$vc_field};
+    $transaction{$vc_id_field} = $form->{$vc_id_field};
+
+    # Optionally, add discount information if applicable:
+    # $transaction{cd_amount}     = ...;
+    # $transaction{discountterms} = ...;
+    # $transaction{cashdiscount}  = ...;
+
+    return \%transaction;
+}
+$api->get(
+    "/print_transaction" => sub {
+        my $c = shift;
+
+        # Extract parameters
+        my $client = $c->param('client') || die "Missing client parameter";
+        my $vc     = $c->param('vc')     || die "Missing vc parameter";
+        my $id     = $c->param('id')     || die "Missing transaction id";
+
+# Determine the template based on a 'template' parameter or default based on vc type
+        my $template = $c->param('template')
+          || ( $vc eq 'customer' ? 'ar_transaction' : 'ap_transaction' );
+
+        # Validate template selection (optional)
+        die "Invalid template selection"
+          unless $template =~
+          /^(ap_transaction|ar_transaction|credit_note|debit_note)$/;
+
+        # Fetch transaction data dynamically
+        my $transaction_data = build_transaction( $c, $client, $vc, $id );
+        my $letterhead       = build_letterhead($c);
+
+        # Merge additional parameters into the transaction data
+        $transaction_data->{company}           = $letterhead->{company};
+        $transaction_data->{address}           = $letterhead->{address};
+        $transaction_data->{tel}               = $letterhead->{tel};
+        $transaction_data->{companyemail}      = $letterhead->{companyemail};
+        $transaction_data->{companywebsite}    = $letterhead->{companywebsite};
+        $transaction_data->{lastpage}          = 0;
+        $transaction_data->{sumcarriedforward} = 0;
+        $transaction_data->{templates}         = "templates/$client";
+        $transaction_data->{language_code}     = "en";
+        $transaction_data->{IN}                = "$template.tex";
+        $transaction_data->{OUT}               = ">temp/transaction.pdf";
+        $transaction_data->{format}            = "pdf";
+        $transaction_data->{media}             = "screen";
+        $transaction_data->{copies}            = 1;
+
+        my $form      = new Form;
+        my $user_path = "temp/";
+        for my $k ( keys %$transaction_data ) {
+            $form->{$k} = $transaction_data->{$k};
+        }
+        warn( Dumper $form );
+        my $dvipdf    = "";
+        my $xelatex   = "";
+        my $userspath = "temp/";
+
+        $form->parse_template( $c->slconfig, $userspath, $dvipdf, $xelatex )
+          or die "parse_template failed!";
+
+        my $pdf_path = "temp/transaction.pdf";
+
+        # Read the PDF file content
+        open my $fh, $pdf_path or die "Cannot open file $pdf_path: $!";
+        binmode $fh;
+        my $pdf_content = do { local $/; <$fh> };
+        close $fh;
+
+        # Delete the PDF file after reading
+        unlink $pdf_path or warn "Could not delete $pdf_path: $!";
+
+# Return the PDF content as response using the transaction's invoice number for the file name
+        $c->res->headers->content_type('application/pdf');
+        $c->res->headers->content_disposition(
+            "attachment; filename=\"$transaction_data->{invnumber}.pdf\"");
+        $c->render( data => $pdf_content );
+    }
+);
+
 app->start;
