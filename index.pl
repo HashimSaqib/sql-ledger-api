@@ -431,7 +431,6 @@ $api->get(
         my $form = new Form;
         for ( keys %$params ) { $form->{$_} = $params->{$_} if $params->{$_} }
         $form->{category} = 'X';
-
         GL->transactions( $c->slconfig, $form );
 
         # Check if the result is undefined, empty, or has no entries
@@ -601,6 +600,8 @@ $api->get(
         $form->{id} = $id;
         GL->transaction( $c->slconfig, $form );
 
+        warn( Dumper $form );
+
         # Extract the GL array and rename it to "LINES" in the JSON response
         my @lines;
         if ( exists $form->{GL} && ref $form->{GL} eq 'ARRAY' ) {
@@ -610,24 +611,24 @@ $api->get(
                 # Create a new hash with only the required fields
                 my %new_line;
 
-                $new_line{debit} =
+                $new_line{credit} =
                     $line->{amount} > 0
                   ? $line->{amount}
                   : 0;    # Assuming amount > 0 is debit
-                $new_line{credit} =
+                $new_line{debit} =
                   $line->{amount} < 0
                   ? -$line->{amount}
                   : 0;    # Assuming amount < 0 is credit
+                $new_line{linetaxamount} = $line->{linetaxamount};
 
                 $new_line{accno} = $line->{accno};
                 $new_line{taxAccount} =
                   $line->{tax_chart_id} == 0
                   ? undef
-                  : $line->{tax_chart_id};   # Set to undef if tax_chart_id is 0
-                $new_line{taxAmount} = $line->{taxamount};
-                $new_line{cleared}   = $line->{cleared};
-                $new_line{memo}      = $line->{memo};
-                $new_line{source}    = $line->{source};
+                  : $line->{tax_chart_id};
+                $new_line{cleared} = $line->{cleared};
+                $new_line{memo}    = $line->{memo};
+                $new_line{source}  = $line->{source};
 
                 # Modify fx_transaction assignment based on fx_transaction value
                 $new_line{fx_transaction} =
@@ -790,35 +791,6 @@ sub api_gl_transaction () {
     my $i            = 1;
     foreach my $line ( @{ $data->{lines} } ) {
 
-# Subtract taxAmount from debit or credit if taxAccount and taxAmount are defined
-        if ( defined $line->{taxAccount} && defined $line->{taxAmount} ) {
-
-            $total_debit  += $line->{debit};
-            $total_credit += $line->{credit};
-
-            $line->{debit} -=
-              ( $line->{debit} > 0 ? $line->{taxAmount} : 0 );
-            $line->{credit} -=
-              ( $line->{credit} > 0 ? $line->{taxAmount} : 0 );
-
-            # Add new tax line to $form
-            if ( $line->{debit} > 0 ) {
-                $form->{"debit_$i"}  = $line->{taxAmount};
-                $form->{"credit_$i"} = 0;
-            }
-            else {
-                $form->{"debit_$i"}  = 0;
-                $form->{"credit_$i"} = $line->{taxAmount};
-            }
-
-            $form->{"accno_$i"}  = $line->{taxAccount};
-            $form->{"tax_$i"}    = 'auto';
-            $form->{"memo_$i"}   = $line->{memo};
-            $form->{"source_$i"} = $line->{source};
-
-            $i++;    # Increment the counter after processing the tax line
-        }
-
         my $acc_id =
           $dbs->query( "SELECT id from chart WHERE accno = ?", $line->{accno} );
 
@@ -834,14 +806,14 @@ sub api_gl_transaction () {
         }
 
         # Process the regular line
-        $form->{"debit_$i"}     = $line->{debit};
-        $form->{"credit_$i"}    = $line->{credit};
-        $form->{"accno_$i"}     = $line->{accno};
-        $form->{"tax_$i"}       = $line->{taxAccount};
-        $form->{"taxamount_$i"} = $line->{taxAmount};
-        $form->{"cleared_$i"}   = $line->{cleared};
-        $form->{"memo_$i"}      = $line->{memo};
-        $form->{"source_$i"}    = $line->{source};
+        $form->{"debit_$i"}         = $line->{debit};
+        $form->{"credit_$i"}        = $line->{credit};
+        $form->{"accno_$i"}         = $line->{accno};
+        $form->{"tax_$i"}           = $line->{taxAccount};
+        $form->{"linetaxamount_$i"} = $line->{linetaxamount};
+        $form->{"cleared_$i"}       = $line->{cleared};
+        $form->{"memo_$i"}          = $line->{memo};
+        $form->{"source_$i"}        = $line->{source};
 
         $i++;    # Increment the counter after processing the regular line
     }
@@ -1234,6 +1206,14 @@ $api->get(
             delete $form->{$_};
         }
 
+        # Query to check if linetaxamount is greater than 0 in any row
+        my $lock_linetax_query = $dbs->query(
+"SELECT EXISTS (SELECT 1 FROM acc_trans WHERE linetaxamount <> 0) AS locklinetax"
+        );
+
+        my $lock_linetax_result = $lock_linetax_query->hash;
+        $form->{locklinetax} = $lock_linetax_result->{locklinetax} ? \1 : \0;
+
         my %checked;
         $checked{cash}          = "checked" if $form->{method} eq 'cash';
         $checked{namesbynumber} = "checked" if $form->{namesbynumber};
@@ -1258,6 +1238,7 @@ $api->get(
         $c->render( json => \%form_data );
     }
 );
+
 $api->post(
     '/system/companydefaults' => sub {
         my $c      = shift;
@@ -1510,10 +1491,11 @@ $api->get(
         my $line_tax = $line_tax_q ? 1 : 0;
 
         my $tax_accounts = $dbs->query(
-            "SELECT t.rate, t.taxnumber, t.chart_id, c.description
-                FROM tax t
-		JOIN chart c ON (c.id = t.chart_id)
-		ORDER BY c.accno"
+            "SELECT t.rate, t.taxnumber, t.chart_id, c.description, c.accno,
+            CONCAT(c.accno, '--', c.description) AS label
+     FROM tax t
+     JOIN chart c ON (c.id = t.chart_id)
+     ORDER BY c.accno"
         )->hashes;
 
         $c->render(

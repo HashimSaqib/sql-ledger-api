@@ -240,6 +240,7 @@ sub post_transaction {
 
       ( $tax_accno, $null ) = split /--/, $form->{"tax_$i"};
       ($tax_chart_id) = $dbh->selectrow_array("SELECT id FROM chart WHERE accno = '$tax_accno'");
+      $tax_chart_id *= 1;
 
       $query = qq|INSERT INTO acc_trans (trans_id, chart_id, amount, transdate,
 		  source, fx_transaction, project_id, memo, cleared, approved, tax_chart_id, linetaxamount)
@@ -589,10 +590,12 @@ sub transactions {
 		 ac.memo, '0' AS name_id, '' AS db,
 		 $gdescription AS lineitem, '' AS name, '' AS vcnumber,
 		 '' AS address1, '' AS address2, '' AS city,
-		 '' AS zipcode, '' AS country
+		 '' AS zipcode, '' AS country,
+  tc.accno linetax_accno, tc.description linetax_description, ac.linetaxamount
                  FROM gl g
 		 JOIN acc_trans ac ON (g.id = ac.trans_id)
 		 JOIN chart c ON (ac.chart_id = c.id)
+    LEFT JOIN chart tc ON (ac.tax_chart_id = tc.id)
 		 LEFT JOIN department d ON (d.id = g.department_id)
 		 LEFT JOIN translation l ON (l.trans_id = c.id AND l.language_code = '$myconfig->{countrycode}')
                  WHERE $glwhere
@@ -607,13 +610,15 @@ sub transactions {
 		 ac.memo, ct.id AS name_id, 'customer' AS db,
 		 $lineitem AS lineitem, ct.name, ct.customernumber,
 		 ad.address1, ad.address2, ad.city,
-		 ad.zipcode, ad.country
+		 ad.zipcode, ad.country,
+  tc.accno linetax_accno, tc.description linetax_description, ac.linetaxamount
 		 FROM ar a
 		 JOIN acc_trans ac ON (a.id = ac.trans_id)
 		 $invoicejoin
 		 JOIN chart c ON (ac.chart_id = c.id)
 		 JOIN customer ct ON (a.customer_id = ct.id)
 		 JOIN address ad ON (ad.trans_id = ct.id)
+     LEFT JOIN chart tc ON (ac.tax_chart_id = tc.id)
 		 LEFT JOIN department d ON (d.id = a.department_id)
 		 LEFT JOIN translation l ON (l.trans_id = c.id AND l.language_code = '$myconfig->{countrycode}')
 		 WHERE $arwhere
@@ -628,13 +633,15 @@ sub transactions {
 		 ac.memo, ct.id AS name_id, 'vendor' AS db,
 		 $lineitem AS lineitem, ct.name, ct.vendornumber,
 		 ad.address1, ad.address2, ad.city,
-		 ad.zipcode, ad.country
+		 ad.zipcode, ad.country,
+     tc.accno linetax_accno, tc.description linetax_description, ac.linetaxamount
 		 FROM ap a
 		 JOIN acc_trans ac ON (a.id = ac.trans_id)
 		 $invoicejoin
 		 JOIN chart c ON (ac.chart_id = c.id)
 		 JOIN vendor ct ON (a.vendor_id = ct.id)
 		 JOIN address ad ON (ad.trans_id = ct.id)
+     LEFT JOIN chart tc ON (ac.tax_chart_id = tc.id)
 		 LEFT JOIN department d ON (d.id = a.department_id)
 		 LEFT JOIN translation l ON (l.trans_id = c.id AND l.language_code = '$myconfig->{countrycode}')
 		 WHERE $apwhere|;
