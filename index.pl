@@ -640,19 +640,20 @@ $api->get(
         }
 
         my $response = {
-            id           => $form->{id},
-            reference    => $form->{reference},
-            approved     => $form->{approved},
-            ts           => $form->{ts},
-            curr         => $form->{curr},
-            description  => $form->{description},
-            notes        => $form->{notes},
-            department   => $form->{department},
-            transdate    => $form->{transdate},
-            ts           => $form->{ts},
-            exchangeRate => $form->{exchangerate},
-            employeeId   => $form->{employee_id},
-            lines        => \@lines,
+            id            => $form->{id},
+            reference     => $form->{reference},
+            approved      => $form->{approved},
+            ts            => $form->{ts},
+            curr          => $form->{curr},
+            description   => $form->{description},
+            notes         => $form->{notes},
+            department    => $form->{department},
+            department_id => $form->{department_id},
+            transdate     => $form->{transdate},
+            ts            => $form->{ts},
+            exchangeRate  => $form->{exchangerate},
+            employeeId    => $form->{employee_id},
+            lines         => \@lines,
         };
 
         $c->render( status => 200, json => $response );
@@ -784,6 +785,7 @@ sub api_gl_transaction () {
     $form->{curr}            = $data->{curr};
     $form->{currency}        = $data->{curr};
     $form->{exchangerate}    = $data->{exchangeRate};
+    $form->{department}      = $data->{department};
     $form->{transdate}       = $transdate;
     $form->{defaultcurrency} = $default_currency;
 
@@ -849,6 +851,7 @@ sub api_gl_transaction () {
         exchangeRate => $form->{exchangerate},
         transdate    => $form->{transdate},
         employeeId   => $form->{employee_id},
+        department   => $form->{department},
         lines        => []
     };
 
@@ -1345,7 +1348,36 @@ $api->delete(
         }
     }
 );
+############################
+####                    ####
+####     Departments    ####
+####                    ####
+############################
+$api->get(
+    '/system/departments' => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+        my $form = new Form;
+        AM->departments( $c->slconfig, $form );
+        $c->render( json => $form->{ALL} );
+    }
+);
+$api->post(
+    '/system/departments' => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+        my $form = new Form;
+        my $data = $c->req->json;
+        for my $key ( keys %$data ) {
+            $form->{$key} = $data->{$key} if defined $data->{$key};
+        }
+        AM->save_department( $c->slconfig, $form );
 
+        $c->render( json => $form->{ALL} );
+    }
+);
 ##########################
 ####                  ####
 #### Goods & Services ####
@@ -1490,6 +1522,24 @@ $api->post(
 ####                       ####
 ###############################
 
+helper get_departments => sub {
+    my ( $c, $role ) = @_;
+    my $client = $c->param('client');
+    my $dbs    = $c->dbs($client);
+
+    my $query = "SELECT * FROM department";
+
+    my @bind_params;
+    if ( defined $role && ( $role eq 'C' || $role eq 'P' ) ) {
+        $query .= " WHERE role = ?";
+        push @bind_params, $role;
+    }
+
+    my $departments = $dbs->query( $query, @bind_params )->hashes;
+
+    return $departments // [];
+};
+
 helper get_vc => sub {
     my ( $c, $vc ) = @_;
     my $client = $c->param('client');
@@ -1571,6 +1621,7 @@ $api->get(
         my $c      = shift;
         my $client = $c->param('client');
         my $dbs    = $c->dbs($client);
+        my $module = $c->param('module');
 
         my $line_tax_q =
           $dbs->query( "SELECT fldvalue FROM defaults WHERE fldname = ?",
@@ -1591,6 +1642,12 @@ $api->get(
         my $customers  = $c->get_vc('customer');
         my $vendors    = $c->get_vc('vendor');
 
+        my $role =
+            $module eq 'ar' ? 'p'
+          : $module eq 'ap' ? 'c'
+          :                   undef;
+        my $departments = $c->get_departments($role);
+
         $c->render(
             json => {
                 currencies   => $currencies,
@@ -1598,7 +1655,8 @@ $api->get(
                 tax_accounts => $tax_accounts,
                 customers    => $customers,
                 vendors      => $vendors,
-                linetax      => $line_tax
+                linetax      => $line_tax,
+                departments  => $departments
             }
         );
     }
