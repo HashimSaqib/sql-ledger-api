@@ -29,6 +29,7 @@ use SL::CA;
 use SL::CP;
 use SL::GL;
 use SL::RC;
+use SL::IC;
 use DateTime;
 use DateTime::Format::ISO8601;
 use Date::Parse;
@@ -970,102 +971,6 @@ $api->get(
     }
 );
 
-$api->post(
-    '/charts' => sub {
-        my $c      = shift;
-        my $client = $c->param('client');
-
-        # Create the DBIx::Simple handle
-        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
-        my $dbs = $c->dbs($client);
-
-        # Parse JSON request body
-        my $data = $c->req->json;
-
-        unless ($data) {
-            return $c->render(
-                status => 400,
-                json   => { message => "Invalid JSON in request body" }
-            );
-        }
-
-        # Get the necessary parameters from the parsed JSON
-        my $accno       = $data->{accno};
-        my $description = $data->{description};
-        my $charttype   = $data->{charttype} // 'A';
-        my $category    = $data->{category};
-        my $link        = $data->{link};
-        my $gifi_accno  = $data->{gifi_accno};
-        my $contra      = $data->{contra} // 'false';
-        my $allow_gl    = $data->{allow_gl};
-
-        # Validate required fields
-        unless ( $accno && $description ) {
-            return $c->render(
-                status => 400,
-                json   =>
-                  { message => "Missing required fields: accno, description" }
-            );
-        }
-
-        # Validate charttype
-        unless ( $charttype eq 'A' || $charttype eq 'H' ) {
-            return $c->render(
-                status => 400,
-                json   =>
-                  { message => "Invalid charttype. Must be either 'A' or 'H'" }
-            );
-        }
-
-        # Validate category
-        my @valid_categories = qw(A L I Q E);
-        unless ( $category && length($category) == 1 && grep { $_ eq $category }
-            @valid_categories )
-        {
-            return $c->render(
-                status => 400,
-                json   => {
-                    message =>
-                      "Invalid category. Must be one of 'A', 'L', 'I', 'Q', 'E'"
-                }
-            );
-        }
-
-        # Prepare SQL for insertion
-        my $sql_insert =
-"INSERT INTO chart (accno, description, charttype, category, link, gifi_accno, contra, allow_gl) 
-                      VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
-
-        # Execute the insertion
-        my $result = $dbs->query(
-            $sql_insert, $accno,      $description, $charttype, $category,
-            $link,       $gifi_accno, $contra,      $allow_gl
-        );
-
-        if ( $result->affected ) {
-
-            # Retrieve the newly created entry
-            my $new_entry =
-              $dbs->query( "SELECT * FROM chart WHERE accno = ?", $accno )
-              ->hash;
-
-            return $c->render(
-                status => 201,
-                json   => {
-                    message => "Chart entry created successfully",
-                    entry   => $new_entry
-                }
-            );
-        }
-        else {
-            return $c->render(
-                status => 500,
-                json   => { message => "Failed to create chart entry" }
-            );
-        }
-    }
-);
-
 ###############################
 ####                       ####
 ####    System Settings    ####
@@ -1300,7 +1205,7 @@ $api->get(
                 status => 500,
                 json   => {
                     status  => 'error',
-                    message => 'Failed to save company defaults'
+                    message => 'Failed to get accounts'
                 }
             );
         }
@@ -1471,12 +1376,195 @@ $api->get(
         $c->render( json => { parts => $parts } );
     }
 );
+$api->get(
+    '/ic/items' => sub {
+        my $c      = shift;
+        my $vc     = $c->param('vc');
+        my $client = $c->param('client');
+        my $params = $c->req->params->to_hash;
+        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+
+        my $form = Form->new;
+        $form->{searchitems} = $params->{searchitems};
+        $form->{summary}     = 0;
+        $form->{open}        = 1;
+
+        IC->all_parts( $c->slconfig, $form );
+        warn( Dumper $form );
+        my @results = $form->{parts};
+
+        # Render the filtered JSON response
+        $c->render( json => @results );
+    }
+);
+$api->get(
+    '/ic/items/:id' => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+        my $id     = $c->param('id');
+
+        # Set the database connection dynamically
+        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+        my $form = new Form;
+        $form->{id} = $id;
+        IC->get_part( $c->slconfig, $form );
+
+        # Render the form object as JSON
+        $c->render( json => {%$form} );
+    }
+);
+$api->post(
+    '/ic/items/:id' => { id => undef } => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+        my $id     = $c->param('id');
+        my $data   = $c->req->json;
+        warn( Dumper $data );
+
+        my $form = new Form;
+        $form->{id} = $id;
+
+        # Map all non-array fields from $data to $form
+        foreach my $key ( keys %$data ) {
+            next
+              if $key eq 'makeModelLines'
+              || $key eq 'customerLines'
+              || $key eq 'vendorLines';
+            $form->{$key} = $data->{$key};
+        }
+
+        # Process make/model lines into keys like make_1, model_1, etc.
+        if ( exists $data->{makeModelLines}
+            && ref $data->{makeModelLines} eq 'ARRAY' )
+        {
+            my $i = 1;
+            foreach my $line ( @{ $data->{makeModelLines} } ) {
+                $form->{"make_$i"}  = $line->{make}  // '';
+                $form->{"model_$i"} = $line->{model} // '';
+                $i++;
+            }
+            $form->{makemodel_rows} = scalar @{ $data->{makeModelLines} };
+        }
+
+        # Process customer lines into keys like customer_1, pricebreak_1, etc.
+        if ( exists $data->{customerLines}
+            && ref $data->{customerLines} eq 'ARRAY' )
+        {
+            my $i = 1;
+            foreach my $line ( @{ $data->{customerLines} } ) {
+                $form->{"customer_$i"}      = $line->{customer}         // '';
+                $form->{"pricebreak_$i"}    = $line->{priceBreak}       // '';
+                $form->{"customerprice_$i"} = $line->{customerPrice}    // '';
+                $form->{"customercurr_$i"}  = $line->{customerCurrency} // '';
+                $form->{"validfrom_$i"}     = $line->{validFrom}        // '';
+                $form->{"validto_$i"}       = $line->{validTo}          // '';
+                $i++;
+            }
+            $form->{customer_rows} = scalar @{ $data->{customerLines} };
+        }
+
+        # Process vendor lines into keys like vendor_1, partnumber_1, etc.
+        if ( exists $data->{vendorLines}
+            && ref $data->{vendorLines} eq 'ARRAY' )
+        {
+            my $i = 1;
+            foreach my $line ( @{ $data->{vendorLines} } ) {
+                $form->{"vendor_$i"}     = $line->{vendor}           // '';
+                $form->{"partnumber_$i"} = $line->{vendorPartNumber} // '';
+                $form->{"lastcost_$i"}   = $line->{vendorCost}       // '';
+                $form->{"vendorcurr_$i"} = $line->{vendorCurrency}   // '';
+                $form->{"leadtime_$i"}   = $line->{vendorLeadtime}   // '';
+                $i++;
+            }
+            $form->{vendor_rows} = scalar @{ $data->{vendorLines} };
+        }
+
+        IC->save( $c->slconfig, $form );
+        $c->render( json => {%$form} );
+    }
+);
 
 ###############################
 ####                       ####
 ####        LINKS          ####
 ####                       ####
 ###############################
+
+helper get_vc => sub {
+    my ( $c, $vc ) = @_;
+    my $client = $c->param('client');
+    $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+    my $form = new Form;
+    $form->{vc} = $vc;
+    AA->all_names( $c->slconfig, $form );
+    my $number =
+      ( $vc eq 'customer' )
+      ? 'customernumber'
+      : 'vendornumber';
+    for my $item ( @{ $form->{all_vc} } ) {
+        $item->{label} =
+          $item->{name} . " -- " . $item->{$number};
+    }
+    return $form->{all_vc};
+};
+
+helper get_currencies => sub {
+    my $c      = shift;
+    my $client = $c->param('client');
+
+    my $dbs = $c->dbs($client);
+
+    my $currencies;
+    eval {
+        $currencies = $dbs->query("SELECT * FROM curr ORDER BY rn")->hashes;
+    };
+
+    if ($@) {
+        return $c->render(
+            status => 500,
+            json => { error => { message => 'Failed to retrieve currencies' } }
+        );
+    }
+
+    return $currencies;
+};
+
+helper get_accounts => sub {
+    my ($c)    = @_;
+    my $client = $c->param('client');
+    my $form   = Form->new;
+    $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+
+    # Fetch all accounts
+    my $result   = CA->all_accounts( $c->slconfig, $form );
+    my $accounts = $form->{CA};
+
+    # Add a label property to all accounts (format: accno--description)
+    foreach my $acc (@$accounts) {
+        $acc->{label} = $acc->{accno} . '--' . $acc->{description};
+    }
+
+    # Mapping for the 4 types of accounts
+    my %filter_mapping = (
+        inventory      => 'IC',
+        income         => 'AR_amount:IC_sale',
+        service_income => 'AR_amount:IC_income',
+        cogs           => 'AP_amount:IC_cogs',
+        expense        => 'AP_amount:IC_expense'
+    );
+
+    # Create a hash to store filtered accounts for each type
+    my %filtered_accounts;
+    foreach my $type ( keys %filter_mapping ) {
+        my $filter_str = $filter_mapping{$type};
+        my @filtered =
+          grep { defined $_->{link} && $_->{link} =~ /\Q$filter_str\E/ }
+          @$accounts;
+        $filtered_accounts{$type} = \@filtered;
+    }
+
+    return \%filtered_accounts;
+};
 
 $api->get(
     '/create_links/:module' => sub {
@@ -1487,20 +1575,29 @@ $api->get(
         my $line_tax_q =
           $dbs->query( "SELECT fldvalue FROM defaults WHERE fldname = ?",
             'linetax' )->hash;
-
         my $line_tax = $line_tax_q ? 1 : 0;
 
         my $tax_accounts = $dbs->query(
             "SELECT t.rate, t.taxnumber, t.chart_id, c.description, c.accno,
-            CONCAT(c.accno, '--', c.description) AS label
-     FROM tax t
-     JOIN chart c ON (c.id = t.chart_id)
-     ORDER BY c.accno"
+             CONCAT(c.accno, '--', c.description) AS label
+             FROM tax t
+             JOIN chart c ON (c.id = t.chart_id)
+             ORDER BY c.accno"
         )->hashes;
+
+# Get the accounts, now returned as a hash with keys inventory, income, cogs, expense
+        my $accounts   = $c->get_accounts;
+        my $currencies = $c->get_currencies;
+        my $customers  = $c->get_vc('customer');
+        my $vendors    = $c->get_vc('vendor');
 
         $c->render(
             json => {
+                currencies   => $currencies,
+                accounts     => $accounts,
                 tax_accounts => $tax_accounts,
+                customers    => $customers,
+                vendors      => $vendors,
                 linetax      => $line_tax
             }
         );
