@@ -30,6 +30,7 @@ use SL::CP;
 use SL::GL;
 use SL::RC;
 use SL::IC;
+use SL::PE;
 use DateTime;
 use DateTime::Format::ISO8601;
 use Date::Parse;
@@ -630,6 +631,7 @@ $api->get(
                 $new_line{cleared} = $line->{cleared};
                 $new_line{memo}    = $line->{memo};
                 $new_line{source}  = $line->{source};
+                $new_line{project} = $line->{project_id} || undef;
 
                 # Modify fx_transaction assignment based on fx_transaction value
                 $new_line{fx_transaction} =
@@ -817,6 +819,7 @@ sub api_gl_transaction () {
         $form->{"cleared_$i"}       = $line->{cleared};
         $form->{"memo_$i"}          = $line->{memo};
         $form->{"source_$i"}        = $line->{source};
+        $form->{"projectnumber_$i"}  = $line->{project};
 
         $i++;    # Increment the counter after processing the regular line
     }
@@ -1436,6 +1439,54 @@ $api->delete(
     }
 );
 
+############################
+####                    ####
+####     Projects       ####
+####                    ####
+############################
+$api->get(
+    '/projects' => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+        my $dbs    = $c->dbs($client);
+        my $form   = new Form;
+        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+        PE->projects( $c->slconfig, $form );
+        $c->render( json => $form->{all_project} );
+
+    }
+);
+$api->get(
+    '/projects/:id' => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+        my $dbs    = $c->dbs($client);
+        my $id     = $c->param('id');
+        my $form   = new Form;
+        $form->{id} = $id;
+        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+        PE->get_project( $c->slconfig, $form );
+
+        $c->render( json => {%$form} );
+
+    }
+);
+$api->post(
+    '/projects/:id' => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+        my $dbs    = $c->dbs($client);
+        my $data   = $c->req->json;
+        my $id     = $c->param('id');
+        my $form   = new Form;
+        for ( keys %$data ) { $form->{$_} = $data->{$_} if $data->{$_} }
+        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+        PE->save_project( $c->slconfig, $form );
+        $c->render( json => {%$form} );
+
+    }
+);
+
 ##########################
 ####                  ####
 #### Goods & Services ####
@@ -1580,6 +1631,14 @@ $api->post(
 ####                       ####
 ###############################
 
+helper get_projects => sub {
+    my $c        = shift;
+    my $client   = $c->param('client');
+    my $dbs      = $c->dbs($client);
+    my $projects = $dbs->query("SELECT * FROM project")->hashes;
+    return $projects;
+};
+
 helper get_departments => sub {
     my ( $c, $role ) = @_;
     my $client = $c->param('client');
@@ -1719,7 +1778,7 @@ $api->get(
 
         my $role        = $module eq 'customer' ? 'P' : undef;
         my $departments = $c->get_departments($role);
-
+        my $projects    = $c->get_projects;
         $c->render(
             json => {
                 currencies   => $currencies,
@@ -1728,7 +1787,8 @@ $api->get(
                 customers    => $customers,
                 vendors      => $vendors,
                 linetax      => $line_tax,
-                departments  => $departments
+                departments  => $departments,
+                projects     => $projects
             }
         );
     }
@@ -2080,6 +2140,7 @@ $api->get(
                 amount      => $amount_multiplier * ( -$entry->{amount} ),
                 taxAccount  => $entry->{tax_accno},
                 taxAmount   => $entry->{linetaxamount},
+                project     => $entry->{project_id},
               };
         }
 
@@ -2564,8 +2625,7 @@ $api->post(
 
             # Project number if exists
             if ( $line->{project} ) {
-                $form->{"projectnumber_$i"} =
-                  $line->{project}->{number} . "--" . $line->{project}->{id};
+                $form->{"projectnumber_$i"} = $line->{project};
             }
         }
 
