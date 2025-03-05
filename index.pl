@@ -1357,10 +1357,26 @@ $api->get(
     '/system/departments' => sub {
         my $c      = shift;
         my $client = $c->param('client');
-        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
-        my $form = new Form;
-        AM->departments( $c->slconfig, $form );
-        $c->render( json => $form->{ALL} );
+        my $dbs    = $c->dbs($client);
+
+        my $query = "SELECT * FROM department ORDER BY rn";
+
+        my $departments = $dbs->query($query)->hashes;
+
+        # Ensure departments is an array reference, even if empty
+        return [] unless $departments && @$departments;
+
+        # Check for transactions for each department
+        foreach my $dept (@$departments) {
+            my $txn_count = $dbs->query(
+"SELECT COUNT(*) AS count FROM dpt_trans WHERE department_id = ?",
+                $dept->{id}
+            )->hash->{count};
+
+            $dept->{transactions} = $txn_count > 0 ? 1 : 0;
+        }
+
+        $c->render( json => $departments );
     }
 );
 $api->post(
@@ -1378,6 +1394,48 @@ $api->post(
         $c->render( json => $form->{ALL} );
     }
 );
+
+$api->delete(
+    '/system/departments/:id' => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+        my $id     = $c->param('id');
+
+        return $c->render(
+            status => 400,
+            json   => { error => "Missing department ID" }
+        ) unless $id;
+
+        my $dbs = $c->dbs($client);
+
+        # Check if the department has any transactions
+        my $txn_count = $dbs->query(
+            "SELECT COUNT(*) AS count FROM dpt_trans WHERE department_id = ?",
+            $id )->hash->{count};
+
+        if ( $txn_count > 0 ) {
+            return $c->render(
+                status => 409,    # HTTP 409 Conflict
+                json   => {
+                    error =>
+"Department cannot be deleted because it has associated transactions"
+                }
+            );
+        }
+
+        # Create a form object with the department ID
+        my $form = new Form;
+        $form->{id} = $id;
+        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+
+        # Call the delete method from AM module
+        AM->delete_department( $c->slconfig, $form );
+
+        # Return no content (204 No Content) on success
+        return $c->rendered(204);
+    }
+);
+
 ##########################
 ####                  ####
 #### Goods & Services ####
@@ -1578,11 +1636,11 @@ helper get_currencies => sub {
 
     return $currencies;
 };
-
 helper get_accounts => sub {
     my ($c)    = @_;
     my $client = $c->param('client');
     my $form   = Form->new;
+    my $module = $c->param('module');
     $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
 
     # Fetch all accounts
@@ -1600,7 +1658,8 @@ helper get_accounts => sub {
         income         => 'AR_amount:IC_sale',
         service_income => 'AR_amount:IC_income',
         cogs           => 'AP_amount:IC_cogs',
-        expense        => 'AP_amount:IC_expense'
+        expense        => 'AP_amount:IC_expense',
+        all            => ''
     );
 
     # Create a hash to store filtered accounts for each type
@@ -1613,7 +1672,23 @@ helper get_accounts => sub {
         $filtered_accounts{$type} = \@filtered;
     }
 
-    return \%filtered_accounts;
+    # Apply module-specific modifications:
+    if ( $module eq 'gl' ) {
+
+# For 'gl', we only want the 'all' accounts, but filter out accounts with charttype 'H'
+        my @all_filtered =
+          grep { $_->{charttype} ne 'H' } @{ $filtered_accounts{'all'} };
+        return { all => \@all_filtered };
+    }
+    elsif ( $module eq 'gl_report' ) {
+
+     # For 'gl_report', return only the 'all' accounts without further filtering
+        return { all => $filtered_accounts{'all'} };
+    }
+    else {
+        # For any other module, return the complete set of filtered accounts.
+        return \%filtered_accounts;
+    }
 };
 
 $api->get(
@@ -1642,10 +1717,7 @@ $api->get(
         my $customers  = $c->get_vc('customer');
         my $vendors    = $c->get_vc('vendor');
 
-        my $role =
-            $module eq 'ar' ? 'p'
-          : $module eq 'ap' ? 'c'
-          :                   undef;
+        my $role        = $module eq 'customer' ? 'P' : undef;
         my $departments = $c->get_departments($role);
 
         $c->render(
@@ -2068,6 +2140,7 @@ $api->get(
             poNumber      => $form->{ponumber},
             currency      => $form->{currency},
             exchangerate  => $form->{exchangerate},
+            department_id => $form->{department_id},
             id            => $form->{id},
             recordAccount => $form->{acc_trans}{$transaction_type}[0],
             $vc_id_field  => $form->{$vc_id_field},
@@ -2253,6 +2326,7 @@ $api->get(
             currency      => $form->{currency},
             exchangerate  => $form->{"$form->{currency}"},
             id            => $form->{id},
+            department_id => $form->{department_id},
 
             lines    => \@lines,
             payments => \@payments,
@@ -2310,6 +2384,7 @@ $api->post(
         $form->{notes}        = $data->{notes}        || '';
         $form->{intnotes}     = $data->{intnotes}     || '';
         $form->{till}         = $data->{till}         || '';
+        $form->{department}   = $data->{department}   || '';
 
         # Set up AR or AP account from JSON
         # for AR, it's $form->{AR}, for AP, it's $form->{AP}.
@@ -2396,7 +2471,6 @@ $api->post(
         }
 
         # Other defaults
-        $form->{department_id} = undef;
         $form->{employee_id}   = undef;
         $form->{language_code} = 'en';
         $form->{precision}     = $data->{selectedCurrency}->{prec} || 2;
@@ -2455,6 +2529,7 @@ $api->post(
         $form->{transdate}    = $data->{invDate};
         $form->{duedate}      = $data->{dueDate};
         $form->{exchangerate} = $data->{exchangerate} || 1;
+        $form->{department}   = $data->{department}   || '';
 
         # Handle vendor/customer specific fields
         if ( $vc eq 'vendor' ) {
