@@ -320,8 +320,6 @@ sub post_transaction {
   $rc;
 
 }
-
-
 sub transactions {
   my ($self, $myconfig, $form) = @_;
 
@@ -434,6 +432,12 @@ sub transactions {
     $glwhere .= " AND lower(ac.memo) LIKE '$var'";
     $arwhere .= " AND lower(ac.memo) LIKE '$var'";
     $apwhere .= " AND lower(ac.memo) LIKE '$var'";
+  }
+  
+  if ($form->{project_id}) {
+    $glwhere .= " AND ac.project_id = '$form->{project_id}'";
+    $arwhere .= " AND ac.project_id = '$form->{project_id}'";
+    $apwhere .= " AND ac.project_id = '$form->{project_id}'";
   }
 
   unless ($form->{datefrom} || $form->{dateto}) {
@@ -591,13 +595,16 @@ sub transactions {
 		 $gdescription AS lineitem, '' AS name, '' AS vcnumber,
 		 '' AS address1, '' AS address2, '' AS city,
 		 '' AS zipcode, '' AS country,
-  tc.accno linetax_accno, tc.description linetax_description, ac.linetaxamount
+  tc.accno linetax_accno, tc.description linetax_description, ac.linetaxamount,
+                 ac.project_id, COALESCE(tp.description, p.description) AS project_description
                  FROM gl g
 		 JOIN acc_trans ac ON (g.id = ac.trans_id)
 		 JOIN chart c ON (ac.chart_id = c.id)
     LEFT JOIN chart tc ON (ac.tax_chart_id = tc.id)
 		 LEFT JOIN department d ON (d.id = g.department_id)
 		 LEFT JOIN translation l ON (l.trans_id = c.id AND l.language_code = '$myconfig->{countrycode}')
+                 LEFT JOIN project p ON (ac.project_id = p.id)
+                 LEFT JOIN translation tp ON (tp.trans_id = p.id AND tp.language_code = '$myconfig->{countrycode}')
                  WHERE $glwhere
 	UNION ALL
 	         SELECT a.id, 'ar' AS type, a.invoice, a.invnumber,
@@ -611,7 +618,8 @@ sub transactions {
 		 $lineitem AS lineitem, ct.name, ct.customernumber,
 		 ad.address1, ad.address2, ad.city,
 		 ad.zipcode, ad.country,
-  tc.accno linetax_accno, tc.description linetax_description, ac.linetaxamount
+  tc.accno linetax_accno, tc.description linetax_description, ac.linetaxamount,
+                 ac.project_id, COALESCE(tp.description, p.description) AS project_description
 		 FROM ar a
 		 JOIN acc_trans ac ON (a.id = ac.trans_id)
 		 $invoicejoin
@@ -621,6 +629,8 @@ sub transactions {
      LEFT JOIN chart tc ON (ac.tax_chart_id = tc.id)
 		 LEFT JOIN department d ON (d.id = a.department_id)
 		 LEFT JOIN translation l ON (l.trans_id = c.id AND l.language_code = '$myconfig->{countrycode}')
+                 LEFT JOIN project p ON (ac.project_id = p.id)
+                 LEFT JOIN translation tp ON (tp.trans_id = p.id AND tp.language_code = '$myconfig->{countrycode}')
 		 WHERE $arwhere
 	UNION ALL
 	         SELECT a.id, 'ap' AS type, a.invoice, a.invnumber,
@@ -634,7 +644,8 @@ sub transactions {
 		 $lineitem AS lineitem, ct.name, ct.vendornumber,
 		 ad.address1, ad.address2, ad.city,
 		 ad.zipcode, ad.country,
-     tc.accno linetax_accno, tc.description linetax_description, ac.linetaxamount
+     tc.accno linetax_accno, tc.description linetax_description, ac.linetaxamount,
+                 ac.project_id, COALESCE(tp.description, p.description) AS project_description
 		 FROM ap a
 		 JOIN acc_trans ac ON (a.id = ac.trans_id)
 		 $invoicejoin
@@ -644,6 +655,8 @@ sub transactions {
      LEFT JOIN chart tc ON (ac.tax_chart_id = tc.id)
 		 LEFT JOIN department d ON (d.id = a.department_id)
 		 LEFT JOIN translation l ON (l.trans_id = c.id AND l.language_code = '$myconfig->{countrycode}')
+                 LEFT JOIN project p ON (ac.project_id = p.id)
+                 LEFT JOIN translation tp ON (tp.trans_id = p.id AND tp.language_code = '$myconfig->{countrycode}')
 		 WHERE $apwhere|;
  
   my @sf = qw(id transdate reference);
