@@ -819,7 +819,7 @@ sub api_gl_transaction () {
         $form->{"cleared_$i"}       = $line->{cleared};
         $form->{"memo_$i"}          = $line->{memo};
         $form->{"source_$i"}        = $line->{source};
-        $form->{"projectnumber_$i"}  = $line->{project};
+        $form->{"projectnumber_$i"} = $line->{project};
 
         $i++;    # Increment the counter after processing the regular line
     }
@@ -1526,9 +1526,26 @@ $api->get(
         $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
 
         my $form = Form->new;
-        $form->{searchitems} = $params->{searchitems};
-        $form->{summary}     = 0;
-        $form->{open}        = 1;
+        $form->{searchitems}  = $params->{searchitems};
+        $form->{partnumber}   = $params->{partnumber};
+        $form->{description}  = $params->{description};
+        $form->{serialnumber} = $params->{serialnumber};
+        $form->{lot}          = $params->{lot};
+        $form->{make}         = $params->{make};
+        $form->{model}        = $params->{model};
+        $form->{drawing}      = $params->{drawing};
+        $form->{toolnumber}   = $params->{toolnumber};
+        $form->{microfiche}   = $params->{microfiche};
+        $form->{barcode}      = $params->{barcode};
+        $form->{summary}      = 1;
+        $form->{sold}         = $params->{sold};
+        $form->{ordered}      = $params->{ordered};
+        $form->{bought}       = $params->{bought};
+        $form->{onorder}      = $params->{onorder};
+        $form->{rfq}          = $params->{rfq};
+
+        $form->{summary} = 0;
+        $form->{open}    = 1;
 
         IC->all_parts( $c->slconfig, $form );
         warn( Dumper $form );
