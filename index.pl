@@ -2242,6 +2242,128 @@ $api->get(
         $c->render( json => $json_data );
     }
 );
+$api->post(
+    '/arap/transaction/:vc/:id' => { id => undef } => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+        my $data   = $c->req->json;
+        my $vc     = $c->param('vc');
+        my $dbs    = $c->dbs($client);
+        my $id     = $c->param('id');
+        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+
+        my $form = new Form;
+
+        $form->{type} = 'transaction';
+        $form->{vc}   = $vc eq 'vendor' ? 'vendor' : 'customer';
+
+        # Basic transaction details
+        $form->{id}           = $id if $id;
+        $form->{invnumber}    = $data->{invNumber}   || '';
+        $form->{description}  = $data->{description} || '';
+        $form->{transdate}    = $data->{invDate};
+        $form->{duedate}      = $data->{dueDate};
+        $form->{exchangerate} = $data->{exchangerate} || 1;
+        $form->{department}   = $data->{department}   || '';
+
+        # Handle vendor/customer specific fields
+        if ( $vc eq 'vendor' ) {
+            $form->{vendor_id} = $data->{selectedVendor}->{id};
+            $form->{vendor}    = $data->{selectedVendor}->{name};
+            $form->{AP}        = $data->{recordAccount}->{accno};
+        }
+        else {
+            $form->{customer_id} = $data->{selectedCustomer}->{id};
+            $form->{customer}    = $data->{selectedCustomer}->{name};
+            $form->{AR}          = $data->{recordAccount}->{accno};
+        }
+
+        # Currency and other details
+        $form->{currency}  = $data->{curr};
+        $form->{notes}     = $data->{notes}     || '';
+        $form->{intnotes}  = $data->{intnotes}  || '';
+        $form->{ordnumber} = $data->{ordNumber} || '';
+        $form->{ponumber}  = $data->{poNumber}  || '';
+
+        # Line items
+        $form->{rowcount} = scalar @{ $data->{lines} };
+        for my $i ( 1 .. $form->{rowcount} ) {
+            my $line   = $data->{lines}[ $i - 1 ];
+            my $amount = $line->{amount};
+            $form->{"amount_$i"}        = $amount;
+            $form->{"description_$i"}   = $line->{description};
+            $form->{"tax_$i"}           = $line->{taxAccount};
+            $form->{"linetaxamount_$i"} = $line->{taxAmount};
+            $form->{ $form->{vc} eq 'vendor' ? "AP_amount_$i" : "AR_amount_$i" }
+              = $line->{account};
+
+            # Project number if exists
+            if ( $line->{project} ) {
+                $form->{"projectnumber_$i"} = $line->{project};
+            }
+        }
+
+        # Payments
+        $form->{paidaccounts} = 0;
+        for my $payment ( @{ $data->{payments} } ) {
+            next unless $payment->{amount} > 0;
+            $form->{paidaccounts}++;
+            my $i = $form->{paidaccounts};
+
+            $form->{"datepaid_$i"}     = $payment->{date};
+            $form->{"source_$i"}       = $payment->{source} || '';
+            $form->{"memo_$i"}         = $payment->{memo}   || '';
+            $form->{"paid_$i"}         = $payment->{amount};
+            $form->{"exchangerate_$i"} = $payment->{exchangerate} || 1;
+
+            # Payment account with -- suffix
+            $form->{ $form->{vc} eq 'vendor' ? "AP_paid_$i" : "AR_paid_$i" } =
+              $payment->{account} . "--";
+
+            # Payment method if exists
+            if ( $payment->{method} ) {
+                $form->{"paymentmethod_$i"} =
+                  $payment->{method}->{name} . "--" . $payment->{method}->{id};
+            }
+        }
+
+        # Taxes
+        my @taxaccounts;
+        if ( $data->{taxes} && ref( $data->{taxes} ) eq 'ARRAY' ) {
+            for my $tax ( @{ $data->{taxes} } ) {
+                push @taxaccounts, $tax->{accno};
+                $form->{"tax_$tax->{accno}"} = $tax->{amount};
+                my $accno = $tax->{accno};
+
+                # Validate and store tax rate
+                my $rate = $tax->{rate};
+                $form->{"${accno}_rate"}    = $rate;
+                $form->{"calctax_${accno}"} = 1;
+            }
+            $form->{taxaccounts} = join( ' ', @taxaccounts );
+            $form->{taxincluded} = $data->{taxincluded} ? 1 : 0;
+        }
+
+        warn( Dumper($form) );
+
+        AA->post_transaction( $c->slconfig, $form );
+
+        $c->render( json => { id => $form->{id} } );
+    }
+);
+$api->delete(
+    'arap/transaction/:vc/:id' => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+        my $vc     = $c->param('vc');
+        my $form   = new Form;
+        $form->{id}               = new Form;
+        $form->{vc}               = $vc;
+        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+        AA->delete_transaction( $c->slconfig, $form );
+        $c->render( status => 204, data => '' );
+    }
+);
 $api->get(
     '/arap/invoice/:vc/:id' => sub {
         my $c      = shift;
@@ -2567,6 +2689,7 @@ $api->post(
         $c->render( json => { id => $form->{id} } );
     }
 );
+
 $api->delete(
     '/arap/invoice/:vc/:id' => sub {
         my $c      = shift;
@@ -2583,115 +2706,6 @@ $api->delete(
             IR->delete_invoice( $c->slconfig, $form );
         }
         $c->render( status => 204, data => '' );
-    }
-);
-$api->post(
-    '/arap/transaction/:vc/:id' => { id => undef } => sub {
-        my $c      = shift;
-        my $client = $c->param('client');
-        my $data   = $c->req->json;
-        my $vc     = $c->param('vc');
-        my $dbs    = $c->dbs($client);
-        my $id     = $c->param('id');
-        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
-
-        my $form = new Form;
-
-        $form->{type} = 'transaction';
-        $form->{vc}   = $vc eq 'vendor' ? 'vendor' : 'customer';
-
-        # Basic transaction details
-        $form->{id}           = $id if $id;
-        $form->{invnumber}    = $data->{invNumber}   || '';
-        $form->{description}  = $data->{description} || '';
-        $form->{transdate}    = $data->{invDate};
-        $form->{duedate}      = $data->{dueDate};
-        $form->{exchangerate} = $data->{exchangerate} || 1;
-        $form->{department}   = $data->{department}   || '';
-
-        # Handle vendor/customer specific fields
-        if ( $vc eq 'vendor' ) {
-            $form->{vendor_id} = $data->{selectedVendor}->{id};
-            $form->{vendor}    = $data->{selectedVendor}->{name};
-            $form->{AP}        = $data->{recordAccount}->{accno};
-        }
-        else {
-            $form->{customer_id} = $data->{selectedCustomer}->{id};
-            $form->{customer}    = $data->{selectedCustomer}->{name};
-            $form->{AR}          = $data->{recordAccount}->{accno};
-        }
-
-        # Currency and other details
-        $form->{currency}  = $data->{curr};
-        $form->{notes}     = $data->{notes}     || '';
-        $form->{intnotes}  = $data->{intnotes}  || '';
-        $form->{ordnumber} = $data->{ordNumber} || '';
-        $form->{ponumber}  = $data->{poNumber}  || '';
-
-        # Line items
-        $form->{rowcount} = scalar @{ $data->{lines} };
-        for my $i ( 1 .. $form->{rowcount} ) {
-            my $line   = $data->{lines}[ $i - 1 ];
-            my $amount = $line->{amount};
-            $form->{"amount_$i"}        = $amount;
-            $form->{"description_$i"}   = $line->{description};
-            $form->{"tax_$i"}           = $line->{taxAccount};
-            $form->{"linetaxamount_$i"} = $line->{taxAmount};
-            $form->{ $form->{vc} eq 'vendor' ? "AP_amount_$i" : "AR_amount_$i" }
-              = $line->{account};
-
-            # Project number if exists
-            if ( $line->{project} ) {
-                $form->{"projectnumber_$i"} = $line->{project};
-            }
-        }
-
-        # Payments
-        $form->{paidaccounts} = 0;
-        for my $payment ( @{ $data->{payments} } ) {
-            next unless $payment->{amount} > 0;
-            $form->{paidaccounts}++;
-            my $i = $form->{paidaccounts};
-
-            $form->{"datepaid_$i"}     = $payment->{date};
-            $form->{"source_$i"}       = $payment->{source} || '';
-            $form->{"memo_$i"}         = $payment->{memo}   || '';
-            $form->{"paid_$i"}         = $payment->{amount};
-            $form->{"exchangerate_$i"} = $payment->{exchangerate} || 1;
-
-            # Payment account with -- suffix
-            $form->{ $form->{vc} eq 'vendor' ? "AP_paid_$i" : "AR_paid_$i" } =
-              $payment->{account} . "--";
-
-            # Payment method if exists
-            if ( $payment->{method} ) {
-                $form->{"paymentmethod_$i"} =
-                  $payment->{method}->{name} . "--" . $payment->{method}->{id};
-            }
-        }
-
-        # Taxes
-        my @taxaccounts;
-        if ( $data->{taxes} && ref( $data->{taxes} ) eq 'ARRAY' ) {
-            for my $tax ( @{ $data->{taxes} } ) {
-                push @taxaccounts, $tax->{accno};
-                $form->{"tax_$tax->{accno}"} = $tax->{amount};
-                my $accno = $tax->{accno};
-
-                # Validate and store tax rate
-                my $rate = $tax->{rate};
-                $form->{"${accno}_rate"}    = $rate;
-                $form->{"calctax_${accno}"} = 1;
-            }
-            $form->{taxaccounts} = join( ' ', @taxaccounts );
-            $form->{taxincluded} = $data->{taxincluded} ? 1 : 0;
-        }
-
-        warn( Dumper($form) );
-
-        AA->post_transaction( $c->slconfig, $form );
-
-        $c->render( json => { id => $form->{id} } );
     }
 );
 
