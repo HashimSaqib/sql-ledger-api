@@ -2355,9 +2355,10 @@ $api->delete(
     'arap/transaction/:vc/:id' => sub {
         my $c      = shift;
         my $client = $c->param('client');
+        my $id     = $c->param('id');
         my $vc     = $c->param('vc');
         my $form   = new Form;
-        $form->{id}               = new Form;
+        $form->{id}               = $id;
         $form->{vc}               = $vc;
         $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
         AA->delete_transaction( $c->slconfig, $form );
