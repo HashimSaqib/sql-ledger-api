@@ -63,6 +63,58 @@ sub yearend_statement {
   $dbh->disconnect;
 
 }
+sub income_statement_periods {
+  my ($self, $myconfig, $form, $locale) = @_;
+
+  # Connect to the database.
+  my $dbh = $form->dbconnect($myconfig);
+
+  # Set exchange rate if currency differs from default.
+  if ($form->{currency} ne $form->{defaultcurrency}) {
+    $form->{exchangerate} = $form->get_exchangerate($myconfig, $dbh, $form->{currency}, $form->{todate});
+  }
+  $form->{exchangerate} ||= 1;
+  $form->{longformat} *= 1;
+
+  # Temporarily switch the date format to numeric format.
+  my $dateformat = $myconfig->{dateformat};
+  $myconfig->{dateformat} = "yyyymmdd";
+
+  # Process each category: Income (I) and Expense (E)
+  for my $category (qw(I E)) {
+    # Process each defined period.
+    foreach my $p (@{ $form->{periods} }) {
+      my $label = $p->{label};  # Use the provided label directly (e.g., 'Q1', 'Q2')
+      my $fromdate = $form->datetonum($myconfig, $p->{fromdate});
+      my $todate   = $form->datetonum($myconfig, $p->{todate});
+
+      # Save the formatted period information using the label.
+      $form->{period}{$label} = {
+        fromdate => $locale->date($myconfig, $fromdate, $form->{longformat}),
+        todate   => $locale->date($myconfig, $todate,   $form->{longformat}),
+      };
+
+      # Retrieve and add the account data using the label directly.
+      my %c = &get_accounts($form, $dbh, $fromdate, $todate, $category, 1);
+      &add_accounts($form, \%c, $label, $category);
+    }
+  }
+
+  # Retrieve default company information.
+  my %defaults = $form->get_defaults($dbh, \@{['company','address','businessnumber','companywebsite','companyemail','tel','fax']});
+  for (keys %defaults) {
+    $form->{$_} = $defaults{$_};
+  }
+  
+  # Set the report level.
+  $form->report_level($myconfig, $dbh);
+
+  # Disconnect from the database.
+  $dbh->disconnect;
+
+  # Restore the original date format.
+  $myconfig->{dateformat} = $dateformat;
+}
 
 
 sub create_links {
