@@ -1472,7 +1472,7 @@ $api->get(
     }
 );
 $api->post(
-    '/projects/:id' => sub {
+    '/projects/:id' => { id => undef } => sub {
         my $c      = shift;
         my $client = $c->param('client');
         my $dbs    = $c->dbs($client);
@@ -1653,8 +1653,18 @@ helper get_projects => sub {
     my $client   = $c->param('client');
     my $dbs      = $c->dbs($client);
     my $projects = $dbs->query("SELECT * FROM project")->hashes;
+
+    # Return an empty array ref if no projects are found
+    return [] unless ($projects && @$projects);
+
+    # Add a 'value' property to each project that concatenates projectnumber and id
+    for my $project (@$projects) {
+        $project->{value} = $project->{projectnumber} . '--' . $project->{id};
+    }
+
     return $projects;
 };
+
 
 helper get_departments => sub {
     my ( $c, $role ) = @_;
@@ -2813,19 +2823,9 @@ $api->get(
         # Process income statement report
         RP->income_statement_periods( $c->slconfig, $form, $locale );
 
-        if ( $form->{usetemplate} eq 'Y' ) {
+        warn( Dumper $form );
 
-            # Determine display order
-            my $this     = "this";
-            my $previous = "previous";
-            my @periods  = sort { $a <=> $b } keys %{ $form->{period} };
-            if ( $form->{reversedisplay} ) {
-                @periods = reverse @periods;
-                if ( $form->{previousyear} ) {
-                    $this     = "previous";
-                    $previous = "this";
-                }
-            }
+        if ( $form->{usetemplate} eq 'Y' ) {
 
             # spacer configuration for formatting (if needed)
             my %spacer = (
@@ -2870,12 +2870,12 @@ $api->get(
                 $form->{longformat} );
             my $userspath = "temp";
             $form->{templates} = "templates/$client/";
-            $form->{IN}        = "income_statement.html";
+            $form->{IN}        = "income_statement_new.html";
             $form->{OUT}       = ">temp/income_statement.html";
 
             # Build the report; pass the objects and needed variables
-            build_report( $form, $locale, $account_map, $myconfig, $this,
-                $previous, $timeperiod );
+            build_report( $form, $locale, $account_map, $myconfig,
+                $timeperiod );
             $form->parse_template( \%$myconfig, $userspath );
 
             # Strip the '>' character from the output file path
@@ -2950,392 +2950,163 @@ sub html_to_pdf {
 # Now accepts required objects/variables as parameters.
 #----------------------------------------------------------------
 sub build_report {
-    my ( $form, $locale, $account_map, $myconfig, $this, $previous,
-        $timeperiod )
-      = @_;
+    my ( $form, $locale, $account_map, $myconfig, $timeperiod ) = @_;
 
-    # Define the categories to process (e.g. Assets, Liabilities, Equity)
-    my @categories = qw(I E);
+    # Extract period information from the form
+    my @periods = map { $_->{label} } @{ $form->{periods} };
 
-    my ( $category, $accno, $str, $dash, $type, $ml, $currentearnings,
-        $previousearnings );
-    my %acc;
+    # Initialize accumulators and row data containers.
+    # For simplicity we assume category "I" is Income and "E" is Expense.
+    my ( %income_data,  %expense_data );
+    my ( %total_income, %total_expense );
 
-    foreach my $category (@categories) {
+# Process each account in the master accounts hash (stored under the empty string key)
+    foreach my $accno ( sort { $a <=> $b } keys %{ $form->{''} } ) {
 
-        # Skip if the category is not present in the form data.
-        next unless exists $form->{$category};
-        foreach my $accno ( sort keys %{ $form->{$category} } ) {
-            $str = ( $form->{l_heading} ) ? $form->{padding} : "";
+        # For each period that this account appears in:
+        foreach my $period (@periods) {
+            next unless exists $form->{''}{$accno}{$period};
 
-            # Use defined-or to safely get values from the report data.
-            $acc{charttype} = $form->{$category}{$accno}{this}{0}{charttype}
-              // $form->{$category}{$accno}{$previous}{0}{charttype};
-            $acc{description} =
-              $form->{$category}{$accno}{this}{0}{description}
-              // $form->{$category}{$accno}{$previous}{0}{description};
+            # Each period entry has a key (e.g. "I" or "E") for the category.
+            my ($cat) = keys %{ $form->{''}{$accno}{$period} };
+            my $data = $form->{''}{$accno}{$period}{$cat};
 
-            if ( $acc{charttype} eq "A" ) {
-                $str .=
-                  ( $form->{l_accno} )
-                  ? "$accno - $acc{description}"
-                  : "$acc{description}";
-            }
-            if ( $acc{charttype} eq "H" ) {
-                if ( $acc{subtotal} && $form->{l_subtotal} ) {
-                    $dash = "- ";
-                    push(
-                        @{
-                            $form->{"$account_map->{$category}{type}_account"}
-                        },
-                        "$str$form->{bold}$acc{subdescription}$form->{endbold}"
-                    );
-                    push(
-                        @{
-                            $form->{
-                                "$account_map->{$category}{type}_${this}_period"
-                            }
-                        },
-                        $form->format_amount(
-                            $myconfig,
-                            $acc{"subthis"} * $account_map->{$category}{ml},
-                            $form->{decimalplaces}, $dash
-                        )
-                    );
+            my $charttype   = $data->{charttype};
+            my $description = $data->{description};
+            my $amount      = $data->{amount};
+            my $ml          = $account_map->{$cat}{ml}; # multiplier for amounts
 
-                    if ( $form->{previousyear} ) {
-                        push(
-                            @{
-                                $form->{
-"$account_map->{$category}{type}_${previous}_period"
-                                }
-                            },
-                            $form->format_amount(
-                                $myconfig,
-                                $acc{"sub$previous"} *
-                                  $account_map->{$category}{ml},
-                                $form->{decimalplaces},
-                                $dash
-                            )
-                        );
-                    }
-                }
-
-                $str =
-                  "$form->{br}$form->{bold}$acc{description}$form->{endbold}";
-
-                $acc{"subthis"} = $form->{$category}{$accno}{this}{0}{amount};
-                $acc{"sub$previous"} =
-                  $form->{$category}{$accno}{$previous}{0}{amount};
-                $acc{subdescription} = $acc{description};
-
-                $acc{subtotal} = 1;
-                $acc{ml}       = $account_map->{$category}{ml};
-
-                # Zero out the amounts after aggregation.
-                $form->{$category}{$accno}{this}{0}{amount} = 0;
-                $form->{$category}{$accno}{$previous}{0}{amount} = 0;
-
-                # If headings are disabled, skip further processing.
-                next unless $form->{l_heading};
-                $dash = " ";
-            }
-
-            push(
-                @{ $form->{"$account_map->{$category}{type}_account"} },
-                $str
+            # Format the amount after applying the multiplier.
+            my $formatted_amount = $form->format_amount(
+                $myconfig,
+                $amount * $ml,
+                $form->{decimalplaces}, ''
             );
 
-            if ( $acc{charttype} eq 'A' ) {
-                $form->{"total_$account_map->{$category}{type}_${this}_period"}
-                  += $form->{$category}{$accno}{this}{0}{amount} *
-                  $account_map->{$category}{ml};
-                $dash = "- ";
+            # Build a label for the row.
+            my $label = "";
+            if ( $charttype eq "A" ) {
+                $label =
+                  $form->{l_accno} ? "$accno - $description" : $description;
+            }
+            elsif ( $charttype eq "H" ) {
+
+                # For header (or subtotal) rows, add extra formatting.
+                $label =
+                  $form->{br} . $form->{bold} . $description . $form->{endbold};
+
+               # (Additional header/subtotal logic may be added here if needed.)
             }
 
-            push(
-                @{ $form->{"$account_map->{$category}{type}_${this}_period"} },
-                $form->format_amount(
-                    $myconfig,
-                    $form->{$category}{$accno}{this}{0}{amount} *
-                      $account_map->{$category}{ml},
-                    $form->{decimalplaces},
-                    $dash
-                )
-            );
-
-            if ( $form->{previousyear} ) {
-                $form->{
-                    "total_$account_map->{$category}{type}_${previous}_period"}
-                  += $form->{$category}{$accno}{$previous}{0}{amount} *
-                  $account_map->{$category}{ml};
-                push(
-                    @{
-                        $form->{
-                            "$account_map->{$category}{type}_${previous}_period"
-                        }
-                    },
-                    $form->format_amount(
-                        $myconfig,
-                        $form->{$category}{$accno}{$previous}{0}{amount} *
-                          $account_map->{$category}{ml},
-                        $form->{decimalplaces},
-                        $dash
-                    )
-                );
+       # Depending on category, store data into our income or expense container.
+            if ( $cat eq 'I' ) {
+                $income_data{$accno}{label} ||= $label;
+                $income_data{$accno}{amounts}{$period} = $formatted_amount;
+                $total_income{$period} += $amount * $ml;
             }
-
-            # Save type and multiplier for later use.
-            $type = $account_map->{$category}{type};
-            $ml   = $account_map->{$category}{ml};
+            elsif ( $cat eq 'E' ) {
+                $expense_data{$accno}{label} ||= $label;
+                $expense_data{$accno}{amounts}{$period} = $formatted_amount;
+                $total_expense{$period} += $amount * $ml;
+            }
         }
     }
 
-    $str = ( $form->{l_heading} ) ? $form->{padding} : "";
+    # Build HTML strings for table rows.
+    my $income_rows_html  = "";
+    my $expense_rows_html = "";
 
-    # Set period date strings
-    $form->{this_period} =
-"$form->{period}{0}{this}{fromdate}<br>\n$form->{period}{0}{this}{todate}";
-    $form->{previous_period} =
-"$form->{period}{0}{previous}{fromdate}<br>\n$form->{period}{0}{previous}{todate}";
-
-    if ( grep { /I/ } @categories ) {
-
-        # Calculate totals for income/loss
-        $form->{total_this_period} = $form->format_amount(
-            $myconfig,
-            $form->{total_income_this_period} -
-              $form->{total_expense_this_period},
-            $form->{decimalplaces},
-            $dash
-        );
-        $form->{total_previous_period} = $form->format_amount(
-            $myconfig,
-            $form->{total_income_previous_period} -
-              $form->{total_expense_previous_period},
-            $form->{decimalplaces},
-            $dash
-        );
-
-        $form->{total_income_this_period} = $form->format_amount(
-            $myconfig,
-            $form->{total_income_this_period},
-            $form->{decimalplaces}, $dash
-        );
-        $form->{total_expense_this_period} = $form->format_amount(
-            $myconfig,
-            $form->{total_expense_this_period},
-            $form->{decimalplaces}, $dash
-        );
-        $form->{total_income_previous_period} = $form->format_amount(
-            $myconfig,
-            $form->{total_income_previous_period},
-            $form->{decimalplaces}, $dash
-        );
-        $form->{total_expense_previous_period} = $form->format_amount(
-            $myconfig,
-            $form->{total_expense_previous_period},
-            $form->{decimalplaces}, $dash
-        );
-
-    }
-    else {
-        $currentearnings = $form->round_amount(
-            $form->{"total_asset_${this}_period"} -
-              $form->{"total_liability_${this}_period"} -
-              $form->{"total_equity_${this}_period"},
-            $form->{decimalplaces}
-        );
-
-        $previousearnings = $form->round_amount(
-            $form->{"total_asset_${previous}_period"} -
-              $form->{"total_liability_${previous}_period"} -
-              $form->{"total_equity_${previous}_period"},
-            $form->{decimalplaces}
-        );
-
-        $form->{total_this_period} = $form->format_amount(
-            $myconfig,
-            $form->{total_liability_this_period} +
-              $form->{total_equity_this_period} +
-              $currentearnings,
-            $form->{decimalplaces},
-            $dash
-        );
-        $form->{total_previous_period} = $form->format_amount(
-            $myconfig,
-            $form->{total_liability_previous_period} +
-              $form->{total_equity_previous_period} +
-              $previousearnings,
-            $form->{decimalplaces},
-            $dash
-        );
-
-        # Format totals for assets, liabilities, and equity
-        $form->{total_asset_this_period} = $form->format_amount(
-            $myconfig,
-            $form->{total_asset_this_period},
-            $form->{decimalplaces}, $dash
-        );
-        $form->{total_asset_previous_period} = $form->format_amount(
-            $myconfig,
-            $form->{total_asset_previous_period},
-            $form->{decimalplaces}, $dash
-        );
-
-        $form->{total_liability_this_period} = $form->format_amount(
-            $myconfig,
-            $form->{total_liability_this_period},
-            $form->{decimalplaces}, $dash
-        );
-        $form->{total_liability_previous_period} = $form->format_amount(
-            $myconfig,
-            $form->{total_liability_previous_period},
-            $form->{decimalplaces}, $dash
-        );
-
-        $form->{total_equity_this_period} = $form->format_amount(
-            $myconfig,
-            $form->{total_equity_this_period} + $currentearnings,
-            $form->{decimalplaces}, $dash
-        );
-        $form->{total_equity_previous_period} = $form->format_amount(
-            $myconfig,
-            $form->{total_equity_previous_period} + $previousearnings,
-            $form->{decimalplaces}, $dash
-        );
-    }
-
-    # If a subtotal was marked and headings are enabled, add the final subtotal.
-    if ( $acc{subtotal} && $form->{l_subtotal} ) {
-        push(
-            @{ $form->{"${type}_account"} },
-            "$str$form->{bold}$acc{subdescription}$form->{endbold}"
-        );
-        push(
-            @{ $form->{"${type}_${this}_period"} },
-            $form->format_amount(
-                $myconfig,              $acc{"subthis"} * $ml,
-                $form->{decimalplaces}, $dash
-            )
-        );
-        push(
-            @{ $form->{"${type}_${previous}_period"} },
-            $form->format_amount(
-                $myconfig,              $acc{"sub$previous"} * $ml,
-                $form->{decimalplaces}, $dash
-            )
-        );
-    }
-
-    # If there are equity values and earnings, add a Current Earnings account.
-    if ( grep { /Q/ } @categories ) {
-        if ( $currentearnings || $previousearnings ) {
-            push(
-                @{ $form->{equity_account} },
-                $locale
-                ? $locale->text('Current Earnings')
-                : 'Current Earnings'
-            );
-            push(
-                @{ $form->{"equity_${this}_period"} },
-                $form->format_amount(
-                    $myconfig,              $currentearnings,
-                    $form->{decimalplaces}, $dash
-                )
-            );
-            push(
-                @{ $form->{"equity_${previous}_period"} },
-                $form->format_amount(
-                    $myconfig,              $previousearnings,
-                    $form->{decimalplaces}, $dash
-                )
-            );
+    # Build Income rows
+    foreach my $accno ( sort { $a <=> $b } keys %income_data ) {
+        my $row =
+          qq|<tr><td width="4"></td><td>$income_data{$accno}{label}</td>|;
+        foreach my $period (@periods) {
+            my $amt =
+              exists $income_data{$accno}{amounts}{$period}
+              ? $income_data{$accno}{amounts}{$period}
+              : "";
+            $row .= qq|<td align="right">$amt</td>|;
         }
+        $row              .= "</tr>\n";
+        $income_rows_html .= $row;
     }
 
-    # Finally, assign the period information.
-    $form->{period} = $timeperiod;
+    # Build Expense rows
+    foreach my $accno ( sort { $a <=> $b } keys %expense_data ) {
+        my $row =
+          qq|<tr><td width="4"></td><td>$expense_data{$accno}{label}</td>|;
+        foreach my $period (@periods) {
+            my $amt =
+              exists $expense_data{$accno}{amounts}{$period}
+              ? $expense_data{$accno}{amounts}{$period}
+              : "";
+            $row .= qq|<td align="right">$amt</td>|;
+        }
+        $row               .= "</tr>\n";
+        $expense_rows_html .= $row;
+    }
+
+    # Build totals row for Income and Expenses.
+    my $total_income_html =
+      qq|<tr valign="top"><td> </td><th align="left">TOTAL INCOME</th>|;
+    my $total_expense_html =
+      qq|<tr valign="top"><td> </td><th align="left">TOTAL EXPENSES</th>|;
+    my $total_profit_html =
+      qq|<tr valign="top"><th align="left" colspan="2">INCOME / (LOSS)</th>|;
+
+    foreach my $period (@periods) {
+        my $inc = $form->format_amount(
+            $myconfig,
+            $total_income{$period} || 0,
+            $form->{decimalplaces}, ''
+        );
+        my $exp = $form->format_amount(
+            $myconfig,
+            $total_expense{$period} || 0,
+            $form->{decimalplaces}, ''
+        );
+        my $profit = $form->format_amount(
+            $myconfig,
+            ( $total_income{$period} || 0 ) - ( $total_expense{$period} || 0 ),
+            $form->{decimalplaces},
+            ''
+        );
+        $total_income_html .=
+          qq|<td align="right">$inc<hr noshade size="2"></td>|;
+        $total_expense_html .=
+          qq|<td align="right">$exp<hr noshade size="2"></td>|;
+        $total_profit_html .=
+          qq|<td align="right">$profit<hr noshade size="2"></td>|;
+    }
+    $total_income_html  .= "</tr>\n";
+    $total_expense_html .= "</tr>\n";
+    $total_profit_html  .= "</tr>\n";
+
+# Build a header row for the period columns (using fromdate/todate info from $form->{period})
+    my $period_headers_html = "";
+    foreach my $p ( @{ $form->{periods} } ) {
+        $period_headers_html .= qq|<th>$p->{label}</th>|;
+    }
+
+    # Assign built HTML snippets into $form for use by the template.
+    $form->{period_headers_html} = $period_headers_html;
+    $form->{income_rows}         = $income_rows_html;
+    $form->{expense_rows}        = $expense_rows_html;
+    $form->{total_income_html}   = $total_income_html;
+    $form->{total_expense_html}  = $total_expense_html;
+    $form->{total_profit_html}   = $total_profit_html;
+
+    # Also assign a simple period string for the title header.
+    $form->{period} = join( " / ", @periods );
+
+    # You can also pass along the raw periods array if needed.
+    $form->{_periods} = \@periods;
+
+    # (Any additional adjustments for subtotals or headers may be added here.)
+
+    # Optionally, set $form->{timeperiod} if needed by your template.
+    $form->{timeperiod} = $timeperiod;
 }
-
-$api->get(
-    '/reports/metrics' => sub {
-        my $c           = shift;
-        my $client      = $c->param('client');
-        my $start_date  = $c->param('start_date');     # Format: YYYY-MM-DD
-        my $end_date    = $c->param('end_date');       # Format: YYYY-MM-DD
-        my $consolidate = $c->param('consolidate');    # 'monthly' or 'daily'
-
-        # Create the DBIx::Simple handle
-        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
-        my $dbs = $c->dbs($client);
-
-        my $period_field =
-          $consolidate eq 'monthly'
-          ? "date_trunc('month', transdate)"
-          : "transdate::date";
-
-        # Query for expenses
-        my $expenses_query = qq{
-            SELECT 
-                $period_field as period,
-                ABS(SUM(amount)) as amount
-            FROM acc_trans ac
-            JOIN chart c ON c.id = ac.chart_id
-            WHERE c.category = 'E'
-            AND transdate >= ?
-            AND transdate <= ?
-            AND amount < 0
-            GROUP BY period
-            ORDER BY period
-        };
-
-        # Query for sales
-        my $sales_query = qq{
-            SELECT 
-                $period_field as period,
-                SUM(amount) as amount
-            FROM acc_trans ac
-            JOIN chart c ON c.id = ac.chart_id
-            WHERE c.category = 'I'
-            AND transdate >= ?
-            AND transdate <= ?
-            AND amount > 0
-            GROUP BY period
-            ORDER BY period
-        };
-
-        my @results;
-
-        # Fetch and format expenses data
-        my $expenses_results =
-          $dbs->query( $expenses_query, $start_date, $end_date );
-        while ( my $row = $expenses_results->hash ) {
-            push @results,
-              {
-                period => $row->{period},
-                type   => 'expenses',
-                amount => $row->{amount}
-              };
-        }
-
-        # Fetch and format sales data
-        my $sales_results = $dbs->query( $sales_query, $start_date, $end_date );
-        while ( my $row = $sales_results->hash ) {
-            push @results,
-              {
-                period => $row->{period},
-                type   => 'sales',
-                amount => $row->{amount}
-              };
-        }
-        warn( "Expenses Results: " . Dumper( \@results ) );
-        warn( "Sales Results: " . Dumper( \@results ) );
-
-        # Return combined results
-        $c->render( json => \@results );
-    }
-);
 
 ###############################
 ####                       ####
