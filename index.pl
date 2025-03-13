@@ -1655,16 +1655,15 @@ helper get_projects => sub {
     my $projects = $dbs->query("SELECT * FROM project")->hashes;
 
     # Return an empty array ref if no projects are found
-    return [] unless ($projects && @$projects);
+    return [] unless ( $projects && @$projects );
 
-    # Add a 'value' property to each project that concatenates projectnumber and id
+ # Add a 'value' property to each project that concatenates projectnumber and id
     for my $project (@$projects) {
         $project->{value} = $project->{projectnumber} . '--' . $project->{id};
     }
 
     return $projects;
 };
-
 
 helper get_departments => sub {
     my ( $c, $role ) = @_;
