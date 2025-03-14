@@ -2490,6 +2490,7 @@ $api->get(
                     ordernumber      => $_->{ordernumber},
                     serialnumber     => $_->{serialnumber},
                     customerponumber => $_->{customerponumber},
+                    project          => $_->{project_id} || '',
                     cost             => $_->{cost},
                     costvendor       => $_->{costvendor},
                     costvendorid     => $_->{costvendorid},
@@ -2655,11 +2656,11 @@ $api->post(
             $form->{"customerponumber_$i"} = $line->{customerponumber} || '';
             $form->{"costvendor_$i"}       = $line->{costvendor}       || '';
             $form->{"package_$i"}          = $line->{package}          || '';
-            $form->{"volume"}              = $line->{volume}           || '';
-            $form->{"weight"}              = $line->{weight}           || '';
-            $form->{"netweight"}           = $line->{netweight}        || '';
-            $form->{"cost"}                = $line->{cost}             || '';
-
+            $form->{"volume_$i"}           = $line->{volume}           || '';
+            $form->{"weight_$i"}           = $line->{weight}           || '';
+            $form->{"netweight_$i"}        = $line->{netweight}        || '';
+            $form->{"cost_$i"}             = $line->{cost}             || '';
+            $form->{"projectnumber_$i"}    = $line->{project}          || '';
         }
 
         # Build payments
