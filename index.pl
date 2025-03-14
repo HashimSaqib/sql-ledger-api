@@ -1697,6 +1697,14 @@ helper get_departments => sub {
 
     my $departments = $dbs->query( $query, @bind_params )->hashes;
 
+    return [] unless ( $departments && @$departments );
+
+   # Add a 'value' property to each project that concatenates description and id
+    for my $department (@$departments) {
+        $department->{value} =
+          $department->{description} . '--' . $department->{id};
+    }
+
     return $departments // [];
 };
 
@@ -2765,34 +2773,66 @@ $api->get(
 
     }
 );
-
 $api->get(
     '/reports/transactions' => sub {
         my $c      = shift;
         my $client = $c->param('client');
-
+        my $dbs    = $c->dbs($client);
         $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
 
         my $form = new Form;
+        $form->{fromdate}      = $c->param('fromdate')   || '';
+        $form->{todate}        = $c->param('todate')     || '';
+        $form->{accno}         = $c->param('accno')      || '';
+        $form->{department}    = $c->param('department') || '';
+        $form->{projectnumber} = $c->param('project')    || '';
+        $form->{accounttype}   = 'standard';
 
-        my $fromdate = $c->param('fromdate');
-        my $todate   = $c->param('todate');
-        my $accno    = $c->param('accno');
+        # Query the chart table to get the current account record.
+        my $chart_sql =
+          'SELECT accno, charttype, description FROM chart WHERE accno = ?';
+        my $result = $dbs->query( $chart_sql, $form->{accno} );
+        my $heading_row =
+          $result->hash;    # use the 'hash' method instead of fetchrow_hashref
 
-        $form->{fromdate}    = $fromdate || '';
-        $form->{todate}      = $todate   || '';
-        $form->{accno}       = $accno;
-        $form->{accounttype} = 'standard';
+        my $response = {};
 
-        CA->all_transactions( $c->slconfig, $form );
+        if ( $heading_row->{charttype} eq 'A' ) {
 
-        warn($form);
-        my $response;
-        $response->{transactions} = $form->{CA};
-        $response->{accno}        = $form->{accno};
-        $response->{description}  = $form->{description};
+            # For an account type "A", process transactions normally.
+            CA->all_transactions( $c->slconfig, $form );
+            $response->{transactions} = $form->{CA};
+            $response->{accno}        = $form->{accno};
+            $response->{description}  = $form->{description};
+        }
+        else {
+            # If it's a heading ("H"), fetch its child accounts.
+            my @child_accnos;
+            my $child_sql =
+'SELECT accno, charttype FROM chart WHERE accno > ? ORDER BY accno';
+            my $child_result = $dbs->query( $child_sql, $heading_row->{accno} );
+            while ( my $row = $child_result->hash )
+            {    # iterate using the 'hash' method
+                last if $row->{charttype} eq 'H';
+                push @child_accnos, $row->{accno};
+                warn( $row->{accno} );
+            }
+
+            my @combined_transactions;
+
+            foreach my $child (@child_accnos) {
+                $form->{accno} = $child;
+                CA->all_transactions( $c->slconfig, $form );
+                push @combined_transactions, @{ $form->{CA} || [] };
+            }
+
+            # Build the response using the heading's details.
+            $response->{transactions} = \@combined_transactions;
+            $response->{accno}        = $heading_row->{accno};
+            $response->{description}  = $heading_row->{description};
+        }
+
         $c->render( json => $response );
-
     }
 );
 
@@ -4167,10 +4207,6 @@ $api->post(
         my $c      = shift;
         my $data   = $c->req->json;
         my $client = $c->param('client');
-
-        # Check permissions if needed
-        my $permission = "Banking--Reconciliation";
-        return unless $c->check_perms($permission);
 
         # Validate required data
         unless ( $data->{accno} && $data->{transactions} ) {
