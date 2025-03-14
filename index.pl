@@ -1578,9 +1578,25 @@ $api->post(
         my $id     = $c->param('id');
         my $data   = $c->req->json;
         warn( Dumper $data );
-
+        my $dbs  = $c->dbs($client);
         my $form = new Form;
         $form->{id} = $id;
+
+        if (   ( !$id )
+            && $data->{partnumber}
+            && $data->{partnumber} ne '' )
+        {
+            warn('inside if');
+            my $existing =
+              $dbs->query( "SELECT * FROM parts WHERE partnumber = ?",
+                $data->{partnumber} )->hash;
+            if ($existing) {
+                return $c->render(
+                    status => 409,
+                    json   => { error => "Part number already exists" }
+                );
+            }
+        }
 
         # Map all non-array fields from $data to $form
         foreach my $key ( keys %$data ) {
@@ -1636,7 +1652,8 @@ $api->post(
             }
             $form->{vendor_rows} = scalar @{ $data->{vendorLines} };
         }
-
+        $form->{id} = $id;
+        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
         IC->save( $c->slconfig, $form );
         $c->render( json => {%$form} );
     }
@@ -3106,6 +3123,85 @@ sub build_report {
     # Optionally, set $form->{timeperiod} if needed by your template.
     $form->{timeperiod} = $timeperiod;
 }
+
+$api->get(
+    '/reports/metrics' => sub {
+        my $c           = shift;
+        my $client      = $c->param('client');
+        my $start_date  = $c->param('start_date');     # Format: YYYY-MM-DD
+        my $end_date    = $c->param('end_date');       # Format: YYYY-MM-DD
+        my $consolidate = $c->param('consolidate');    # 'monthly' or 'daily'
+
+        # Create the DBIx::Simple handle
+        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+        my $dbs = $c->dbs($client);
+
+        my $period_field =
+          $consolidate eq 'monthly'
+          ? "date_trunc('month', transdate)"
+          : "transdate::date";
+
+        # Query for expenses
+        my $expenses_query = qq{
+            SELECT 
+                $period_field as period,
+                ABS(SUM(amount)) as amount
+            FROM acc_trans ac
+            JOIN chart c ON c.id = ac.chart_id
+            WHERE c.category = 'E'
+            AND transdate >= ?
+            AND transdate <= ?
+            AND amount < 0
+            GROUP BY period
+            ORDER BY period
+        };
+
+        # Query for sales
+        my $sales_query = qq{
+            SELECT 
+                $period_field as period,
+                SUM(amount) as amount
+            FROM acc_trans ac
+            JOIN chart c ON c.id = ac.chart_id
+            WHERE c.category = 'I'
+            AND transdate >= ?
+            AND transdate <= ?
+            AND amount > 0
+            GROUP BY period
+            ORDER BY period
+        };
+
+        my @results;
+
+        # Fetch and format expenses data
+        my $expenses_results =
+          $dbs->query( $expenses_query, $start_date, $end_date );
+        while ( my $row = $expenses_results->hash ) {
+            push @results,
+              {
+                period => $row->{period},
+                type   => 'expenses',
+                amount => $row->{amount}
+              };
+        }
+
+        # Fetch and format sales data
+        my $sales_results = $dbs->query( $sales_query, $start_date, $end_date );
+        while ( my $row = $sales_results->hash ) {
+            push @results,
+              {
+                period => $row->{period},
+                type   => 'sales',
+                amount => $row->{amount}
+              };
+        }
+        warn( "Expenses Results: " . Dumper( \@results ) );
+        warn( "Sales Results: " . Dumper( \@results ) );
+
+        # Return combined results
+        $c->render( json => \@results );
+    }
+);
 
 ###############################
 ####                       ####
