@@ -200,9 +200,6 @@ $api->get(
 #### ACCESS CONTROL  ####
 ####                 ####
 #########################
-
-my $allMenuItems =
-qq'AR--AR;AR--Add Transaction;AR--Sales Invoice;AR--Credit Note;AR--Credit Invoice;AR--Reports;POS--POS;POS--Sale;POS--Open;POS--Receipts;Customers--Customers;Customers--Add Customer;Customers--Reports;AP--AP;AP--Add Transaction;AP--Vendor Invoice;AP--Debit Note;AP--Debit Invoice;AP--Reports;Vendors--Vendors;Vendors--Add Vendor;Vendors--Reports;Cash--Cash;Cash--Receipt;Cash--Receipts;Cash--Payment;Cash--Payments;Cash--Void Check;Cash--Reissue Check;Cash--Void Receipt;Cash--Reissue Receipt;Cash--FX Adjustment;Cash--Reconciliation;Cash--Reports;Vouchers--Vouchers;Vouchers--Payable;Vouchers--Payment;Vouchers--Payments;Vouchers--Payment Reversal;Vouchers--General Ledger;Vouchers--Reports;HR--HR;HR--Employees;HR--Payroll;Order Entry--Order Entry;Order Entry--Sales Order;Order Entry--Purchase Order;Order Entry--Reports;Order Entry--Generate;Order Entry--Consolidate;Logistics--Logistics;Logistics--Merchandise;Logistics--Reports;Quotations--Quotations;Quotations--Quotation;Quotations--RFQ;Quotations--Reports;General Ledger--General Ledger;General Ledger--Add Transaction;General Ledger--Reports;Goods & Services--Goods & Services;Goods & Services--Add Part;Goods & Services--Add Service;Goods & Services--Add Kit;Goods & Services--Add Assembly;Goods & Services--Add Labor/Overhead;Goods & Services--Add Group;Goods & Services--Add Pricegroup;Goods & Services--Stock Assembly;Goods & Services--Stock Adjustment;Goods & Services--Reports;Goods & Services--Changeup;Goods & Services--Translations;Projects & Jobs--Projects & Jobs;Projects & Jobs--Projects;Projects & Jobs--Jobs;Projects & Jobs--Translations;Reference Documents--Reference Documents;Reference Documents--Add Document;Reference Documents--List Documents;Image Files--Image Files;Image Files--Add File;Image Files--List Files;Reports--Reports;Reports--Chart of Accounts;Reports--Trial Balance;Reports--Income Statement;Reports--Balance Sheet;Recurring Transactions--Recurring Transactions;Batch--Batch;Batch--Print;Batch--Email;Batch--Queue;Exchange Rates--Exchange Rates;Import--Import;Import--Customers;Import--Vendors;Import--Parts;Import--Services;Import--Labor/Overhead;Import--Sales Invoices;Import--Groups;Import--Payments;Import--Sales Orders;Import--Purchase Orders;Import--Chart of Accounts;Import--General Ledger;Export--Export;Export--Payments;System--System;System--Defaults;System--Audit Control;System--Audit Log;System--Bank Accounts;System--Taxes;System--Currencies;System--Payment Methods;System--Workstations;System--Roles;System--Warehouses;System--Departments;System--Type of Business;System--Language;System--Mimetypes;System--SIC;System--Yearend;System--Maintenance;System--Backup;System--Chart of Accounts;System--html Templates;System--XML Templates;System--LaTeX Templates;System--Text Templates;Stylesheet--Stylesheet;Preferences--Preferences;New Window--New Window;Version--Version;Logout--Logout';
 my $neoLedgerMenu =
 qq'General Ledger--General Ledger;General Ledger--Add Transaction;General Ledger--Reports;System--System;System--Currencies';
 
@@ -283,7 +280,6 @@ $api->post(
         }
     }
 );
-
 $api->post(
     '/auth/login' => sub {
         my $c      = shift;
@@ -324,12 +320,13 @@ $api->post(
 
         my $employee_id = $employee->{id};
 
-    # Check if the API account exists in the login table and verify the password
+   # Check if the API account exists in the login table and verify the password,
+   # and retrieve the acsrole_id as well
         my $login = $dbs->query( '
-        SELECT password
-        FROM login
-        WHERE employeeid = ? AND crypt(?, password) = password
-    ', $employee_id, $password )->hash;
+            SELECT password, acsrole_id
+            FROM login
+            WHERE employeeid = ? AND crypt(?, password) = password
+        ', $employee_id, $password )->hash;
 
         unless ($login) {
             return $c->render(
@@ -337,6 +334,11 @@ $api->post(
                 json   => { message => "Incorrect username or password" }
             );
         }
+
+       # Retrieve the "acs" value from the acsapirole table using the acsrole_id
+        my $acs_row = $dbs->query( 'SELECT acs FROM acsapirole WHERE id = ?',
+            $login->{acsrole_id} )->hash;
+        my $acs = $acs_row ? $acs_row->{acs} : undef;
 
         my $session_key = $dbs->query(
 'INSERT INTO session (employeeid, sessionkey) VALUES (?, encode(gen_random_bytes(32), ?)) RETURNING sessionkey',
@@ -347,12 +349,13 @@ $api->post(
           $dbs->query( "SELECT * FROM defaults WHERE fldname = ?", "company" )
           ->hash;
 
-        # Return the session key
+        # Return the session key, company, and acs value
         return $c->render(
             json => {
                 sessionkey => $session_key,
                 client     => $dbname,
-                company    => $company->{fldvalue}
+                company    => $company->{fldvalue},
+                acs        => $acs
             }
         );
     }
@@ -413,6 +416,99 @@ $api->post(
                   "API login created successfully for user '$employeeid'"
             }
         );
+    }
+);
+
+#########################
+####                 ####
+####  User & Role    ####
+####                 ####
+#########################
+
+$api->get(
+    '/system/roles' => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+        my $dbs    = $c->dbs($client);
+        my $roles  = $dbs->query("SELECT * FROM acsapirole");
+        if ($roles) {
+            my $data = $roles->hashes;
+            $data = [$data]
+              unless ref $data eq 'ARRAY';    # needed incase of one item
+            $c->render( json => $data );
+        }
+        else {
+            $c->render( status => 404 );
+        }
+    }
+);
+
+$api->post(
+    '/system/roles/:id' => { id => undef } => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+        my $dbs    = $c->dbs($client);
+        my $data   = $c->req->json;         # expect JSON payload
+        my $id     = $c->param('id');
+
+        # Ensure description is provided (using 'description' per table schema)
+        my $description = $data->{description} || $data->{description};
+        return $c->render(
+            json   => { error => "Missing role description" },
+            status => 400
+        ) unless $description;
+
+        if ( !defined $id ) {
+
+            # Insertion: check for duplicate description
+            my $dup =
+              $dbs->query( "SELECT 1 FROM acsapirole WHERE description = ?",
+                $description )->hash;
+            if ($dup) {
+                return $c->render(
+                    json   => { error => "Duplicate role description" },
+                    status => 409
+                );
+            }
+
+            # Prepare acs value. Expecting a JSON array literal.
+            my $acs = defined $data->{acs} ? $data->{acs} : '[]';
+
+            # Insert new record and return the new id
+            my $sth = $dbs->query(
+"INSERT INTO acsapirole (description, acs) VALUES (?, ?::jsonb) RETURNING id",
+                $description, $acs
+            );
+            my $row = $sth->hash;
+            return $c->render(
+                json   => { message => "Role inserted", id => $row->{id} },
+                status => 201
+            );
+        }
+        else {
+# Update: if the description is changed, ensure it doesn't duplicate another role
+            my $dup = $dbs->query(
+                "SELECT 1 FROM acsapirole WHERE description = ? AND id <> ?",
+                $description, $id )->hash;
+            if ($dup) {
+                return $c->render(
+                    json   => { error => "Duplicate role description" },
+                    status => 409
+                );
+            }
+
+       # Update role. Here we update description and acs only.
+       # If either field is not provided, the COALESCE keeps the existing value.
+            my $acs = $data->{acs}
+              ;    # if undefined, COALESCE will default to the current value
+            my $sql = "UPDATE acsapirole
+                     SET description = COALESCE(?, description),
+                         acs = COALESCE(?::jsonb, acs)
+                     WHERE id = ?";
+            $dbs->query( $sql, $description, $acs, $id );
+
+            return $c->render( json => { message => "Role updated" } );
+        }
     }
 );
 
