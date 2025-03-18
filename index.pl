@@ -201,58 +201,64 @@ $api->get(
 #### ACCESS CONTROL  ####
 ####                 ####
 #########################
-my $neoLedgerMenu =
-qq'General Ledger--General Ledger;General Ledger--Add Transaction;General Ledger--Reports;System--System;System--Currencies';
-
 helper check_perms => sub {
-    my ( $c, $permission ) = @_;
+    my ( $c, $permissions_string ) = @_;
     my $client     = $c->param('client');
     my $sessionkey = $c->req->headers->header('Authorization');
     my $dbs        = $c->dbs($client);
 
-    # Step 1: Validate session
-    my $session =
-      $dbs->query( 'SELECT employeeid FROM session WHERE sessionkey = ?',
-        $sessionkey )->hash;
+# Single query joining session, login, and employee to fetch admin, allowed permissions, and login
+    my $record = $dbs->query(
+        'SELECT l.admin, l.acsrole_id, e.login, acs.acs
+         FROM login l 
+         JOIN session s ON l.employeeid = s.employeeid 
+         JOIN employee e ON l.employeeid = e.id 
+         JOIN acsapirole acs ON l.acsrole_id = acs.id
+         WHERE s.sessionkey = ?',
+        $sessionkey
+    )->hash;
 
-    unless ($session) {
+    # Validate session and record existence
+    unless ($record) {
         $c->render(
             status => 401,
             json   => { message => "Invalid session key" }
         );
-        return 0;    # Return false after rendering
+        return 0;
     }
 
-    my $employee_id = $session->{employeeid};
+    # If the user is an admin, return their login value immediately
+    return $record->{login} if $record->{admin};
 
-    # Step 2: Check if user is admin
-    my $is_admin =
-      $dbs->query( 'SELECT admin FROM login WHERE employeeid = ?',
-        $employee_id )->hash->{admin};
+    # Retrieve allowed permissions from the login table (assumed JSON in "acs")
+    my $allowed_string = $record->{acs} // '';
+    my $allowed_perms  = decode_json($allowed_string);
 
-    return 1 if $is_admin;    # Allow if user is admin
+    # Split the requested permissions by comma and trim whitespace
+    my @requested_perms = split /\s*,\s*/, $permissions_string;
 
-    # Step 3: Get acsrole_id
-    my $acsrole_id =
-      $dbs->query( 'SELECT acsrole_id FROM employee WHERE id = ?',
-        $employee_id )->hash->{acsrole_id};
+    # Check if the user has at least one of the requested permissions
+    my $has_permission = 0;
+    for my $perm (@requested_perms) {
+        if ( grep { $_ eq $perm } @$allowed_perms ) {
+            $has_permission = 1;
+            last;
+        }
+    }
 
-    # Step 4: Get restricted permissions
-    my $acs_string =
-      $dbs->query( 'SELECT acs FROM acsrole WHERE id = ?', $acsrole_id )
-      ->hash->{acs};
-
-    # Step 5: Check permission against restricted list
-    my @restricted_perms = split( ';', $acs_string );
-    if ( grep { $_ eq $permission } @restricted_perms ) {
+    unless ($has_permission) {
         $c->render(
             status => 403,
-            json   => { message => "Permission '$permission' is not allowed" }
+            json   => {
+                message =>
+                  "Missing any of the required permissions: $permissions_string"
+            }
         );
-        return 0;    # Return false after rendering
+        return 0;
     }
 
-    return 1;        # Permission is allowed
+    # If the check passes, return the login value from the employee table
+    return $record->{login};
 };
 
 $api->post(
@@ -428,7 +434,8 @@ $api->post(
 
 $api->get(
     '/system/roles' => sub {
-        my $c      = shift;
+        my $c = shift;
+        return unless my $login = $c->check_perms("system.user.roles");
         my $client = $c->param('client');
         my $dbs    = $c->dbs($client);
         my $roles  = $dbs->query("SELECT * FROM acsapirole");
@@ -446,7 +453,9 @@ $api->get(
 
 $api->post(
     '/system/roles/:id' => { id => undef } => sub {
-        my $c      = shift;
+        my $c = shift;
+        return unless my $login = $c->check_perms("system.user.roles");
+
         my $client = $c->param('client');
         my $dbs    = $c->dbs($client);
         my $data   = $c->req->json;         # expect JSON payload
@@ -514,9 +523,11 @@ $api->post(
 );
 $api->get(
     '/system/employees' => sub {
-        my $c      = shift;
+        my $c = shift;
+        return unless my $login = $c->check_perms("system.user.employees");
         my $client = $c->param('client');
         my $form   = new Form;
+        $form->{login} = $login;
         $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
 
         # Retrieve all employees using HR module.
@@ -570,7 +581,9 @@ $api->get(
 );
 $api->get(
     '/system/employees/:id' => sub {
-        my $c      = shift;
+        my $c = shift;
+        return unless my $login = $c->check_perms("system.user.employees");
+
         my $client = $c->param('client');
         my $id     = $c->param('id');
         my $form   = new Form;
@@ -614,7 +627,9 @@ $api->get(
 );
 $api->post(
     '/system/employees/:id' => { id => undef } => sub {
-        my $c      = shift;
+        my $c = shift;
+        return unless my $login = $c->check_perms("system.user.employees");
+
         my $client = $c->param('client');
 
         # Set up the database connection using the provided client name
@@ -722,7 +737,8 @@ $api->post(
 #########################
 $api->get(
     '/gl/transactions/lines' => sub {
-        my $c      = shift;
+        my $c = shift;
+        return unless my $login = $c->check_perms("gl.transactions");
         my $params = $c->req->params->to_hash;
         my $client = $c->param('client');
 
@@ -732,6 +748,7 @@ $api->get(
         my $form = new Form;
         for ( keys %$params ) { $form->{$_} = $params->{$_} if $params->{$_} }
         $form->{category} = 'X';
+        $form->{login}    = $login;
         GL->transactions( $c->slconfig, $form );
 
         # Check if the result is undefined, empty, or has no entries
@@ -762,7 +779,9 @@ $api->get(
 
 $api->get(
     '/gl/transactions' => sub {
-        my $c      = shift;
+        my $c = shift;
+        return unless my $login = $c->check_perms("gl.transactions");
+
         my $client = $c->param('client');
 
         # Create the DBIx::Simple handle
@@ -873,7 +892,8 @@ $api->get(
 #Get An Individual GL transaction
 $api->get(
     '/gl/transactions/:id' => sub {
-        my $c      = shift;
+        my $c = shift;
+        return unless my $login = $c->check_perms("gl.add");
         my $id     = $c->param('id');
         my $client = $c->param('client');
 
@@ -963,9 +983,11 @@ $api->get(
 
 $api->post(
     '/gl/transactions' => sub {
-        my $c      = shift;
+        my $c = shift;
+        return unless my $login = $c->check_perms("gl.add");
         my $client = $c->param('client');
         my $data   = $c->req->json;
+        $data->{login} = $login;
 
         # Create the DBIx::Simple handle
         $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
@@ -977,11 +999,13 @@ $api->post(
 
 $api->put(
     '/gl/transactions/:id' => sub {
-        my $c      = shift;
+        my $c = shift;
+        return unless my $login = $c->check_perms("gl.add");
         my $client = $c->param('client');
         my $id;
         $id = $c->param('id');
         my $data = $c->req->json;
+        $data->{login} = $login;
 
         # Create the DBIx::Simple handle
         $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
@@ -1089,6 +1113,7 @@ sub api_gl_transaction () {
     $form->{department}      = $data->{department};
     $form->{transdate}       = $transdate;
     $form->{defaultcurrency} = $default_currency;
+    $form->{login}           = $data->{login};
 
     my $total_debit  = 0;
     my $total_credit = 0;
@@ -1189,7 +1214,8 @@ sub api_gl_transaction () {
 
 $api->delete(
     '/gl/transactions/:id' => sub {
-        my $c      = shift;
+        my $c = shift;
+        return unless my $login = $c->check_perms("gl.add");
         my $client = $c->param('client');
         my $id     = $c->param('id');
 
@@ -1228,6 +1254,7 @@ $api->delete(
 ####      Chart      ####
 ####                 ####
 #########################
+### ROUTE TO BE REMOVED AND REPLACED WITH GET LINKS
 
 $api->get(
     '/charts' => sub {
@@ -1284,7 +1311,8 @@ $api->get(
 
 $api->get(
     '/system/currencies' => sub {
-        my $c      = shift;
+        my $c = shift;
+        return unless my $login = $c->check_perms("system.currencies");
         my $client = $c->param('client');
 
         my $dbs = $c->dbs($client);
@@ -1306,7 +1334,8 @@ $api->get(
 
 $api->any(
     [qw(POST PUT)] => '/system/currencies' => sub {
-        my $c      = shift;
+        my $c = shift;
+        return unless my $login = $c->check_perms("system.currencies");
         my $client = $c->param('client');
 
         # Get JSON body params
@@ -1343,7 +1372,8 @@ $api->any(
 
 $api->delete(
     '/system/currencies/:curr' => sub {
-        my $c      = shift;
+        my $c = shift;
+        return unless my $login = $c->check_perms("system.currencies");
         my $client = $c->param('client');
         my $curr   = $c->param('curr');
 
@@ -1373,6 +1403,7 @@ $api->get(
     '/system/companydefaults' => sub {
         my $c      = shift;
         my $client = $c->param('client');
+        return unless my $login = $c->check_perms("system.defaults");
 
         my $dbs = $c->dbs($client);
 
@@ -1451,7 +1482,8 @@ $api->get(
 
 $api->post(
     '/system/companydefaults' => sub {
-        my $c      = shift;
+        my $c = shift;
+        return unless my $login = $c->check_perms("company.defaults");
         my $client = $c->param('client');
         my $form   = Form->new;
 
@@ -1496,7 +1528,8 @@ $api->post(
 
 $api->get(
     '/system/chart/accounts' => sub {
-        my $c      = shift;
+        my $c = shift;
+        return unless my $login = $c->check_perms("syste.chart.list");
         my $client = $c->param('client');
         my $form   = Form->new;
         $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
@@ -1519,7 +1552,8 @@ $api->get(
 
 $api->get(
     '/system/chart/accounts/:id' => sub {
-        my $c      = shift;
+        my $c = shift;
+        return unless my $login = $c->check_perms("syste.chart.list");
         my $client = $c->param('client');
         my $id     = $c->param('id');
         my $form   = Form->new;
@@ -1559,7 +1593,8 @@ $api->get(
 
 $api->post(
     '/system/chart/accounts/:id' => { id => undef } => sub {
-        my $c      = shift;
+        my $c = shift;
+        return unless my $login = $c->check_perms("syste.chart.add");
         my $client = $c->param('client');
         my $form   = Form->new;
         my $id     = $c->param("id");
@@ -1586,7 +1621,8 @@ $api->post(
 );
 $api->delete(
     '/system/chart/accounts/:id' => sub {
-        my $c      = shift;
+        my $c = shift;
+        return unless my $login = $c->check_perms("syste.chart.add");
         my $client = $c->param('client');
         my $id     = $c->param('id');
         my $dbs    = $c->dbs($client);
@@ -1657,7 +1693,8 @@ $api->delete(
 ############################
 $api->get(
     '/system/departments' => sub {
-        my $c      = shift;
+        my $c = shift;
+        return unless my $login = $c->check_perms("system.departments");
         my $client = $c->param('client');
         my $dbs    = $c->dbs($client);
 
@@ -1683,7 +1720,8 @@ $api->get(
 );
 $api->post(
     '/system/departments' => sub {
-        my $c      = shift;
+        my $c = shift;
+        return unless my $login = $c->check_perms("system.departments");
         my $client = $c->param('client');
         $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
         my $form = new Form;
@@ -1699,7 +1737,8 @@ $api->post(
 
 $api->delete(
     '/system/departments/:id' => sub {
-        my $c      = shift;
+        my $c = shift;
+        return unless my $login = $c->check_perms("system.departments");
         my $client = $c->param('client');
         my $id     = $c->param('id');
 
@@ -1745,7 +1784,8 @@ $api->delete(
 ############################
 $api->get(
     '/projects' => sub {
-        my $c      = shift;
+        my $c = shift;
+        return unless my $login = $c->check_perms("system.projects");
         my $client = $c->param('client');
         my $dbs    = $c->dbs($client);
         my $form   = new Form;
@@ -1757,7 +1797,8 @@ $api->get(
 );
 $api->get(
     '/projects/:id' => sub {
-        my $c      = shift;
+        my $c = shift;
+        return unless my $login = $c->check_perms("system.projects");
         my $client = $c->param('client');
         my $dbs    = $c->dbs($client);
         my $id     = $c->param('id');
@@ -1772,7 +1813,8 @@ $api->get(
 );
 $api->post(
     '/projects/:id' => { id => undef } => sub {
-        my $c      = shift;
+        my $c = shift;
+        return unless my $login = $c->check_perms("system.projects");
         my $client = $c->param('client');
         my $dbs    = $c->dbs($client);
         my $data   = $c->req->json;
@@ -1792,7 +1834,7 @@ $api->post(
 ####                  ####
 ##########################
 
-$api->get(
+$api->get(    # to be replaced with get_links
     '/items' => sub {
         my $c      = shift;
         my $client = $c->param('client');
@@ -1823,6 +1865,21 @@ $api->get(
         my $client = $c->param('client');
         my $params = $c->req->params->to_hash;
         $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+        my $search = $params->{searchitems};
+
+        # Return a 400 response if search parameter is not defined
+        return $c->render(
+            json   => { error => "searchitem is required." },
+            status => 400
+        ) unless defined $search;
+
+        my %permissions = (
+            allitems => "items.search.allitems",
+            part     => "items.search.parts",
+            service  => "items.search.services",
+        );
+
+        return unless $c->check_perms( $permissions{$search} );
 
         my $form = Form->new;
         $form->{searchitems}  = $params->{searchitems};
@@ -1856,7 +1913,10 @@ $api->get(
 );
 $api->get(
     '/ic/items/:id' => sub {
-        my $c      = shift;
+        my $c = shift;
+        return
+          unless ( $c->check_perms('items.part')
+            || $c->check_perms('items.service') );
         my $client = $c->param('client');
         my $id     = $c->param('id');
 
@@ -1872,20 +1932,22 @@ $api->get(
 );
 $api->post(
     '/ic/items/:id' => { id => undef } => sub {
-        my $c      = shift;
+        my $c = shift;
+        return
+          unless ( $c->check_perms('items.part')
+            || $c->check_perms('items.service') );
+
         my $client = $c->param('client');
         my $id     = $c->param('id');
         my $data   = $c->req->json;
-        warn( Dumper $data );
-        my $dbs  = $c->dbs($client);
-        my $form = new Form;
+        my $dbs    = $c->dbs($client);
+        my $form   = new Form;
         $form->{id} = $id;
 
         if (   ( !$id )
             && $data->{partnumber}
             && $data->{partnumber} ne '' )
         {
-            warn('inside if');
             my $existing =
               $dbs->query( "SELECT * FROM parts WHERE partnumber = ?",
                 $data->{partnumber} )->hash;
@@ -2113,6 +2175,8 @@ helper get_accounts => sub {
     }
 };
 
+# Available modules: customer, vendor, goodsservices, gl_report, projects, incomestatement, employees
+
 $api->get(
     '/create_links/:module' => sub {
         my $c      = shift;
@@ -2120,6 +2184,15 @@ $api->get(
         my $dbs    = $c->dbs($client);
         my $module = $c->param('module');
 
+        # List of valid modules
+        my @valid_modules =
+          qw(customer vendor ic gl_report projects incomestatement employees);
+
+        # Return empty JSON object if module not valid
+        return $c->render( json => {} )
+          unless grep { $_ eq $module } @valid_modules;
+
+        # Common data that you might reuse
         my $line_tax_q =
           $dbs->query( "SELECT fldvalue FROM defaults WHERE fldname = ?",
             'linetax' )->hash;
@@ -2127,24 +2200,35 @@ $api->get(
 
         my $tax_accounts = $dbs->query(
             "SELECT t.rate, t.taxnumber, t.chart_id, c.description, c.accno,
-             CONCAT(c.accno, '--', c.description) AS label
-             FROM tax t
-             JOIN chart c ON (c.id = t.chart_id)
-             ORDER BY c.accno"
+                CONCAT(c.accno, '--', c.description) AS label
+         FROM tax t
+         JOIN chart c ON (c.id = t.chart_id)
+         ORDER BY c.accno"
         )->hashes;
 
-# Get the accounts, now returned as a hash with keys inventory, income, cogs, expense
-        my $accounts   = $c->get_accounts;
+        my $accounts = $c->get_accounts
+          ;    # returns a hash with keys like inventory, income, cogs, expense
         my $currencies = $c->get_currencies;
         my $customers  = $c->get_vc('customer');
         my $vendors    = $c->get_vc('vendor');
+        my $projects   = $c->get_projects;
+        my $roles      = $c->get_roles;
 
-        my $role        = $module eq 'customer' ? 'P' : undef;
-        my $departments = $c->get_departments($role);
-        my $projects    = $c->get_projects;
-        my $roles       = $c->get_roles;
-        $c->render(
-            json => {
+        my $response;
+
+        #----------------
+        # CUSTOMER module
+        #----------------
+        if ( $module eq 'customer' ) {
+            return unless $c->check_perms('customer');
+
+            # Here, do module-specific parameter checks
+            # E.g., return unless $c->check_params('customer_check');
+
+            my $role        = 'P';
+            my $departments = $c->get_departments($role);
+
+            $response = {
                 currencies   => $currencies,
                 accounts     => $accounts,
                 tax_accounts => $tax_accounts,
@@ -2154,8 +2238,141 @@ $api->get(
                 departments  => $departments,
                 projects     => $projects,
                 roles        => $roles,
-            }
-        );
+            };
+        }
+
+        #-------------
+        # VENDOR module
+        #-------------
+        elsif ( $module eq 'vendor' ) {
+            return unless $c->check_perms('customer');
+
+            # Module-specific checks
+            # E.g., return unless $c->check_params('vendor_check');
+
+            my $role        = undef;
+            my $departments = $c->get_departments($role);
+
+            $response = {
+                currencies   => $currencies,
+                accounts     => $accounts,
+                tax_accounts => $tax_accounts,
+                customers    => $customers,
+                vendors      => $vendors,
+                linetax      => $line_tax,
+                departments  => $departments,
+                projects     => $projects,
+                roles        => $roles,
+            };
+        }
+
+        #-------------------
+        # GOODSSERVICES module
+        #-------------------
+        elsif ( $module eq 'ic' ) {
+            return unless $c->check_perms('items');
+            my $role        = undef;
+            my $departments = $c->get_departments($role);
+
+            $response = {
+                currencies   => $currencies,
+                accounts     => $accounts,
+                tax_accounts => $tax_accounts,
+                customers    => $customers,
+                vendors      => $vendors,
+                linetax      => $line_tax,
+                departments  => $departments,
+                projects     => $projects,
+                roles        => $roles,
+            };
+        }
+
+        #--------------
+        # GL_REPORT module
+        #--------------
+        elsif ( $module eq 'gl_report' ) {
+            return unless $c->check_perms('gl.transactions');
+            my $role        = undef;
+            my $departments = $c->get_departments($role);
+
+            $response = {
+                currencies   => $currencies,
+                accounts     => $accounts,
+                tax_accounts => $tax_accounts,
+                customers    => $customers,
+                vendors      => $vendors,
+                linetax      => $line_tax,
+                departments  => $departments,
+                projects     => $projects,
+                roles        => $roles,
+            };
+        }
+
+        #--------------
+        # PROJECTS module
+        #--------------
+        elsif ( $module eq 'projects' ) {
+            return unless $c->check_perms('system.projects');
+            my $role        = undef;
+            my $departments = $c->get_departments($role);
+
+            $response = {
+                currencies   => $currencies,
+                accounts     => $accounts,
+                tax_accounts => $tax_accounts,
+                customers    => $customers,
+                vendors      => $vendors,
+                linetax      => $line_tax,
+                departments  => $departments,
+                projects     => $projects,
+                roles        => $roles,
+            };
+        }
+
+        #---------------------
+        # INCOMESTATEMENT module
+        #---------------------
+        elsif ( $module eq 'incomestatement' ) {
+            return unless $c->check_perms('reports.income');
+            my $role        = undef;
+            my $departments = $c->get_departments($role);
+
+            $response = {
+                currencies   => $currencies,
+                accounts     => $accounts,
+                tax_accounts => $tax_accounts,
+                customers    => $customers,
+                vendors      => $vendors,
+                linetax      => $line_tax,
+                departments  => $departments,
+                projects     => $projects,
+                roles        => $roles,
+            };
+        }
+
+        #---------------
+        # EMPLOYEES module
+        #---------------
+        elsif ( $module eq 'employees' ) {
+            return unless $c->check_perms('system.employees');
+            my $role        = undef;
+            my $departments = $c->get_departments($role);
+
+            $response = {
+                currencies   => $currencies,
+                accounts     => $accounts,
+                tax_accounts => $tax_accounts,
+                customers    => $customers,
+                vendors      => $vendors,
+                linetax      => $line_tax,
+                departments  => $departments,
+                projects     => $projects,
+                roles        => $roles,
+            };
+        }
+
+        # If we got here, it means we have a valid module and passed checks
+        $c->render( json => $response );
     }
 );
 
@@ -3067,7 +3284,8 @@ $api->delete(
 
 $api->get(
     '/reports/trial_balance' => sub {
-        my $c      = shift;
+        my $c = shift;
+        return unless $c->check_perms('reports.trial');
         my $client = $c->param('client');
 
         $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
@@ -3089,7 +3307,10 @@ $api->get(
 );
 $api->get(
     '/reports/transactions' => sub {
-        my $c      = shift;
+        my $c = shift;
+        return
+          unless ( $c->check_perms('reports.trial')
+            || $c->check_perms('reports.income') );
         my $client = $c->param('client');
         my $dbs    = $c->dbs($client);
         $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
@@ -3152,7 +3373,8 @@ $api->get(
 
 $api->get(
     '/reports/income_statement' => sub {
-        my $c      = shift;
+        my $c = shift;
+        return unless $c->check_perms('reports.income');
         my $client = $c->param('client');
         my $params = $c->req->params->to_hash;
         warn Dumper $params;
