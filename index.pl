@@ -31,6 +31,7 @@ use SL::GL;
 use SL::RC;
 use SL::IC;
 use SL::PE;
+use SL::HR;
 use DateTime;
 use DateTime::Format::ISO8601;
 use Date::Parse;
@@ -509,6 +510,208 @@ $api->post(
 
             return $c->render( json => { message => "Role updated" } );
         }
+    }
+);
+$api->get(
+    '/system/employees' => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+        my $form   = new Form;
+        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+
+        # Retrieve all employees using HR module.
+        HR->employees( $c->slconfig, $form );
+
+        my $dbs = $c->dbs($client);
+
+        # For each employee, fetch login data.
+        foreach my $employee ( @{ $form->{all_employee} } ) {
+            my $emp_id = $employee->{id};
+
+            # Retrieve login info from the login table.
+            my $login_query = $dbs->query(
+"SELECT acsrole_id, created, admin FROM login WHERE employeeid = ?",
+                $emp_id
+            );
+            my $login_info =
+              $login_query->hash;    # Get the first row as a hash reference.
+
+            if ($login_info) {
+
+                # Append login data to the employee record.
+                $employee->{acsrole_id} = $login_info->{acsrole_id};
+                $employee->{created}    = $login_info->{created};
+                $employee->{admin}      = $login_info->{admin};
+
+                # Now, fetch the role description from the acsapirole table.
+                my $role_query = $dbs->query(
+                    "SELECT description FROM acsapirole WHERE id = ?",
+                    $login_info->{acsrole_id} );
+                my $role_info = $role_query->hash;
+                if ($role_info) {
+                    $employee->{acsrole} = $role_info->{description};
+                }
+                else {
+                    $employee->{acsrole} = undef;
+                }
+            }
+            else {
+                # Set defaults if no login record exists.
+                $employee->{acsrole_id} = undef;
+                $employee->{created}    = undef;
+                $employee->{admin}      = undef;
+                $employee->{acsrole}    = undef;
+            }
+        }
+
+       # Render the modified employee list with login info and role description.
+        $c->render( json => $form->{all_employee} );
+    }
+);
+$api->get(
+    '/system/employees/:id' => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+        my $id     = $c->param('id');
+        my $form   = new Form;
+        $form->{id} = $id;
+        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+
+        # Retrieve the employee data using the HR module.
+        HR->get_employee( $c->slconfig, $form );
+
+        # Connect using DBIx::Simple.
+        my $dbs = $c->dbs($client);
+
+        # Determine the employee id for login lookup.
+        my $emp_id = $form->{employeeid} // $id;
+
+# Fetch login info for this employee. We need this because API doesn't use default ACS and we need to overwrite the values
+        my $login_query = $dbs->query(
+            "SELECT acsrole_id, created, admin FROM login WHERE employeeid = ?",
+            $emp_id
+        );
+
+        my $login_info =
+          $login_query->hash;    # Get the first row as a hash reference.
+
+        # Append the login data to the employee record.
+        if ($login_info) {
+            $form->{acsrole_id} = $login_info->{acsrole_id};
+            $form->{created}    = $login_info->{created};
+            $form->{admin}      = $login_info->{admin};
+        }
+        else {
+            # Set to undef or a default value if no login record exists.
+            $form->{acsrole_id} = undef;
+            $form->{created}    = undef;
+            $form->{admin}      = undef;
+        }
+
+        # Render the employee data (with login info) as JSON.
+        $c->render( json => {%$form} );
+    }
+);
+$api->post(
+    '/system/employees/:id' => { id => undef } => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+
+        # Set up the database connection using the provided client name
+        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+        my $form = new Form;
+        my $dbs  = $c->dbs($client);
+        my $data = $c->req->json;
+
+        # --- Populate form with provided JSON data ---
+        for my $key ( keys %$data ) {
+            $form->{$key} = $data->{$key} if defined $data->{$key};
+        }
+
+        # Extract the acsrole_id and password for later use
+        my $acs_id   = $form->{acsrole_id};
+        my $password = $form->{password};
+
+        # Remove these from the form so they aren’t saved in the employee record
+        $form->{password}   = undef;
+        $form->{acsrole_id} = undef;
+
+# --- For create requests: ensure password is provided and check employeenumber ---
+        if ( !defined $c->param('id') ) {
+
+      # Check that a non-empty password is provided when creating a new employee
+            if ( !defined $password or $password eq '' ) {
+                $c->render( json =>
+                      { error => 'Password is required for new employee' } );
+                return;
+            }
+
+# If an employeenumber is provided, check that it doesn't already exist in the employee table
+            if ( defined $form->{employeenumber}
+                and $form->{employeenumber} ne '' )
+            {
+                my $exists = $dbs->selectrow_array(
+                    "SELECT COUNT(*) FROM employee WHERE employeenumber = ?",
+                    undef, $form->{employeenumber} );
+                if ($exists) {
+                    $c->render(
+                        json => { error => 'Employeenumber already exists' } );
+                    return;
+                }
+            }
+        }
+        $form->{employeelogin} = $form->{login};
+
+        # --- Save the employee record ---
+        HR->save_employee( $c->slconfig, $form );
+        my $employee_id = $form->{id};
+        warn($employee_id);
+
+ # --- Insert or update the login record using PostgreSQL crypt and gen_salt ---
+        if ( !defined $c->param('id') ) {    # Create request
+             # For new employees, insert a login record, hashing the password with Postgres's crypt function.
+            $dbs->query(
+"INSERT INTO login (employeeid, password, acsrole_id) VALUES (?, crypt(?, gen_salt('bf')), ?)",
+                $employee_id, $password, $acs_id );
+        }
+        else {    # Update request
+            my $rows;
+            if ( defined $password and $password ne '' ) {
+
+      # Try updating both password and acsrole_id if a new password is provided.
+                $rows = $dbs->query(
+"UPDATE login SET password = crypt(?, gen_salt('bf')), acsrole_id = ? WHERE employeeid = ?",
+                    $password, $acs_id, $employee_id );
+                warn( Dumper $rows );
+
+# If no record was updated (i.e. no login record exists), insert a new login record.
+
+                warn("TEsting");
+                $dbs->query(
+"INSERT INTO login (employeeid, password, acsrole_id) VALUES (?, crypt(?, gen_salt('bf')), ?)",
+                    $employee_id, $password, $acs_id );
+            }
+
+            else {
+              # Try updating only the acsrole_id if no new password is provided.
+                $rows = $dbs->query(
+                    "UPDATE login SET acsrole_id = ? WHERE employeeid = ?",
+                    $acs_id, $employee_id );
+
+                # If no record was updated, insert a new login record.
+                if ( !defined $rows or $rows == 0 ) {
+
+# Note: When inserting without a password, make sure your database accepts a NULL or default value.
+                    $dbs->query(
+"INSERT INTO login (employeeid, acsrole_id) VALUES (?, ?)",
+                        $employee_id, $acs_id
+                    );
+                }
+            }
+        }
+
+    # Render the saved employee record (assumed to be contained in $form->{ALL})
+        $c->render( json => $form->{ALL} );
     }
 );
 
@@ -1842,6 +2045,19 @@ helper get_currencies => sub {
 
     return $currencies;
 };
+
+helper get_roles => sub {
+    my $c      = shift;
+    my $client = $c->param('client');
+    my $dbs    = $c->dbs($client);
+    my $roles  = $dbs->query("SELECT id, description FROM acsapirole");
+
+    my $data = $roles->hashes;
+    $data = [$data]
+      unless ref $data eq 'ARRAY';
+    return $data;
+};
+
 helper get_accounts => sub {
     my ($c)    = @_;
     my $client = $c->param('client');
@@ -1926,6 +2142,7 @@ $api->get(
         my $role        = $module eq 'customer' ? 'P' : undef;
         my $departments = $c->get_departments($role);
         my $projects    = $c->get_projects;
+        my $roles       = $c->get_roles;
         $c->render(
             json => {
                 currencies   => $currencies,
@@ -1935,7 +2152,8 @@ $api->get(
                 vendors      => $vendors,
                 linetax      => $line_tax,
                 departments  => $departments,
-                projects     => $projects
+                projects     => $projects,
+                roles        => $roles,
             }
         );
     }
@@ -4780,7 +4998,7 @@ $api->get(
         $invoice_data->{lastpage}          = 0;
         $invoice_data->{sumcarriedforward} = 0;
         $invoice_data->{templates}         = "templates/$client";
-        $invoice_data->{language_code}     = "en";
+        $invoice_data->{language_code}     = "de";
         $invoice_data->{IN}                = "$template.tex";
         $invoice_data->{OUT}               = ">temp/invoice.pdf";
         $invoice_data->{format}            = "pdf";
@@ -4795,8 +5013,7 @@ $api->get(
         my $dvipdf    = "";
         my $xelatex   = "";
         my $userspath = "temp/";
-        $form->parse_template( $c->slconfig, $userspath, $dvipdf, $xelatex )
-          or die "parse_template failed!";
+        $form->parse_template( $c->slconfig, $userspath, $dvipdf, $xelatex );
         my $pdf_path = "temp/invoice.pdf";
 
         # Read the PDF file content
