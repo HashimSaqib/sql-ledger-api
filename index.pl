@@ -2022,6 +2022,275 @@ $api->post(
 
 ###############################
 ####                       ####
+####      Templates        ####
+####                       ####
+###############################
+$api->get(
+    '/system/templates' => sub {
+        my $c = shift;
+        return unless $c->check_perms('system.templates');
+        my $client        = $c->param('client');
+        my $templates_dir = "templates/$client/";
+
+        # Open the directory, return error if not found or not accessible
+        opendir( my $dh, $templates_dir )
+          or return $c->render(
+            json   => { error => "Directory '$templates_dir' not found" },
+            status => 404
+          );
+
+        # Filter out directories; only include files
+        my @templates = grep { -f "$templates_dir/$_" } readdir($dh);
+        closedir($dh);
+
+        # Render the list as JSON
+        $c->render( json => { templates => \@templates } );
+    }
+);
+$api->get(
+    '/system/template' => sub {
+        my $c = shift;
+        return unless $c->check_perms('system.templates');
+        my $client   = $c->param('client');
+        my $template = $c->param('id');
+
+        # Basic sanitization: reject any template name with '..'
+        return $c->render(
+            json   => { error => "Invalid template name" },
+            status => 400
+        ) if $template =~ /\.\./;
+
+        my $file = "templates/$client/$template";
+
+        # Check if file exists and is a regular file
+        unless ( -e $file && -f $file ) {
+            return $c->render(
+                json   => { error => "Template not found" },
+                status => 404
+            );
+        }
+
+        # Serve PDFs with proper content type
+        if ( $file =~ /\.pdf$/i ) {
+            $c->res->headers->content_type('application/pdf');
+
+          # Optionally, force inline display:
+          # $c->res->headers->content_disposition("inline; filename=$template");
+            $c->reply->asset( Mojo::Asset::File->new( path => $file ) );
+            return;
+        }
+
+        # Serve common image types with proper content type
+        elsif ( $file =~ /\.(png|jpe?g|gif|webp|bmp|svg)$/i ) {
+            my %mime_types = (
+                png  => 'image/png',
+                jpg  => 'image/jpeg',
+                jpeg => 'image/jpeg',
+                gif  => 'image/gif',
+                webp => 'image/webp',
+                bmp  => 'image/bmp',
+                svg  => 'image/svg+xml'
+            );
+            my ($ext) = $file =~ /\.(\w+)$/;
+            my $content_type =
+              $mime_types{ lc $ext } || 'application/octet-stream';
+            $c->res->headers->content_type($content_type);
+            $c->reply->asset( Mojo::Asset::File->new( path => $file ) );
+            return;
+        }
+
+        # For all other files, assume text-based content and render as text
+        else {
+            open my $fh, '<',
+              $file
+              or return $c->render(
+                json   => { error => "Cannot open template" },
+                status => 500
+              );
+            local $/ = undef;    # Enable slurp mode
+            my $content = <$fh>;
+            close $fh;
+            $c->render( text => $content );
+        }
+    }
+);
+
+$api->post(
+    '/system/template' => sub {
+        my $c = shift;
+        return unless $c->check_perms('system.templates');
+        my $client   = $c->param('client');
+        my $template = $c->param('id');
+        my $content  = $c->req->json->{content};
+
+        # Ensure that new content is provided
+        return $c->render(
+            json   => { error => "Content not provided" },
+            status => 400
+        ) unless defined $content;
+
+        # Basic sanitization to prevent directory traversal
+        return $c->render(
+            json   => { error => "Invalid template name" },
+            status => 400
+        ) if $template =~ /\.\./;
+
+        my $file = "templates/$client/$template";
+
+        # Ensure that the file exists and is a regular file
+        unless ( -e $file && -f $file ) {
+            return $c->render(
+                json   => { error => "Template not found" },
+                status => 404
+            );
+        }
+
+        # Open the file for writing (this will overwrite the file)
+        open my $fh, '>',
+          $file
+          or return $c->render(
+            json   => { error => "Cannot write to template" },
+            status => 500
+          );
+        print $fh $content;
+        close $fh;
+
+        $c->render( json => { success => "Template updated" } );
+    }
+);
+$api->post(
+    '/system/template/upload' => sub {
+        my $c = shift;
+        return unless $c->check_perms('system.templates');
+        my $client = $c->param('client');
+        my $template_id =
+          $c->param('id');    # Optional - only provided for replacements
+        my $filename = $c->param('name');    # Optional - alternative filename
+
+        # Get uploaded file
+        my $upload = $c->req->upload('file');
+
+        unless ($upload) {
+            return $c->render(
+                json   => { error => "No file uploaded" },
+                status => 400
+            );
+        }
+
+        # Generate safe filename
+        my $original_name = $upload->filename;
+
+        # Use provided name, original filename, or template_id
+        my $target_filename = $filename || $original_name;
+
+        # For replacements, use the existing filename
+        if ($template_id) {
+            $target_filename = $template_id;
+        }
+
+        # Basic sanitization to prevent directory traversal
+        $target_filename =~ s{[^\w\.-]}{}g;
+
+        # Ensure client directory exists
+        my $client_dir = "templates/$client";
+        unless ( -d $client_dir ) {
+            mkdir $client_dir
+              or return $c->render(
+                json   => { error => "Cannot create client directory" },
+                status => 500
+              );
+        }
+
+        my $target_path = "$client_dir/$target_filename";
+
+        # If replacing, verify the file exists and check content type
+        if ( $template_id && -e $target_path ) {
+
+            # Check file type match for replacements
+            my $existing_ext = ( $target_path   =~ /\.([^.]+)$/ )[0] || '';
+            my $new_ext      = ( $original_name =~ /\.([^.]+)$/ )[0] || '';
+
+            # Simplistic content type checking
+            my $content_type = $upload->headers->content_type;
+
+            # For PDFs
+            if ( $existing_ext eq 'pdf'
+                && !( $content_type eq 'application/pdf' || $new_ext eq 'pdf' )
+              )
+            {
+                return $c->render(
+                    json =>
+                      { error => "Cannot replace PDF with another file type" },
+                    status => 400
+                );
+            }
+
+            # For images
+            if (
+                $existing_ext =~ /^(png|jpg|jpeg|gif|webp|bmp|svg)$/
+                && !(
+                       $content_type =~ /^image\//
+                    || $new_ext =~ /^(png|jpg|jpeg|gif|webp|bmp|svg)$/
+                )
+              )
+            {
+                return $c->render(
+                    json => {
+                        error => "Cannot replace image with another file type"
+                    },
+                    status => 400
+                );
+            }
+
+            # For HTML/TEX
+            if ( $existing_ext =~ /^(html|tex)$/ && $new_ext ne $existing_ext )
+            {
+                return $c->render(
+                    json => {
+                        error =>
+                          "Cannot replace $existing_ext with another file type"
+                    },
+                    status => 400
+                );
+            }
+        }
+
+        # Move the file to target location
+        $upload->move_to($target_path);
+
+        # For new files, update the templates list if needed
+        # This depends on how your application manages template listings
+
+        $c->render(
+            json => {
+                success => "Template uploaded successfully",
+                name    => $target_filename
+            }
+        );
+    }
+);
+
+# GET route: Check if a template exists
+$api->get(
+    '/system/template/check' => sub {
+        my $c = shift;
+        return unless $c->check_perms('system.templates');
+
+        my $client   = $c->param('client');
+        my $filename = $c->param('checkExists');
+
+        # Basic sanitization to prevent directory traversal
+        $filename =~ s{[^\w\.-]}{}g;
+
+        my $file_path = "templates/$client/$filename";
+        my $exists    = -e $file_path ? 1 : 0;
+
+        $c->render( json => { exists => $exists } );
+    }
+);
+
+###############################
+####                       ####
 ####        LINKS          ####
 ####                       ####
 ###############################
@@ -2354,7 +2623,7 @@ $api->get(
         # EMPLOYEES module
         #---------------
         elsif ( $module eq 'employees' ) {
-            return unless $c->check_perms('system.employees');
+            return unless $c->check_perms('system.user.employees');
             my $role        = undef;
             my $departments = $c->get_departments($role);
 
@@ -3239,7 +3508,7 @@ $api->post(
 
         # Other defaults
         $form->{employee_id}   = undef;
-        $form->{language_code} = 'en';
+        $form->{language_code} = '';
         $form->{precision}     = $data->{selectedCurrency}->{prec} || 2;
 
         warn Dumper($form);
@@ -4617,7 +4886,7 @@ sub create_invoice {
     $form->{taxincluded}   = 0;
     $form->{department_id} = undef;
     $form->{employee_id}   = undef;
-    $form->{language_code} = 'en';
+    $form->{language_code} = '';
     $form->{precision}     = $data->{currency}->{prec} || 2;
     my $auto_inv =
       $dbs->query( 'SELECT fldvalue FROM defaults WHERE fldname = ?',
@@ -5220,7 +5489,7 @@ $api->get(
         $invoice_data->{lastpage}          = 0;
         $invoice_data->{sumcarriedforward} = 0;
         $invoice_data->{templates}         = "templates/$client";
-        $invoice_data->{language_code}     = "de";
+        $invoice_data->{language_code}     = "";
         $invoice_data->{IN}                = "$template.tex";
         $invoice_data->{OUT}               = ">temp/invoice.pdf";
         $invoice_data->{format}            = "pdf";
