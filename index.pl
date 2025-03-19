@@ -1396,7 +1396,7 @@ $api->delete(
         AM->delete_currency( $c->slconfig, $form );
 
         # Return no content (204)
-        return $c->rendered(204);
+        return $c->render( status => 204, data => '' );
     }
 );
 $api->get(
@@ -1483,7 +1483,7 @@ $api->get(
 $api->post(
     '/system/companydefaults' => sub {
         my $c = shift;
-        return unless my $login = $c->check_perms("company.defaults");
+        return unless my $login = $c->check_perms("system.defaults");
         my $client = $c->param('client');
         my $form   = Form->new;
 
@@ -1529,7 +1529,7 @@ $api->post(
 $api->get(
     '/system/chart/accounts' => sub {
         my $c = shift;
-        return unless my $login = $c->check_perms("syste.chart.list");
+        return unless my $login = $c->check_perms("system.chart.list");
         my $client = $c->param('client');
         my $form   = Form->new;
         $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
@@ -1553,7 +1553,7 @@ $api->get(
 $api->get(
     '/system/chart/accounts/:id' => sub {
         my $c = shift;
-        return unless my $login = $c->check_perms("syste.chart.list");
+        return unless my $login = $c->check_perms("system.chart.list");
         my $client = $c->param('client');
         my $id     = $c->param('id');
         my $form   = Form->new;
@@ -1594,7 +1594,7 @@ $api->get(
 $api->post(
     '/system/chart/accounts/:id' => { id => undef } => sub {
         my $c = shift;
-        return unless my $login = $c->check_perms("syste.chart.add");
+        return unless my $login = $c->check_perms("system.chart.add");
         my $client = $c->param('client');
         my $form   = Form->new;
         my $id     = $c->param("id");
@@ -1684,6 +1684,99 @@ $api->delete(
                 }
             );
         }
+    }
+);
+$api->get(
+    '/system/chart/gifi' => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+        my $form   = Form->new;
+        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+
+        my $result = AM->gifi_accounts( $c->slconfig, $form );
+        if ($result) {
+            $c->render( json => $form->{ALL} );
+        }
+        else {
+            $c->render(
+                status => 500,
+                json   => {
+                    status  => 'error',
+                    message => 'Failed to get accounts'
+                }
+            );
+        }
+    }
+);
+$api->get(
+    '/system/chart/gifi/:accno' => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+        my $accno  = $c->param('accno');
+        my $form   = Form->new;
+        $form->{accno} = $accno;
+        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+
+        my $result = AM->get_gifi( $c->slconfig, $form );
+        if ($result) {
+            $c->render( json => {%$form} );
+
+        }
+        else {
+            $c->render(
+                status => 500,
+                json   => {
+                    status  => 'error',
+                    message => 'Failed to get accounts'
+                }
+            );
+        }
+    }
+);
+
+$api->post(
+    '/system/chart/gifi/:accno' => { accno => undef } => sub {
+        my $c = shift;
+
+        my $client = $c->param('client');
+        my $form   = Form->new;
+        my $accno  = $c->param("accno");
+        my $params = $c->req->json;
+        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+        for ( keys %$params ) { $form->{$_} = $params->{$_} if $params->{$_} }
+        $form->{accno} = $accno          // undef;
+        $form->{id}    = $c->param('id') // undef;
+        my $result = AM->save_gifi( $c->slconfig, $form );
+
+        if ($result) {
+            $c->render( json => {%$form} );
+        }
+        else {
+            $c->render(
+                status => 500,
+                json   => {
+                    status  => 'error',
+                    message => 'Failed to save account'
+                }
+            );
+        }
+    }
+);
+$api->delete(
+    '/system/chart/gifi/:accno' => sub {
+        my $c = shift;
+
+        my $client = $c->param('client');
+        my $form   = Form->new;
+        my $accno  = $c->param("accno");
+        my $params = $c->req->json;
+        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+        $form->{id} = $accno;
+
+        my $result = AM->delete_gifi( $c->slconfig, $form );
+
+        $c->render( status => 204, data => '' );
+
     }
 );
 ############################
@@ -2389,6 +2482,21 @@ helper get_roles => sub {
     return $data;
 };
 
+helper get_gifi => sub {
+    my $c      = shift;
+    my $client = $c->param('client');
+    my $form   = Form->new;
+    $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+
+    my $result = AM->gifi_accounts( $c->slconfig, $form );
+    if ($result) {
+        return $form->{ALL};
+    }
+    else {
+        return [];
+    }
+};
+
 helper get_accounts => sub {
     my ($c)    = @_;
     my $client = $c->param('client');
@@ -2455,7 +2563,7 @@ $api->get(
 
         # List of valid modules
         my @valid_modules =
-          qw(customer vendor ic gl_report projects incomestatement employees);
+          qw(customer vendor ic gl chart gl_report projects incomestatement employees);
 
         # Return empty JSON object if module not valid
         return $c->render( json => {} )
@@ -2482,13 +2590,22 @@ $api->get(
         my $vendors    = $c->get_vc('vendor');
         my $projects   = $c->get_projects;
         my $roles      = $c->get_roles;
+        my $gifi       = $c->get_gifi;
 
         my $response;
 
         #----------------
+        # Chart
+        #----------------
+        if ( $module eq 'chart' ) {
+            return unless $c->check_perms('system.chart');
+            $response = { gifi => $gifi, };
+        }
+
+        #----------------
         # CUSTOMER module
         #----------------
-        if ( $module eq 'customer' ) {
+        elsif ( $module eq 'customer' ) {
             return unless $c->check_perms('customer');
 
             # Here, do module-specific parameter checks
@@ -2561,6 +2678,24 @@ $api->get(
         #--------------
         elsif ( $module eq 'gl_report' ) {
             return unless $c->check_perms('gl.transactions');
+            my $role        = undef;
+            my $departments = $c->get_departments($role);
+
+            $response = {
+                currencies   => $currencies,
+                accounts     => $accounts,
+                tax_accounts => $tax_accounts,
+                customers    => $customers,
+                vendors      => $vendors,
+                linetax      => $line_tax,
+                departments  => $departments,
+                projects     => $projects,
+                roles        => $roles,
+            };
+        }
+
+        elsif ( $module eq 'gl' ) {
+            return unless $c->check_perms('gl.add');
             my $role        = undef;
             my $departments = $c->get_departments($role);
 
