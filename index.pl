@@ -210,11 +210,11 @@ helper check_perms => sub {
 # Single query joining session, login, and employee to fetch admin, allowed permissions, and login
     my $record = $dbs->query(
         'SELECT l.admin, l.acsrole_id, e.login, acs.acs
-         FROM login l 
-         JOIN session s ON l.employeeid = s.employeeid 
-         JOIN employee e ON l.employeeid = e.id 
-         JOIN acsapirole acs ON l.acsrole_id = acs.id
-         WHERE s.sessionkey = ?',
+     FROM login l
+     JOIN session s ON l.employeeid = s.employeeid
+     JOIN employee e ON l.employeeid = e.id
+     LEFT JOIN acsapirole acs ON l.acsrole_id = acs.id
+     WHERE s.sessionkey = ?',
         $sessionkey
     )->hash;
 
@@ -287,6 +287,21 @@ $api->post(
         }
     }
 );
+my $neoledger_perms = [
+    "vendor", "vendor.transaction", "vendor.invoice", "vendor.debitinvoice",
+    "vendor.addvendor", "vendor.transactions", "vendor.search", "vendor.h
+istory", "pos", "pos.sale", "cash", "cash.recon", "items", "items.part",
+    "items.search.parts", "items.search.services", "reports", "reports.tria
+l", "reports.income", "system", "system.currencies", "system.projects",
+    "system.departments", "system.defaults", "system.chart", "system.chart.l
+ist", "system.chart.add", "system.user.roles", "customer",
+    "customer.transaction", "customer.invoice", "customer.addcustomer",
+    "customer.transac
+tions", "customer.search", "customer.history", "system.user.employees",
+    "customer.creditinvoice", "items.search.allitems", "items.service", "gl"
+    , "gl.add", "gl.transactions", "system.user.templates", "system.templates",
+    "system.gifi", "system.chart.gifi"
+];
 $api->post(
     '/auth/login' => sub {
         my $c      = shift;
@@ -330,7 +345,7 @@ $api->post(
    # Check if the API account exists in the login table and verify the password,
    # and retrieve the acsrole_id as well
         my $login = $dbs->query( '
-            SELECT password, acsrole_id
+            SELECT password, acsrole_id, admin
             FROM login
             WHERE employeeid = ? AND crypt(?, password) = password
         ', $employee_id, $password )->hash;
@@ -346,6 +361,10 @@ $api->post(
         my $acs_row = $dbs->query( 'SELECT acs FROM acsapirole WHERE id = ?',
             $login->{acsrole_id} )->hash;
         my $acs = $acs_row ? $acs_row->{acs} : undef;
+
+        if ( $login->{admin} ) {
+            $acs = $neoledger_perms;
+        }
 
         my $session_key = $dbs->query(
 'INSERT INTO session (employeeid, sessionkey) VALUES (?, encode(gen_random_bytes(32), ?)) RETURNING sessionkey',
@@ -2147,7 +2166,6 @@ $api->get(
         my $client   = $c->param('client');
         my $template = $c->param('id');
 
-        # Basic sanitization: reject any template name with '..'
         return $c->render(
             json   => { error => "Invalid template name" },
             status => 400
@@ -2155,7 +2173,6 @@ $api->get(
 
         my $file = "templates/$client/$template";
 
-        # Check if file exists and is a regular file
         unless ( -e $file && -f $file ) {
             return $c->render(
                 json   => { error => "Template not found" },
@@ -2163,17 +2180,21 @@ $api->get(
             );
         }
 
-        # Serve PDFs with proper content type
         if ( $file =~ /\.pdf$/i ) {
-            $c->res->headers->content_type('application/pdf');
+            my $timestamp = time();
+            my ( $name, $ext ) = $template =~ /^(.*?)\.([^.]+)$/;
+            my $new_filename = "${name}_${timestamp}.$ext";
 
-          # Optionally, force inline display:
-          # $c->res->headers->content_disposition("inline; filename=$template");
+            $c->res->headers->content_type('application/pdf');
+            $c->res->headers->content_disposition(
+                "inline; filename=$new_filename");
+            $c->res->headers->cache_control(
+                'no-cache, no-store, must-revalidate');
+            $c->res->headers->expires(0);
             $c->reply->asset( Mojo::Asset::File->new( path => $file ) );
             return;
         }
 
-        # Serve common image types with proper content type
         elsif ( $file =~ /\.(png|jpe?g|gif|webp|bmp|svg)$/i ) {
             my %mime_types = (
                 png  => 'image/png',
@@ -2187,12 +2208,21 @@ $api->get(
             my ($ext) = $file =~ /\.(\w+)$/;
             my $content_type =
               $mime_types{ lc $ext } || 'application/octet-stream';
+
+            my $timestamp    = time();
+            my ($name)       = $template =~ /^(.*?)\.([^.]+)$/;
+            my $new_filename = "${name}_${timestamp}.$ext";
+
             $c->res->headers->content_type($content_type);
+            $c->res->headers->content_disposition(
+                "inline; filename=$new_filename");
+            $c->res->headers->cache_control(
+                'no-cache, no-store, must-revalidate');
+            $c->res->headers->expires(0);
             $c->reply->asset( Mojo::Asset::File->new( path => $file ) );
             return;
         }
 
-        # For all other files, assume text-based content and render as text
         else {
             open my $fh, '<',
               $file
@@ -2200,7 +2230,7 @@ $api->get(
                 json   => { error => "Cannot open template" },
                 status => 500
               );
-            local $/ = undef;    # Enable slurp mode
+            local $/ = undef;
             my $content = <$fh>;
             close $fh;
             $c->render( text => $content );
