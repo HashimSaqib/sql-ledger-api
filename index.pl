@@ -40,8 +40,10 @@ use POSIX      qw(strftime);
 use Time::Piece;
 use Mojo::Template;
 use File::Slurp;
-
+use Dotenv;
+Dotenv->load;
 app->config( hypnotoad => { listen => ['http://*:3000'] } );
+my $base_url = "https://api.neo-ledger.com/";
 
 my %myconfig = (
     dateformat   => 'yyyy/mm/dd',
@@ -85,6 +87,35 @@ helper dbs => sub {
     return $dbs;
 };
 
+helper central_dbs => sub {
+    my $c      = shift;
+    my $dbname = "centraldb";
+    my $dbh;
+    eval {
+        $dbh = DBI->connect( "dbi:Pg:dbname=$dbname", 'postgres', '',
+            { RaiseError => 1, PrintError => 1 } );
+    };
+
+    if ( $@ || !$dbh ) {
+        my $error_message = $DBI::errstr // $@ // "Unknown error";
+
+        # Ensure no further processing or responses are sent after this
+        $c->render(
+            status => 500,
+            json   => {
+                message =>
+                  "Failed to connect to the database '$dbname': $error_message"
+            }
+        );
+        $c->app->log->error(
+            "Failed to connect to the database '$dbname': $error_message");
+        return undef;    # Return undef to prevent further processing
+    }
+
+    my $dbs = DBIx::Simple->connect($dbh);
+    return $dbs;
+};
+
 helper validate_date => sub {
     my ( $c, $date ) = @_;
     unless ( $date =~ /^\d{4}-\d{2}-\d{2}$/ ) {
@@ -98,12 +129,6 @@ helper validate_date => sub {
     }
     return 1;    # return true if the date is valid
 };
-
-#Ledger API Calls
-
-my $r = app->routes;
-
-my $api = $r->under('/client/:client');
 
 # Enable CORS for all routes
 app->hook(
@@ -140,6 +165,735 @@ app->hook(
                 json   => { message => "$error" }
             );
         };
+    }
+);
+
+my $r       = app->routes;
+my $central = $r->under('/');
+my $api     = $r->under('/client/:client');
+
+get '/logo/:client/' => sub {
+    my $c      = shift;
+    my $dbname = $c->param('client');
+    my $path   = $c->app->home->rel_file("templates/$dbname/logo.png");
+
+    # Check if the file exists, and serve it if it does
+    if ( -e $path ) {
+        $c->reply->file($path);
+    }
+    else {
+        $c->reply->not_found;
+    }
+};
+###############################
+####                       ####
+####   CENTRAL DATABASE    ####
+####                       ####
+###############################
+helper send_email_central => sub {
+    use Email::Sender::Transport::SMTP;
+    use Email::Stuffer;
+    my ( $c, $to, $subject, $content, $attachments ) = @_;
+
+    my $transport = Email::Sender::Transport::SMTP->new(
+        host          => $ENV{SMTP_HOST},
+        port          => $ENV{SMTP_PORT},
+        ssl           => $ENV{SMTP_SSL},
+        sasl_username => $ENV{SMTP_USERNAME},
+        sasl_password => $ENV{SMTP_PASSWORD},
+        sasl          => $ENV{SMTP_SASL}
+    );
+    my $error_message;
+
+    # Create the Email::Stuffer object
+    my $email_obj =
+      Email::Stuffer->from('Hashim <hashim1saqib@gmail.com>')->to($to)
+      ->subject($subject)->text_body($content);
+
+    # Attach files if provided
+    if ( $attachments && ref($attachments) eq 'ARRAY' ) {
+        foreach my $file_path (@$attachments) {
+            $email_obj->attach_file($file_path);
+        }
+    }
+
+    # Attempt to send the email
+    my $email_sent;
+    eval { $email_sent = $email_obj->transport($transport)->send; };
+
+    if ( $@ || !$email_sent ) {
+        my $error_message = Dumper($@);
+        $c->app->log->warn("Failed to send email: $error_message");
+        return {
+            error =>
+              "Failed to send email. Please try again later. $error_message",
+            status => 500
+        };
+    }
+
+    return {
+        message => "Email sent successfully.",
+        status  => 200
+    };
+};
+
+helper get_user_profile => sub {
+    my $c          = shift;
+    my $dbs        = $c->central_dbs();
+    my $sessionkey = $c->req->headers->header('Authorization');
+    my $profile =
+      $dbs->query( "SELECT profile_id FROM session WHERE sessionkey = ?",
+        $sessionkey )->hash;
+    unless ( $profile && $profile->{profile_id} ) {
+        return $c->render(
+            status => 401,
+            json   => { message => "Invalid session key" }
+        );
+    }
+    return $profile;
+};
+helper is_admin => sub {
+    my $c       = shift;
+    my $client  = $c->param('client');
+    my $profile = $c->get_user_profile();
+    my $dbs     = $c->central_dbs();
+
+    my $dataset =
+      $dbs->query( "SELECT id from dataset WHERE db_name = ?", $client )->hash;
+    my $sql =
+"SELECT access_level FROM dataset_access WHERE profile_id = ? AND dataset_id = ?";
+    my $access =
+      $dbs->query( $sql, $profile->{profile_id}, $dataset->{id} )->hash;
+
+    unless (
+        $access
+        && (   $access->{access_level} eq 'admin'
+            || $access->{access_level} eq 'owner' )
+      )
+    {
+        return $c->render(
+            status => 403,
+            json   => { message => "Insufficient permissions" }
+        );
+    }
+
+    return 1;
+};
+
+# Route to generate an OTP for signup
+$central->post(
+    '/signup_otp' => sub {
+        my $c      = shift;
+        my $params = $c->req->json;
+
+        my $email    = $params->{email};
+        my $password = $params->{password};
+
+        unless ( $email && $password ) {
+            return $c->render(
+                status => 400,
+                json   => { message => "Missing required info" }
+            );
+        }
+
+        my $central_dbs = $c->central_dbs();
+        return unless $central_dbs;
+
+        # Check if the user already exists in the profile table
+        my $existing_user =
+          $central_dbs->query( 'SELECT id FROM profile WHERE email = ?',
+            $email )->hash;
+        if ($existing_user) {
+            return $c->render(
+                status => 409,
+                json   => { message => "User already exists" }
+            );
+        }
+
+        # Generate a 6-digit OTP (for demo purposes)
+        my $otp = int( rand(900000) ) + 100000;
+
+        $central_dbs->query( 'INSERT INTO otp (email, code) VALUES (?, ?)',
+            $email, $otp );
+
+        my $sent =
+          $c->send_email_central( $email, "Your OTP", "Your OTP is: $otp", [] );
+        unless ($sent) {
+            return $c->render(
+                status => 500,
+                json   => { message => "Failed to send OTP email" }
+            );
+        }
+
+        return $c->render( json => { message => "OTP generated" } );
+    }
+);
+
+$central->post(
+    '/signup' => sub {
+        my $c      = shift;
+        my $params = $c->req->json;
+
+        my $email    = $params->{email};
+        my $password = $params->{password};
+        my $otp      = $params->{otp};
+
+        unless ( $email && $password && $otp ) {
+            return $c->render(
+                status => 400,
+                json   => { message => "Missing required info" }
+            );
+        }
+
+        my $central_dbs = $c->central_dbs();
+        return unless $central_dbs;
+
+        # Check if the user already exists (to handle duplicate requests)
+        my $existing_user =
+          $central_dbs->query( 'SELECT id FROM profile WHERE email = ?',
+            $email )->hash;
+        if ($existing_user) {
+            return $c->render(
+                status => 409,
+                json   => { message => "User already exists" }
+            );
+        }
+
+        # Validate the OTP record
+        my $otp_record =
+          $central_dbs->query(
+            'SELECT id FROM otp WHERE email = ? AND code = ?',
+            $email, $otp )->hash;
+        unless ($otp_record) {
+            return $c->render(
+                status => 400,
+                json   => { message => "Invalid OTP or email" }
+            );
+        }
+
+        # Insert the new user into the profile table
+        my $insert_query =
+'INSERT INTO profile (email, password) VALUES (?, crypt(?, gen_salt(\'bf\')))';
+        my $insert_result =
+          $central_dbs->query( $insert_query, $email, $password );
+
+        unless ($insert_result) {
+            return $c->render(
+                status => 500,
+                json   => { message => "Failed to create profile" }
+            );
+        }
+
+     # Retrieve the last inserted id using DBIx::Simple's last_insert_id method.
+        my $profile_id =
+          $central_dbs->last_insert_id( undef, undef, 'profile', 'id' );
+
+        unless ($profile_id) {
+            return $c->render(
+                status => 500,
+                json   => { message => "Failed to retrieve profile id" }
+            );
+        }
+
+        return $c->render( json =>
+              { message => "Signup successful", profile_id => $profile_id } );
+    }
+);
+$central->post(
+    '/login' => sub {
+        my $c      = shift;
+        my $params = $c->req->json;
+
+        my $email    = $params->{email};
+        my $password = $params->{password};
+        my $client   = $params->{client};
+
+        unless ( $email && $password ) {
+            return $c->render(
+                status => 400,
+                json   => { message => "Missing Required Info" }
+            );
+        }
+
+        my $central_dbs = $c->central_dbs();
+        return unless $central_dbs;
+
+        my $login = $central_dbs->query( '
+            SELECT id
+            FROM profile
+            WHERE email = ? AND crypt(?, password) = password
+        ', $email, $password )->hash;
+
+        unless ($login) {
+            return $c->render(
+                status => 400,
+                json   => { message => "Incorrect username or password" }
+            );
+        }
+
+        if ($client) {
+
+            # Check if the dataset (client) exists
+            my $dataset =
+              $central_dbs->query( 'SELECT id FROM dataset WHERE db_name = ?',
+                $client )->hash;
+            unless ($dataset) {
+                return $c->render(
+                    status => 400,
+                    json   => { message => "Invalid client" }
+                );
+            }
+
+            # Check if the user has access to the dataset
+            my $access = $central_dbs->query(
+'SELECT access_level FROM dataset_access WHERE profile_id = ? AND dataset_id = ?',
+                $login->{id}, $dataset->{id}
+            )->hash;
+            unless ($access) {
+                return $c->render(
+                    status => 403,
+                    json   =>
+                      { message => "User does not have access to this client" }
+                );
+            }
+        }
+
+        my $session_key = $central_dbs->query(
+'INSERT INTO session (profile_id, sessionkey) VALUES (?, encode(gen_random_bytes(32), ?)) RETURNING sessionkey',
+            $login->{id}, 'hex'
+        )->hash->{sessionkey};
+
+        return $c->render(
+            json => {
+                sessionkey => $session_key
+            }
+        );
+    }
+);
+
+$api->get(
+    '/get_acs' => sub {
+        my $c       = shift;
+        my $dbs     = $c->central_dbs();
+        my $profile = $c->get_user_profile();
+
+        # Get the client parameter (the db_name)
+        my $client = $c->param('client');
+        unless ($client) {
+            return $c->render(
+                status => 400,
+                json   => { message => "Missing client parameter" }
+            );
+        }
+
+        # Look up the dataset using the client (db_name)
+        my $dataset =
+          $dbs->query( "SELECT id FROM dataset WHERE db_name = ?", $client )
+          ->hash;
+        unless ( $dataset && $dataset->{id} ) {
+            return $c->render(
+                status => 404,
+                json   => { message => "Dataset not found for client" }
+            );
+        }
+        my $dataset_id = $dataset->{id};
+
+        # Retrieve all roles assigned to the current profile for this dataset
+        my $roles = $dbs->query(
+            "SELECT r.acs
+     FROM dataset_access da
+     JOIN role r ON da.role_id = r.id
+     WHERE da.profile_id = ? AND r.dataset_id = ?",
+            $profile->{profile_id}, $dataset_id
+        )->hashes;
+
+        # Merge the ACS arrays from all roles into a single set
+        my %acs_union;
+        for my $row (@$roles) {
+            my $acs_val = $row->{acs};
+            my $acs_array;
+
+            # Assume that if $acs_val is not a reference, it is a JSON string
+            if ( ref $acs_val eq 'ARRAY' ) {
+                $acs_array = $acs_val;
+            }
+            else {
+                eval { $acs_array = Mojo::JSON::from_json($acs_val) };
+                $acs_array ||= [];
+            }
+            $acs_union{$_} = 1 for @$acs_array;
+        }
+        my @merged_acs = keys %acs_union;
+
+        $c->render( json => { acs => \@merged_acs } );
+    }
+);
+
+$central->get(
+    '/db_list' => sub {
+        my $c       = shift;
+        my $profile = $c->get_user_profile();
+        my $dbs     = $c->central_dbs();
+
+        my $datasets = $dbs->query(
+            "SELECT d.id, d.db_name, d.description, da.access_level 
+             FROM dataset d
+             INNER JOIN dataset_access da
+               ON d.id = da.dataset_id AND da.profile_id = ?",
+            $profile->{profile_id}
+        )->hashes;
+
+        foreach my $dataset (@$datasets) {
+            my $db_name   = $dataset->{db_name};
+            my $logo_path = "templates/$db_name/logo.png";
+
+            if ( -e $logo_path ) {
+                $dataset->{logo} = "$base_url/logo/$db_name/";
+            }
+            else {
+                $dataset->{logo} = "";
+            }
+
+       # If access level is owner or admin, add additional user and role details
+            if ( defined $dataset->{access_level}
+                && $dataset->{access_level} =~ /^(owner|admin)$/ )
+            {
+            # Query all users for this dataset with their email and access level
+                my $users = $dbs->query(
+"SELECT p.id AS profile_id, p.email, da.access_level, da.role_id, r.name AS role
+         FROM dataset_access da
+         JOIN profile p ON p.id = da.profile_id
+         LEFT JOIN role r ON r.id = da.role_id
+         WHERE da.dataset_id = ?",
+                    $dataset->{id}
+                )->hashes;
+                $dataset->{users} = $users;
+
+                # Query all roles for this dataset with their name and acs value
+                my $roles = $dbs->query(
+                    "SELECT id, name, acs 
+                     FROM role
+                     WHERE dataset_id = ?",
+                    $dataset->{id}
+                )->hashes;
+                $dataset->{roles} = $roles;
+                $dataset->{admin} = 1;
+            }
+        }
+
+        $c->render( json => $datasets );
+    }
+);
+
+# ADD EDIT OR MANAGE A ROLE
+$api->post(
+    '/system/roles/:id' => { id => undef } => sub {
+        my $c = shift;
+        return unless $c->is_admin();
+        my $client      = $c->param('client');
+        my $dbs_central = $c->central_dbs();
+        my $data        = $c->req->json;
+        my $id          = $c->param('id');
+
+        my $name = $data->{name};
+        return $c->render(
+            json   => { error => "Missing role name" },
+            status => 400
+        ) unless $name;
+
+        # Retrieve the dataset using client as the db_name
+        my $dataset =
+          $dbs_central->query( "SELECT id FROM dataset WHERE db_name = ?",
+            $client )->hash;
+        unless ( $dataset && $dataset->{id} ) {
+            return $c->render(
+                json   => { error => "Dataset not found for client" },
+                status => 404
+            );
+        }
+        my $dataset_id = $dataset->{id};
+
+        if ( !defined $id ) {
+
+            my $dup = $dbs_central->query(
+                "SELECT 1 FROM role WHERE name = ? AND dataset_id = ?",
+                $name, $dataset_id )->hash;
+            if ($dup) {
+                return $c->render(
+                    json   => { error => "Duplicate role name" },
+                    status => 409
+                );
+            }
+
+            my $acs = defined $data->{acs} ? $data->{acs} : '[]';
+
+            # Insert new record and return the new id
+            my $sth = $dbs_central->query(
+"INSERT INTO role (dataset_id, name, acs) VALUES (?, ?, ?::jsonb) RETURNING id",
+                $dataset_id, $name, $acs );
+            my $row = $sth->hash;
+            return $c->render(
+                json   => { message => "Role inserted", id => $row->{id} },
+                status => 201
+            );
+        }
+        else {
+# Update: if the name is changed, ensure it doesn't duplicate another role in the same dataset
+            my $dup = $dbs_central->query(
+"SELECT 1 FROM role WHERE name = ? AND id <> ? AND dataset_id = ?",
+                $name, $id, $dataset_id )->hash;
+            if ($dup) {
+                return $c->render(
+                    json   => { error => "Duplicate role name" },
+                    status => 409
+                );
+            }
+
+            # Update role. Only name and acs are updated.
+            # If acs is not provided, COALESCE keeps the current value.
+            my $acs = $data->{acs};
+            my $sql = "UPDATE role
+                       SET name = COALESCE(?, name),
+                           acs = COALESCE(?::jsonb, acs)
+                       WHERE id = ? AND dataset_id = ?";
+            $dbs_central->query( $sql, $name, $acs, $id, $dataset_id );
+
+            return $c->render( json => { message => "Role updated" } );
+        }
+    }
+);
+
+#### INVITE MANAGEMENT
+
+# Create An Invite
+$api->post(
+    '/invite' => sub {
+        my $c = shift;
+        return unless $c->is_admin();
+        my $dbs = $c->central_dbs();
+
+        my $profile   = $c->get_user_profile();
+        my $sender_id = $profile->{profile_id};
+
+        # Get invite details from the request body
+        my $params          = $c->req->json;
+        my $recipient_email = $params->{recipient_email};
+        my $dataset_id      = $params->{dataset_id};
+        my $access_level    = $params->{access_level} // 'user';
+        my $role_id         = $params->{role_id};
+
+        unless ( $recipient_email && $dataset_id ) {
+            return $c->render(
+                status => 400,
+                json   => {
+                    message =>
+                      "Missing required fields (recipient_email and dataset_id)"
+                }
+            );
+        }
+
+        # Validate that the dataset exists
+        my $dataset =
+          $dbs->query( "SELECT id FROM dataset WHERE id = ?", $dataset_id )
+          ->hash;
+        unless ($dataset) {
+            return $c->render(
+                status => 404,
+                json   => { message => "Dataset not found" }
+            );
+        }
+
+        # Insert the invite record
+        my $invite = $dbs->query(
+"INSERT INTO invite (sender_id, recipient_email, dataset_id, access_level, role_id) VALUES (?, ?, ?, ?, ?) RETURNING id",
+            $sender_id,    $recipient_email, $dataset_id,
+            $access_level, $role_id
+        )->hash;
+
+        return $c->render(
+            json => { message => "Invite sent", invite_id => $invite->{id} } );
+    }
+);
+
+# Route to cancel an invite (only sender can cancel)
+$central->delete(
+    '/invite/:id' => sub {
+        my $c         = shift;
+        my $invite_id = $c->param('id');
+        my $dbs       = $c->central_dbs();
+
+        # Validate session and get sender profile id
+        my $profile   = $c->get_user_profile();
+        my $sender_id = $profile->{profile_id};
+
+        # Verify that the invite exists and belongs to the sender
+        my $invite =
+          $dbs->query( "SELECT id FROM invite WHERE id = ? AND sender_id = ?",
+            $invite_id, $sender_id )->hash;
+        unless ($invite) {
+            return $c->render(
+                status => 404,
+                json   =>
+                  { message => "Invite not found or not authorized to cancel" }
+            );
+        }
+
+        # Delete the invite
+        $dbs->query( "DELETE FROM invite WHERE id = ?", $invite_id );
+        return $c->render( json => { message => "Invite canceled" } );
+    }
+);
+
+# Route to accept an invite
+$central->post(
+    '/invite/:id/accept' => sub {
+        my $c         = shift;
+        my $invite_id = $c->param('id');
+
+        my $dbs = $c->central_dbs();
+
+        # Validate session and get current profile id
+        my $profile         = $c->get_user_profile();
+        my $current_profile = $profile->{profile_id};
+
+        # Retrieve the current user's email
+        my $user = $dbs->query( "SELECT email FROM profile WHERE id = ?",
+            $current_profile )->hash;
+        my $user_email = $user->{email};
+
+# Retrieve the invite record ensuring the recipient email matches the user's email
+        my $invite = $dbs->query(
+            "SELECT * FROM invite WHERE id = ? AND recipient_email = ?",
+            $invite_id, $user_email )->hash;
+        unless ($invite) {
+            return $c->render(
+                status => 404,
+                json   => { message => "Invite not found for this user" }
+            );
+        }
+
+        # Add dataset access record if not already present
+        my $exists = $dbs->query(
+"SELECT 1 FROM dataset_access WHERE profile_id = ? AND dataset_id = ?",
+            $current_profile, $invite->{dataset_id}
+        )->hash;
+        unless ($exists) {
+            $dbs->query(
+"INSERT INTO dataset_access (profile_id, dataset_id, access_level, role_id) VALUES (?, ?, ?, ?)",
+                $current_profile,        $invite->{dataset_id},
+                $invite->{access_level}, $invite->{role_id}
+            );
+        }
+
+        # Optionally, remove the invite after acceptance
+        $dbs->query( "DELETE FROM invite WHERE id = ?", $invite_id );
+        return $c->render( json => { message => "Invite accepted" } );
+    }
+);
+
+$api->post(
+    '/access/:profile_id/' => sub {
+        my $c = shift;
+        return unless $c->is_admin();
+        my $client     = $c->param('client');
+        my $profile_id = $c->param('profile_id');
+        my $dbs        = $c->central_dbs();
+
+        my $access = $dbs->query(
+"SELECT * FROM dataset_access WHERE dataset_id = ( SELECT id FROM dataset WHERE db_name = ? ) AND profile_id = ?",
+            $client, $profile_id
+        )->hash;
+        unless ($access) {
+            return $c->render(
+                status => 404,
+                json   => { message => "Dataset access record not found" }
+            );
+        }
+        my $dataset_id = $access->{dataset_id};
+
+        # Retrieve JSON payload
+        my $data = $c->req->json;
+
+        # If deletion is requested, remove the access record
+        if ( $data->{delete} ) {
+            $dbs->query(
+"DELETE FROM dataset_access WHERE dataset_id = ? AND profile_id = ?",
+                $dataset_id, $profile_id
+            );
+            return $c->render(
+                json => { message => "Dataset access removed" } );
+        }
+
+        # If a field is not provided, retain its current value.
+
+        $dbs->query(
+            "UPDATE dataset_access 
+             SET  access_level = ?, role_id = ? 
+             WHERE dataset_id = ? AND profile_id = ?",
+            $data->{access_level}, $data->{role_id},
+            $dataset_id,           $profile_id
+        );
+        return $c->render( json => { message => "Dataset access updated" } );
+    }
+);
+
+$central->get(
+    '/invites/sent' => sub {
+        my $c          = shift;
+        my $sessionkey = $c->req->headers->header('Authorization');
+        my $dbs        = $c->central_dbs();
+
+        # Validate session and get sender profile id
+        my $profile   = $c->get_user_profile();
+        my $sender_id = $profile->{profile_id};
+
+        # Retrieve all invites sent by this user
+        my $invites = $dbs->query(
+            "SELECT invite.*, dataset.db_name 
+   FROM invite 
+   LEFT JOIN dataset ON invite.dataset_id = dataset.id 
+   WHERE sender_id = ?",
+            $sender_id
+        )->hashes;
+        return $c->render( json => { invites => $invites } );
+    }
+);
+
+# Route to list all invites received (pending) for the authenticated user
+$central->get(
+    '/invites/received' => sub {
+        my $c          = shift;
+        my $sessionkey = $c->req->headers->header('Authorization');
+        my $dbs        = $c->central_dbs();
+
+        # Validate session and get current profile id
+        my $profile         = $c->get_user_profile();
+        my $current_profile = $profile->{profile_id};
+
+        # Retrieve the current user's email
+        my $user = $dbs->query( "SELECT email FROM profile WHERE id = ?",
+            $current_profile )->hash;
+        my $email = $user->{email};
+
+       # Retrieve all invites where the recipient email matches the user's email
+        my $invites = $dbs->query(
+            "SELECT invite.*, dataset.db_name, role.name AS role FROM invite
+          LEFT JOIN dataset ON invite.dataset_id = dataset.id
+          LEFT JOIN role  ON invite.role_id = role.id
+           WHERE recipient_email = ?",
+            $email
+        )->hashes;
+        foreach my $invite (@$invites) {
+            my $db_name   = $invite->{db_name};
+            my $logo_path = "templates/$db_name/logo.png";
+            if ( -e $logo_path ) {
+                $invite->{logo} = "$base_url/logo/$db_name/";
+            }
+            else {
+                $invite->{logo} = "";
+            }
+        }
+        return $c->render( json => { invites => $invites } );
     }
 );
 
@@ -203,23 +957,13 @@ $api->get(
 #########################
 helper check_perms => sub {
     my ( $c, $permissions_string ) = @_;
-    my $client     = $c->param('client');
-    my $sessionkey = $c->req->headers->header('Authorization');
-    my $dbs        = $c->dbs($client);
+    my $client = $c->param('client');
+    $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+    my $central_dbs = $c->central_dbs();
 
-# Single query joining session, login, and employee to fetch admin, allowed permissions, and login
-    my $record = $dbs->query(
-        'SELECT l.admin, l.acsrole_id, e.login, acs.acs
-     FROM login l
-     JOIN session s ON l.employeeid = s.employeeid
-     JOIN employee e ON l.employeeid = e.id
-     LEFT JOIN acsapirole acs ON l.acsrole_id = acs.id
-     WHERE s.sessionkey = ?',
-        $sessionkey
-    )->hash;
-
-    # Validate session and record existence
-    unless ($record) {
+    # Validate the session and get the profile (user) record
+    my $profile = $c->get_user_profile();
+    unless ($profile) {
         $c->render(
             status => 401,
             json   => { message => "Invalid session key" }
@@ -227,38 +971,53 @@ helper check_perms => sub {
         return 0;
     }
 
-    # If the user is an admin, return their login value immediately
-    return $record->{login} if $record->{admin};
+    my $dataset =
+      $central_dbs->query( "SELECT id from dataset WHERE db_name = ?", $client )
+      ->hash;
 
-    # Retrieve allowed permissions from the login table (assumed JSON in "acs")
-    my $allowed_string = $record->{acs} // '';
-    my $allowed_perms  = decode_json($allowed_string);
+    my $admin = $central_dbs->query(
+        "SELECT 1 FROM dataset_access da
+         WHERE da.profile_id = ? 
+           AND da.access_level IN ('admin','owner') 
+           AND da.dataset_id = ?
+         LIMIT 1",
+        $profile->{profile_id}, $dataset->{id}
+    )->hash;
+    my $form = new Form;
+    return $form if $admin;
 
-    # Split the requested permissions by comma and trim whitespace
-    my @requested_perms = split /\s*,\s*/, $permissions_string;
+    # Fetch all roles for the given dataset
+    my $role = $central_dbs->query(
+        "SELECT r.acs
+         FROM role r
+         JOIN dataset_access da ON r.id = da.role_id
+         WHERE da.profile_id = ? 
+         AND da.dataset_id = ?",
+        $profile->{profile_id}, $dataset->{id}
+    )->hash;
 
-    # Check if the user has at least one of the requested permissions
-    my $has_permission = 0;
-    for my $perm (@requested_perms) {
-        if ( grep { $_ eq $perm } @$allowed_perms ) {
-            $has_permission = 1;
-            last;
+    warn( Dumper $role );
+
+    # Combine allowed permissions into a hash for faster lookup
+    my %allowed;
+
+    my $acs   = $role->{acs} // '[]';
+    my $perms = ref($acs) eq 'ARRAY' ? $acs : decode_json($acs);
+
+    $allowed{$_} = 1 for @$perms;
+
+    for my $perm ( split /\s*,\s*/, $permissions_string ) {
+        return $form if $allowed{$perm};
+    }
+
+    $c->render(
+        status => 403,
+        json   => {
+            message =>
+              "Missing any of the required permissions: $permissions_string"
         }
-    }
-
-    unless ($has_permission) {
-        $c->render(
-            status => 403,
-            json   => {
-                message =>
-                  "Missing any of the required permissions: $permissions_string"
-            }
-        );
-        return 0;
-    }
-
-    # If the check passes, return the login value from the employee table
-    return $record->{login};
+    );
+    return 0;
 };
 
 $api->post(
@@ -451,303 +1210,214 @@ $api->post(
 ####                 ####
 #########################
 
-$api->get(
-    '/system/roles' => sub {
-        my $c = shift;
-        return unless my $login = $c->check_perms("system.user.roles");
-        my $client = $c->param('client');
-        my $dbs    = $c->dbs($client);
-        my $roles  = $dbs->query("SELECT * FROM acsapirole");
-        if ($roles) {
-            my $data = $roles->hashes;
-            $data = [$data]
-              unless ref $data eq 'ARRAY';    # needed incase of one item
-            $c->render( json => $data );
-        }
-        else {
-            $c->render( status => 404 );
-        }
-    }
-);
+# $api->get(
+#     '/system/employees' => sub {
+#         my $c = shift;
+#         return unless my $login = $c->check_perms("system.user.employees");
+#         my $client = $c->param('client');
+#         my $form   = new Form;
+#         $form->{login} = $login;
+#         $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
 
-$api->post(
-    '/system/roles/:id' => { id => undef } => sub {
-        my $c = shift;
-        return unless my $login = $c->check_perms("system.user.roles");
+#         # Retrieve all employees using HR module.
+#         HR->employees( $c->slconfig, $form );
 
-        my $client = $c->param('client');
-        my $dbs    = $c->dbs($client);
-        my $data   = $c->req->json;         # expect JSON payload
-        my $id     = $c->param('id');
+#         my $dbs = $c->dbs($client);
 
-        # Ensure description is provided (using 'description' per table schema)
-        my $description = $data->{description} || $data->{description};
-        return $c->render(
-            json   => { error => "Missing role description" },
-            status => 400
-        ) unless $description;
+#         # For each employee, fetch login data.
+#         foreach my $employee ( @{ $form->{all_employee} } ) {
+#             my $emp_id = $employee->{id};
 
-        if ( !defined $id ) {
+#             # Retrieve login info from the login table.
+#             my $login_query = $dbs->query(
+# "SELECT acsrole_id, created, admin FROM login WHERE employeeid = ?",
+#                 $emp_id
+#             );
+#             my $login_info =
+#             $login_query->hash;    # Get the first row as a hash reference.
 
-            # Insertion: check for duplicate description
-            my $dup =
-              $dbs->query( "SELECT 1 FROM acsapirole WHERE description = ?",
-                $description )->hash;
-            if ($dup) {
-                return $c->render(
-                    json   => { error => "Duplicate role description" },
-                    status => 409
-                );
-            }
+#             if ($login_info) {
 
-            # Prepare acs value. Expecting a JSON array literal.
-            my $acs = defined $data->{acs} ? $data->{acs} : '[]';
+#                 # Append login data to the employee record.
+#                 $employee->{acsrole_id} = $login_info->{acsrole_id};
+#                 $employee->{created}    = $login_info->{created};
+#                 $employee->{admin}      = $login_info->{admin};
 
-            # Insert new record and return the new id
-            my $sth = $dbs->query(
-"INSERT INTO acsapirole (description, acs) VALUES (?, ?::jsonb) RETURNING id",
-                $description, $acs
-            );
-            my $row = $sth->hash;
-            return $c->render(
-                json   => { message => "Role inserted", id => $row->{id} },
-                status => 201
-            );
-        }
-        else {
-# Update: if the description is changed, ensure it doesn't duplicate another role
-            my $dup = $dbs->query(
-                "SELECT 1 FROM acsapirole WHERE description = ? AND id <> ?",
-                $description, $id )->hash;
-            if ($dup) {
-                return $c->render(
-                    json   => { error => "Duplicate role description" },
-                    status => 409
-                );
-            }
+#                 # Now, fetch the role description from the acsapirole table.
+#                 my $role_query = $dbs->query(
+#                     "SELECT description FROM acsapirole WHERE id = ?",
+#                     $login_info->{acsrole_id} );
+#                 my $role_info = $role_query->hash;
+#                 if ($role_info) {
+#                     $employee->{acsrole} = $role_info->{description};
+#                 }
+#                 else {
+#                     $employee->{acsrole} = undef;
+#                 }
+#             }
+#             else {
+#                 # Set defaults if no login record exists.
+#                 $employee->{acsrole_id} = undef;
+#                 $employee->{created}    = undef;
+#                 $employee->{admin}      = undef;
+#                 $employee->{acsrole}    = undef;
+#             }
+#         }
 
-       # Update role. Here we update description and acs only.
-       # If either field is not provided, the COALESCE keeps the existing value.
-            my $acs = $data->{acs}
-              ;    # if undefined, COALESCE will default to the current value
-            my $sql = "UPDATE acsapirole
-                     SET description = COALESCE(?, description),
-                         acs = COALESCE(?::jsonb, acs)
-                     WHERE id = ?";
-            $dbs->query( $sql, $description, $acs, $id );
+#     # Render the modified employee list with login info and role description.
+#         $c->render( json => $form->{all_employee} );
+#     }
+# );
+# $api->get(
+#     '/system/employees/:id' => sub {
+#         my $c = shift;
+#         return unless my $login = $c->check_perms("system.user.employees");
 
-            return $c->render( json => { message => "Role updated" } );
-        }
-    }
-);
-$api->get(
-    '/system/employees' => sub {
-        my $c = shift;
-        return unless my $login = $c->check_perms("system.user.employees");
-        my $client = $c->param('client');
-        my $form   = new Form;
-        $form->{login} = $login;
-        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+#         my $client = $c->param('client');
+#         my $id     = $c->param('id');
+#         my $form   = new Form;
+#         $form->{id} = $id;
+#         $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
 
-        # Retrieve all employees using HR module.
-        HR->employees( $c->slconfig, $form );
+#         # Retrieve the employee data using the HR module.
+#         HR->get_employee( $c->slconfig, $form );
 
-        my $dbs = $c->dbs($client);
+#         # Connect using DBIx::Simple.
+#         my $dbs = $c->dbs($client);
 
-        # For each employee, fetch login data.
-        foreach my $employee ( @{ $form->{all_employee} } ) {
-            my $emp_id = $employee->{id};
+#         # Determine the employee id for login lookup.
+#         my $emp_id = $form->{employeeid} // $id;
 
-            # Retrieve login info from the login table.
-            my $login_query = $dbs->query(
-"SELECT acsrole_id, created, admin FROM login WHERE employeeid = ?",
-                $emp_id
-            );
-            my $login_info =
-              $login_query->hash;    # Get the first row as a hash reference.
+# # Fetch login info for this employee. We need this because API doesn't use default ACS and we need to overwrite the values
+#         my $login_query = $dbs->query(
+#             "SELECT acsrole_id, created, admin FROM login WHERE employeeid = ?",
+#             $emp_id
+#         );
 
-            if ($login_info) {
+#         my $login_info =
+#         $login_query->hash;    # Get the first row as a hash reference.
 
-                # Append login data to the employee record.
-                $employee->{acsrole_id} = $login_info->{acsrole_id};
-                $employee->{created}    = $login_info->{created};
-                $employee->{admin}      = $login_info->{admin};
+#         # Append the login data to the employee record.
+#         if ($login_info) {
+#             $form->{acsrole_id} = $login_info->{acsrole_id};
+#             $form->{created}    = $login_info->{created};
+#             $form->{admin}      = $login_info->{admin};
+#         }
+#         else {
+#             # Set to undef or a default value if no login record exists.
+#             $form->{acsrole_id} = undef;
+#             $form->{created}    = undef;
+#             $form->{admin}      = undef;
+#         }
 
-                # Now, fetch the role description from the acsapirole table.
-                my $role_query = $dbs->query(
-                    "SELECT description FROM acsapirole WHERE id = ?",
-                    $login_info->{acsrole_id} );
-                my $role_info = $role_query->hash;
-                if ($role_info) {
-                    $employee->{acsrole} = $role_info->{description};
-                }
-                else {
-                    $employee->{acsrole} = undef;
-                }
-            }
-            else {
-                # Set defaults if no login record exists.
-                $employee->{acsrole_id} = undef;
-                $employee->{created}    = undef;
-                $employee->{admin}      = undef;
-                $employee->{acsrole}    = undef;
-            }
-        }
+#         # Render the employee data (with login info) as JSON.
+#         $c->render( json => {%$form} );
+#     }
+# );
+# $api->post(
+#     '/system/employees/:id' => { id => undef } => sub {
+#         my $c = shift;
+#         return unless my $login = $c->check_perms("system.user.employees");
 
-       # Render the modified employee list with login info and role description.
-        $c->render( json => $form->{all_employee} );
-    }
-);
-$api->get(
-    '/system/employees/:id' => sub {
-        my $c = shift;
-        return unless my $login = $c->check_perms("system.user.employees");
+#         my $client = $c->param('client');
 
-        my $client = $c->param('client');
-        my $id     = $c->param('id');
-        my $form   = new Form;
-        $form->{id} = $id;
-        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+#         # Set up the database connection using the provided client name
+#         $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+#         my $form = new Form;
+#         my $dbs  = $c->dbs($client);
+#         my $data = $c->req->json;
 
-        # Retrieve the employee data using the HR module.
-        HR->get_employee( $c->slconfig, $form );
+#         # --- Populate form with provided JSON data ---
+#         for my $key ( keys %$data ) {
+#             $form->{$key} = $data->{$key} if defined $data->{$key};
+#         }
 
-        # Connect using DBIx::Simple.
-        my $dbs = $c->dbs($client);
+#         # Extract the acsrole_id and password for later use
+#         my $acs_id   = $form->{acsrole_id};
+#         my $password = $form->{password};
 
-        # Determine the employee id for login lookup.
-        my $emp_id = $form->{employeeid} // $id;
+#         # Remove these from the form so they aren’t saved in the employee record
+#         $form->{password}   = undef;
+#         $form->{acsrole_id} = undef;
 
-# Fetch login info for this employee. We need this because API doesn't use default ACS and we need to overwrite the values
-        my $login_query = $dbs->query(
-            "SELECT acsrole_id, created, admin FROM login WHERE employeeid = ?",
-            $emp_id
-        );
+# # --- For create requests: ensure password is provided and check employeenumber ---
+#         if ( !defined $c->param('id') ) {
 
-        my $login_info =
-          $login_query->hash;    # Get the first row as a hash reference.
+#     # Check that a non-empty password is provided when creating a new employee
+#             if ( !defined $password or $password eq '' ) {
+#                 $c->render( json =>
+#                     { error => 'Password is required for new employee' } );
+#                 return;
+#             }
 
-        # Append the login data to the employee record.
-        if ($login_info) {
-            $form->{acsrole_id} = $login_info->{acsrole_id};
-            $form->{created}    = $login_info->{created};
-            $form->{admin}      = $login_info->{admin};
-        }
-        else {
-            # Set to undef or a default value if no login record exists.
-            $form->{acsrole_id} = undef;
-            $form->{created}    = undef;
-            $form->{admin}      = undef;
-        }
+# # If an employeenumber is provided, check that it doesn't already exist in the employee table
+#             if ( defined $form->{employeenumber}
+#                 and $form->{employeenumber} ne '' )
+#             {
+#                 my $exists = $dbs->selectrow_array(
+#                     "SELECT COUNT(*) FROM employee WHERE employeenumber = ?",
+#                     undef, $form->{employeenumber} );
+#                 if ($exists) {
+#                     $c->render(
+#                         json => { error => 'Employeenumber already exists' } );
+#                     return;
+#                 }
+#             }
+#         }
+#         $form->{employeelogin} = $form->{login};
 
-        # Render the employee data (with login info) as JSON.
-        $c->render( json => {%$form} );
-    }
-);
-$api->post(
-    '/system/employees/:id' => { id => undef } => sub {
-        my $c = shift;
-        return unless my $login = $c->check_perms("system.user.employees");
+#         # --- Save the employee record ---
+#         HR->save_employee( $c->slconfig, $form );
+#         my $employee_id = $form->{id};
+#         warn($employee_id);
 
-        my $client = $c->param('client');
+# # --- Insert or update the login record using PostgreSQL crypt and gen_salt ---
+#         if ( !defined $c->param('id') ) {    # Create request
+#             # For new employees, insert a login record, hashing the password with Postgres's crypt function.
+#             $dbs->query(
+# "INSERT INTO login (employeeid, password, acsrole_id) VALUES (?, crypt(?, gen_salt('bf')), ?)",
+#                 $employee_id, $password, $acs_id );
+#         }
+#         else {    # Update request
+#             my $rows;
+#             if ( defined $password and $password ne '' ) {
 
-        # Set up the database connection using the provided client name
-        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
-        my $form = new Form;
-        my $dbs  = $c->dbs($client);
-        my $data = $c->req->json;
+#     # Try updating both password and acsrole_id if a new password is provided.
+#                 $rows = $dbs->query(
+# "UPDATE login SET password = crypt(?, gen_salt('bf')), acsrole_id = ? WHERE employeeid = ?",
+#                     $password, $acs_id, $employee_id );
+#                 warn( Dumper $rows );
 
-        # --- Populate form with provided JSON data ---
-        for my $key ( keys %$data ) {
-            $form->{$key} = $data->{$key} if defined $data->{$key};
-        }
+# # If no record was updated (i.e. no login record exists), insert a new login record.
 
-        # Extract the acsrole_id and password for later use
-        my $acs_id   = $form->{acsrole_id};
-        my $password = $form->{password};
+#                 warn("TEsting");
+#                 $dbs->query(
+# "INSERT INTO login (employeeid, password, acsrole_id) VALUES (?, crypt(?, gen_salt('bf')), ?)",
+#                     $employee_id, $password, $acs_id );
+#             }
 
-        # Remove these from the form so they aren’t saved in the employee record
-        $form->{password}   = undef;
-        $form->{acsrole_id} = undef;
+#             else {
+#             # Try updating only the acsrole_id if no new password is provided.
+#                 $rows = $dbs->query(
+#                     "UPDATE login SET acsrole_id = ? WHERE employeeid = ?",
+#                     $acs_id, $employee_id );
 
-# --- For create requests: ensure password is provided and check employeenumber ---
-        if ( !defined $c->param('id') ) {
+#                 # If no record was updated, insert a new login record.
+#                 if ( !defined $rows or $rows == 0 ) {
 
-      # Check that a non-empty password is provided when creating a new employee
-            if ( !defined $password or $password eq '' ) {
-                $c->render( json =>
-                      { error => 'Password is required for new employee' } );
-                return;
-            }
+# # Note: When inserting without a password, make sure your database accepts a NULL or default value.
+#                     $dbs->query(
+# "INSERT INTO login (employeeid, acsrole_id) VALUES (?, ?)",
+#                         $employee_id, $acs_id
+#                     );
+#                 }
+#             }
+#         }
 
-# If an employeenumber is provided, check that it doesn't already exist in the employee table
-            if ( defined $form->{employeenumber}
-                and $form->{employeenumber} ne '' )
-            {
-                my $exists = $dbs->selectrow_array(
-                    "SELECT COUNT(*) FROM employee WHERE employeenumber = ?",
-                    undef, $form->{employeenumber} );
-                if ($exists) {
-                    $c->render(
-                        json => { error => 'Employeenumber already exists' } );
-                    return;
-                }
-            }
-        }
-        $form->{employeelogin} = $form->{login};
-
-        # --- Save the employee record ---
-        HR->save_employee( $c->slconfig, $form );
-        my $employee_id = $form->{id};
-        warn($employee_id);
-
- # --- Insert or update the login record using PostgreSQL crypt and gen_salt ---
-        if ( !defined $c->param('id') ) {    # Create request
-             # For new employees, insert a login record, hashing the password with Postgres's crypt function.
-            $dbs->query(
-"INSERT INTO login (employeeid, password, acsrole_id) VALUES (?, crypt(?, gen_salt('bf')), ?)",
-                $employee_id, $password, $acs_id );
-        }
-        else {    # Update request
-            my $rows;
-            if ( defined $password and $password ne '' ) {
-
-      # Try updating both password and acsrole_id if a new password is provided.
-                $rows = $dbs->query(
-"UPDATE login SET password = crypt(?, gen_salt('bf')), acsrole_id = ? WHERE employeeid = ?",
-                    $password, $acs_id, $employee_id );
-                warn( Dumper $rows );
-
-# If no record was updated (i.e. no login record exists), insert a new login record.
-
-                warn("TEsting");
-                $dbs->query(
-"INSERT INTO login (employeeid, password, acsrole_id) VALUES (?, crypt(?, gen_salt('bf')), ?)",
-                    $employee_id, $password, $acs_id );
-            }
-
-            else {
-              # Try updating only the acsrole_id if no new password is provided.
-                $rows = $dbs->query(
-                    "UPDATE login SET acsrole_id = ? WHERE employeeid = ?",
-                    $acs_id, $employee_id );
-
-                # If no record was updated, insert a new login record.
-                if ( !defined $rows or $rows == 0 ) {
-
-# Note: When inserting without a password, make sure your database accepts a NULL or default value.
-                    $dbs->query(
-"INSERT INTO login (employeeid, acsrole_id) VALUES (?, ?)",
-                        $employee_id, $acs_id
-                    );
-                }
-            }
-        }
-
-    # Render the saved employee record (assumed to be contained in $form->{ALL})
-        $c->render( json => $form->{ALL} );
-    }
-);
+#     # Render the saved employee record (assumed to be contained in $form->{ALL})
+#         $c->render( json => $form->{ALL} );
+#     }
+# );
 
 #########################
 ####                 ####
@@ -757,17 +1427,12 @@ $api->post(
 $api->get(
     '/gl/transactions/lines' => sub {
         my $c = shift;
-        return unless my $login = $c->check_perms("gl.transactions");
+        return unless my $form = $c->check_perms("gl.transactions");
         my $params = $c->req->params->to_hash;
         my $client = $c->param('client');
 
-        my $permission = "General Ledger--Reports";
-        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
-
-        my $form = new Form;
         for ( keys %$params ) { $form->{$_} = $params->{$_} if $params->{$_} }
         $form->{category} = 'X';
-        $form->{login}    = $login;
         GL->transactions( $c->slconfig, $form );
 
         # Check if the result is undefined, empty, or has no entries
@@ -799,12 +1464,10 @@ $api->get(
 $api->get(
     '/gl/transactions' => sub {
         my $c = shift;
-        return unless my $login = $c->check_perms("gl.transactions");
+        return unless my $form = $c->check_perms("gl.transactions");
 
         my $client = $c->param('client');
 
-        # Create the DBIx::Simple handle
-        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
         my $dbs = $c->dbs($client);
 
         # Searching Parameters
@@ -912,12 +1575,10 @@ $api->get(
 $api->get(
     '/gl/transactions/:id' => sub {
         my $c = shift;
-        return unless my $login = $c->check_perms("gl.add");
+        return unless my $form = $c->check_perms("gl.add");
         my $id     = $c->param('id');
         my $client = $c->param('client');
 
-        # Create the DBIx::Simple handle
-        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
         my $dbs = $c->dbs($client);
 
         # Check if the ID exists in the gl table
@@ -933,9 +1594,6 @@ $api->get(
                 }
             );
         }
-
-        # If the ID exists, proceed with the rest of the code
-        my $form = new Form;
 
         $form->{id} = $id;
         GL->transaction( $c->slconfig, $form );
@@ -1003,13 +1661,11 @@ $api->get(
 $api->post(
     '/gl/transactions' => sub {
         my $c = shift;
-        return unless my $login = $c->check_perms("gl.add");
+        return unless my $form = $c->check_perms("gl.add");
         my $client = $c->param('client');
         my $data   = $c->req->json;
-        $data->{login} = $login;
+        $data->{form} = $form;
 
-        # Create the DBIx::Simple handle
-        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
         my $dbs = $c->dbs($client);
 
         api_gl_transaction( $c, $dbs, $data );
@@ -1019,15 +1675,13 @@ $api->post(
 $api->put(
     '/gl/transactions/:id' => sub {
         my $c = shift;
-        return unless my $login = $c->check_perms("gl.add");
+        return unless my $form = $c->check_perms("gl.add");
         my $client = $c->param('client');
         my $id;
         $id = $c->param('id');
         my $data = $c->req->json;
-        $data->{login} = $login;
+        $data->{form} = $form;
 
-        # Create the DBIx::Simple handle
-        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
         my $dbs = $c->dbs($client);
 
         # Check for existing id in the GL table if id is provided
@@ -1113,7 +1767,7 @@ sub api_gl_transaction () {
     }
 
     # Create a new form
-    my $form = new Form;
+    my $form = $data->{form};
 
     if ($id) {
         $form->{id} = $id;
@@ -1234,12 +1888,10 @@ sub api_gl_transaction () {
 $api->delete(
     '/gl/transactions/:id' => sub {
         my $c = shift;
-        return unless my $login = $c->check_perms("gl.add");
+        return unless my $form = $c->check_perms("gl.add");
         my $client = $c->param('client');
         my $id     = $c->param('id');
 
-        # Create the DBIx::Simple handle
-        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
         my $dbs = $c->dbs($client);
 
         # Check for existing id in the GL table
@@ -1255,7 +1907,6 @@ $api->delete(
         }
 
         # Create a new form and add the id
-        my $form = new Form;
         $form->{id} = $id;
 
         # Delete the transaction
@@ -1331,7 +1982,7 @@ $api->get(
 $api->get(
     '/system/currencies' => sub {
         my $c = shift;
-        return unless my $login = $c->check_perms("system.currencies");
+        return unless my $form = $c->check_perms("system.currencies");
         my $client = $c->param('client');
 
         my $dbs = $c->dbs($client);
@@ -1354,7 +2005,7 @@ $api->get(
 $api->any(
     [qw(POST PUT)] => '/system/currencies' => sub {
         my $c = shift;
-        return unless my $login = $c->check_perms("system.currencies");
+        return unless my $form = $c->check_perms("system.currencies");
         my $client = $c->param('client');
 
         # Get JSON body params
@@ -1376,10 +2027,8 @@ $api->any(
 
         my $dbs = $c->dbs($client);
 
-        my $form = new Form;
-        $form->{curr}             = $curr;
-        $form->{prec}             = $prec;
-        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+        $form->{curr} = $curr;
+        $form->{prec} = $prec;
         AM->save_currency( $c->slconfig, $form );
 
         return $c->render(
@@ -1392,7 +2041,7 @@ $api->any(
 $api->delete(
     '/system/currencies/:curr' => sub {
         my $c = shift;
-        return unless my $login = $c->check_perms("system.currencies");
+        return unless my $form = $c->check_perms("system.currencies");
         my $client = $c->param('client');
         my $curr   = $c->param('curr');
 
@@ -1407,9 +2056,7 @@ $api->delete(
         my $dbs = $c->dbs($client);
 
         # Create a form object with the currency code
-        my $form = new Form;
         $form->{curr} = $curr;
-        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
 
         # Call the delete method from AM module
         AM->delete_currency( $c->slconfig, $form );
@@ -1422,12 +2069,10 @@ $api->get(
     '/system/companydefaults' => sub {
         my $c      = shift;
         my $client = $c->param('client');
-        return unless my $login = $c->check_perms("system.defaults");
+        return unless my $form = $c->check_perms("system.defaults");
 
         my $dbs = $c->dbs($client);
 
-        my $form = Form->new;
-        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
         AM->defaultaccounts( $c->slconfig, $form );
 
         # Build arrays for "select$key" instead of a string
@@ -1502,9 +2147,8 @@ $api->get(
 $api->post(
     '/system/companydefaults' => sub {
         my $c = shift;
-        return unless my $login = $c->check_perms("system.defaults");
+        return unless my $form = $c->check_perms("system.defaults");
         my $client = $c->param('client');
-        my $form   = Form->new;
 
         # Get form data from JSON request body
         my $json_data = $c->req->json;
@@ -1515,9 +2159,6 @@ $api->post(
             $form->{$key} = $json_data->{$key};
         }
         warn( Dumper $form );
-
-        # Set up configuration for the client
-        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
 
         $form->{optional} =
 "company address tel fax companyemail companywebsite yearend weightunit businessnumber closedto revtrans audittrail method cdt namesbynumber typeofcontact roundchange referenceurl annualinterest latepaymentfee restockingcharge checkinventory hideaccounts linetax forcewarehouse glnumber sinumber sonumber vinumber batchnumber vouchernumber ponumber sqnumber rfqnumber partnumber projectnumber employeenumber customernumber vendornumber lock_glnumber lock_sinumber lock_sonumber lock_ponumber lock_sqnumber lock_rfqnumber lock_employeenumber lock_customernumber lock_vendornumber";
@@ -1548,10 +2189,8 @@ $api->post(
 $api->get(
     '/system/chart/accounts' => sub {
         my $c = shift;
-        return unless my $login = $c->check_perms("system.chart.list");
+        return unless my $form = $c->check_perms("system.chart.list");
         my $client = $c->param('client');
-        my $form   = Form->new;
-        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
 
         my $result = CA->all_accounts( $c->slconfig, $form );
         if ($result) {
@@ -1572,10 +2211,9 @@ $api->get(
 $api->get(
     '/system/chart/accounts/:id' => sub {
         my $c = shift;
-        return unless my $login = $c->check_perms("system.chart.list");
+        return unless my $form = $c->check_perms("system.chart.list");
         my $client = $c->param('client');
         my $id     = $c->param('id');
-        my $form   = Form->new;
         my $dbs    = $c->dbs($client);
 
         # Execute queries and check for records
@@ -1588,7 +2226,6 @@ $api->get(
             $id, $id, $id );
 
         $form->{id} = $id;
-        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
 
         my $result = AM->get_account( $c->slconfig, $form );
 
@@ -1613,12 +2250,11 @@ $api->get(
 $api->post(
     '/system/chart/accounts/:id' => { id => undef } => sub {
         my $c = shift;
-        return unless my $login = $c->check_perms("system.chart.add");
+        return unless my $form = $c->check_perms("system.chart.add");
         my $client = $c->param('client');
-        my $form   = Form->new;
         my $id     = $c->param("id");
         my $params = $c->req->json;
-        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+
         for ( keys %$params ) { $form->{$_} = $params->{$_} if $params->{$_} }
         $form->{id} = $id // undef;
 
@@ -1641,7 +2277,7 @@ $api->post(
 $api->delete(
     '/system/chart/accounts/:id' => sub {
         my $c = shift;
-        return unless my $login = $c->check_perms("syste.chart.add");
+        return unless my $form = $c->check_perms("system.chart.add");
         my $client = $c->param('client');
         my $id     = $c->param('id');
         my $dbs    = $c->dbs($client);
@@ -1685,9 +2321,8 @@ $api->delete(
             );
         }
 
-        my $form = new Form;
         $form->{id} = $id;
-        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+
         my $delete = AM->delete_account( $c->slconfig, $form );
 
         if ($delete) {
@@ -1707,9 +2342,10 @@ $api->delete(
 );
 $api->get(
     '/system/chart/gifi' => sub {
-        my $c      = shift;
+        my $c = shift;
+        return unless my $form = $c->check_perms("system.chart.gifi");
         my $client = $c->param('client');
-        my $form   = Form->new;
+
         $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
 
         my $result = AM->gifi_accounts( $c->slconfig, $form );
@@ -1729,10 +2365,11 @@ $api->get(
 );
 $api->get(
     '/system/chart/gifi/:accno' => sub {
-        my $c      = shift;
+        my $c = shift;
+        return unless my $form = $c->check_perms("system.chart.gifi");
+
         my $client = $c->param('client');
         my $accno  = $c->param('accno');
-        my $form   = Form->new;
         $form->{accno} = $accno;
         $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
 
@@ -1756,9 +2393,9 @@ $api->get(
 $api->post(
     '/system/chart/gifi/:accno' => { accno => undef } => sub {
         my $c = shift;
+        return unless my $form = $c->check_perms("system.chart.gifi");
 
         my $client = $c->param('client');
-        my $form   = Form->new;
         my $accno  = $c->param("accno");
         my $params = $c->req->json;
         $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
@@ -1784,9 +2421,9 @@ $api->post(
 $api->delete(
     '/system/chart/gifi/:accno' => sub {
         my $c = shift;
-
+        return unless my $form = $c->check_perms("system.chart.gifi");
         my $client = $c->param('client');
-        my $form   = Form->new;
+
         my $accno  = $c->param("accno");
         my $params = $c->req->json;
         $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
@@ -1806,7 +2443,7 @@ $api->delete(
 $api->get(
     '/system/departments' => sub {
         my $c = shift;
-        return unless my $login = $c->check_perms("system.departments");
+        return unless my $form = $c->check_perms("system.departments");
         my $client = $c->param('client');
         my $dbs    = $c->dbs($client);
 
@@ -1833,10 +2470,9 @@ $api->get(
 $api->post(
     '/system/departments' => sub {
         my $c = shift;
-        return unless my $login = $c->check_perms("system.departments");
+        return unless my $form = $c->check_perms("system.departments");
         my $client = $c->param('client');
-        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
-        my $form = new Form;
+
         my $data = $c->req->json;
         for my $key ( keys %$data ) {
             $form->{$key} = $data->{$key} if defined $data->{$key};
@@ -1850,7 +2486,7 @@ $api->post(
 $api->delete(
     '/system/departments/:id' => sub {
         my $c = shift;
-        return unless my $login = $c->check_perms("system.departments");
+        return unless my $form = $c->check_perms("system.departments");
         my $client = $c->param('client');
         my $id     = $c->param('id');
 
@@ -1876,10 +2512,7 @@ $api->delete(
             );
         }
 
-        # Create a form object with the department ID
-        my $form = new Form;
         $form->{id} = $id;
-        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
 
         # Call the delete method from AM module
         AM->delete_department( $c->slconfig, $form );
@@ -1897,11 +2530,10 @@ $api->delete(
 $api->get(
     '/projects' => sub {
         my $c = shift;
-        return unless my $login = $c->check_perms("system.projects");
+        return unless my $form = $c->check_perms("system.projects");
         my $client = $c->param('client');
         my $dbs    = $c->dbs($client);
-        my $form   = new Form;
-        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+
         PE->projects( $c->slconfig, $form );
         $c->render( json => $form->{all_project} );
 
@@ -1910,13 +2542,12 @@ $api->get(
 $api->get(
     '/projects/:id' => sub {
         my $c = shift;
-        return unless my $login = $c->check_perms("system.projects");
+        return unless my $form = $c->check_perms("system.projects");
         my $client = $c->param('client');
         my $dbs    = $c->dbs($client);
         my $id     = $c->param('id');
-        my $form   = new Form;
         $form->{id} = $id;
-        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+
         PE->get_project( $c->slconfig, $form );
 
         $c->render( json => {%$form} );
@@ -1926,14 +2557,13 @@ $api->get(
 $api->post(
     '/projects/:id' => { id => undef } => sub {
         my $c = shift;
-        return unless my $login = $c->check_perms("system.projects");
+        return unless my $form = $c->check_perms("system.projects");
         my $client = $c->param('client');
         my $dbs    = $c->dbs($client);
         my $data   = $c->req->json;
         my $id     = $c->param('id');
-        my $form   = new Form;
         for ( keys %$data ) { $form->{$_} = $data->{$_} if $data->{$_} }
-        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+
         PE->save_project( $c->slconfig, $form );
         $c->render( json => {%$form} );
 
@@ -1991,9 +2621,8 @@ $api->get(
             service  => "items.search.services",
         );
 
-        return unless $c->check_perms( $permissions{$search} );
+        return unless my $form = $c->check_perms( $permissions{$search} );
 
-        my $form = Form->new;
         $form->{searchitems}  = $params->{searchitems};
         $form->{partnumber}   = $params->{partnumber};
         $form->{description}  = $params->{description};
@@ -2027,14 +2656,11 @@ $api->get(
     '/ic/items/:id' => sub {
         my $c = shift;
         return
-          unless ( $c->check_perms('items.part')
-            || $c->check_perms('items.service') );
+          unless my $form =
+          ( $c->check_perms('items.part') || $c->check_perms('items.service') );
         my $client = $c->param('client');
         my $id     = $c->param('id');
 
-        # Set the database connection dynamically
-        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
-        my $form = new Form;
         $form->{id} = $id;
         IC->get_part( $c->slconfig, $form );
 
@@ -2046,14 +2672,13 @@ $api->post(
     '/ic/items/:id' => { id => undef } => sub {
         my $c = shift;
         return
-          unless ( $c->check_perms('items.part')
-            || $c->check_perms('items.service') );
+          unless my $form =
+          ( $c->check_perms('items.part') || $c->check_perms('items.service') );
 
         my $client = $c->param('client');
         my $id     = $c->param('id');
         my $data   = $c->req->json;
         my $dbs    = $c->dbs($client);
-        my $form   = new Form;
         $form->{id} = $id;
 
         if (   ( !$id )
@@ -2126,7 +2751,6 @@ $api->post(
             $form->{vendor_rows} = scalar @{ $data->{vendorLines} };
         }
         $form->{id} = $id;
-        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
         IC->save( $c->slconfig, $form );
         $c->render( json => {%$form} );
     }
@@ -2140,7 +2764,7 @@ $api->post(
 $api->get(
     '/system/templates' => sub {
         my $c = shift;
-        return unless $c->check_perms('system.templates');
+        return unless my $form = $c->check_perms('system.templates');
         my $client        = $c->param('client');
         my $templates_dir = "templates/$client/";
 
@@ -2162,7 +2786,7 @@ $api->get(
 $api->get(
     '/system/template' => sub {
         my $c = shift;
-        return unless $c->check_perms('system.templates');
+        return unless my $form = $c->check_perms('system.templates');
         my $client   = $c->param('client');
         my $template = $c->param('id');
 
@@ -2619,7 +3243,6 @@ $api->get(
         my $customers  = $c->get_vc('customer');
         my $vendors    = $c->get_vc('vendor');
         my $projects   = $c->get_projects;
-        my $roles      = $c->get_roles;
         my $gifi       = $c->get_gifi;
 
         my $response;
@@ -2653,7 +3276,6 @@ $api->get(
                 linetax      => $line_tax,
                 departments  => $departments,
                 projects     => $projects,
-                roles        => $roles,
             };
         }
 
@@ -2678,7 +3300,6 @@ $api->get(
                 linetax      => $line_tax,
                 departments  => $departments,
                 projects     => $projects,
-                roles        => $roles,
             };
         }
 
@@ -2699,7 +3320,6 @@ $api->get(
                 linetax      => $line_tax,
                 departments  => $departments,
                 projects     => $projects,
-                roles        => $roles,
             };
         }
 
@@ -2720,7 +3340,6 @@ $api->get(
                 linetax      => $line_tax,
                 departments  => $departments,
                 projects     => $projects,
-                roles        => $roles,
             };
         }
 
@@ -2738,7 +3357,6 @@ $api->get(
                 linetax      => $line_tax,
                 departments  => $departments,
                 projects     => $projects,
-                roles        => $roles,
             };
         }
 
@@ -2759,7 +3377,6 @@ $api->get(
                 linetax      => $line_tax,
                 departments  => $departments,
                 projects     => $projects,
-                roles        => $roles,
             };
         }
 
@@ -2780,7 +3397,6 @@ $api->get(
                 linetax      => $line_tax,
                 departments  => $departments,
                 projects     => $projects,
-                roles        => $roles,
             };
         }
 
@@ -2801,7 +3417,6 @@ $api->get(
                 linetax      => $line_tax,
                 departments  => $departments,
                 projects     => $projects,
-                roles        => $roles,
             };
         }
 
@@ -2823,7 +3438,8 @@ $api->get(
         my $c      = shift;
         my $client = $c->param('client');
         my $vc     = $c->param('vc');
-        my $data   = $c->req->params->to_hash;
+        return unless my $form = $c->check_perms("$vc.transactions");
+        my $data = $c->req->params->to_hash;
 
         unless ( $vc eq 'vendor' || $vc eq 'customer' ) {
             return $c->render(
@@ -2834,8 +3450,6 @@ $api->get(
             );
         }
 
-        warn( Dumper $data );
-        my $form = new Form;
         $form->{vc}               = $vc;
         $form->{summary}          = 1;
         $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
@@ -2918,6 +3532,7 @@ $api->get(
 );
 
 # Used to fetch & load information in other forms AR/AP
+# REPLACE WITH GET LINKS
 $api->get(
     '/arap/list/:vc' => sub {
         my $c      = shift;
@@ -2950,7 +3565,10 @@ $api->get(
         my $c      = shift;
         my $client = $c->param('client');
         my $vc     = $c->param('vc');
-        my $id     = $c->param('id');
+        return
+          unless my $form = $c->check_perms(
+            "$vc.transaction,$vc.invoice,$vc.creditinvoice,$vc.debitinvoice");
+        my $id = $c->param('id');
 
         # Validate the type parameter
         unless ( $vc eq 'vendor' || $vc eq 'customer' ) {
@@ -2965,7 +3583,6 @@ $api->get(
         # Set the database connection dynamically
         $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
 
-        my $form = new Form;
         $form->{vc}         = $vc;
         $form->{"${vc}_id"} = $id;
 
@@ -2997,13 +3614,13 @@ $api->get(
 
 $api->get(
     '/arap/:vc/' => sub {
-        my $c      = shift;
-        my $vc     = $c->param('vc');
+        my $c  = shift;
+        my $vc = $c->param('vc');
+        return unless my $form = $c->check_perms("$vc.search");
         my $client = $c->param('client');
         my $params = $c->req->params->to_hash;
         $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
 
-        my $form = Form->new;
         $form->{db} = $vc;
         for ( keys %$params ) { $form->{$_} = $params->{$_} if $params->{$_} }
 
@@ -3016,14 +3633,14 @@ $api->get(
 );
 $api->get(
     '/arap/:vc/:id' => sub {
-        my $c      = shift;
-        my $id     = $c->param('id');
-        my $vc     = $c->param('vc');
+        my $c  = shift;
+        my $id = $c->param('id');
+        my $vc = $c->param('vc');
+        return unless my $form = $c->check_perms("$vc.add");
         my $client = $c->param('client');
 
         $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
 
-        my $form = Form->new;
         $form->{id} = $id;
         $form->{db} = $vc;
 
@@ -3053,10 +3670,11 @@ $api->post(
         my $c      = shift;
         my $vc     = $c->param('vc');
         my $client = $c->param('client');
+        return unless my $form = $c->check_perms("$vc.add");
+
         my $params = $c->req->json;
         $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
 
-        my $form = Form->new;
         $form->{db} = lc($vc);
         for ( keys %$params ) { $form->{$_} = $params->{$_} if $params->{$_} }
         $form->{ $vc =~ /^vendor$/i ? 'vendornumber' : 'customernumber' } =
@@ -3071,17 +3689,17 @@ $api->get(
     '/:vc/history/' => sub {
         my $c      = shift;
         my $client = $c->param('client');
-        my $vc     = $c->param('vc');       # Either 'customer' or 'vendor'
+        my $vc     = $c->param('vc');
+        return unless my $form = $c->check_perms("$vc.history");
 
         $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
 
-        my $form = new Form;
         $form->{db} = $vc;
 
         $form->{transdatefrom} = $c->param('transdatefrom')
-          // '';                            # Start date (YYYY-MM-DD)
+          // '';    # Start date (YYYY-MM-DD)
         $form->{transdateto} = $c->param('transdateto')
-          // '';                            # End date (YYYY-MM-DD)
+          // '';    # End date (YYYY-MM-DD)
         $form->{sort} = $c->param('sort')
           // 'partnumber';    # Sorting field (e.g., 'name', 'date')
         $form->{direction} = $c->param('direction')
@@ -3119,11 +3737,12 @@ $api->get(
 
 $api->get(
     '/arap/transaction/:vc/:id' => sub {
-        my $c                = shift;
-        my $client           = $c->param('client');
-        my $data             = $c->req->json;
-        my $id               = $c->param('id');
-        my $vc               = $c->param('vc');
+        my $c      = shift;
+        my $client = $c->param('client');
+        my $data   = $c->req->json;
+        my $id     = $c->param('id');
+        my $vc     = $c->param('vc');
+        return unless my $form = $c->check_perms("$vc.transaction");
         my $transaction_type = $vc eq 'vendor' ? 'AP'      : 'AR';
         my $vc_field    = $vc eq 'vendor' ? 'vendornumber' : 'customernumber';
         my $vc_id_field = $vc eq 'vendor' ? 'vendor_id'    : 'customer_id';
@@ -3133,7 +3752,6 @@ $api->get(
         $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
         my $ml       = 1;
         my %myconfig = ();
-        my $form     = Form->new;
         $form->{id} = $id;
         $form->{vc} = $vc;
         $form->create_links( $transaction_type, $c->slconfig, $vc );
@@ -3198,9 +3816,6 @@ $api->get(
             } @{ $form->{acc_trans}{"${transaction_type}_tax"} };
         }
 
-        my $link = $dbs->query( "SELECT link from files WHERE reference = ?",
-            $form->{invnumber} )->hash;
-
         # Create the transformed data structure
         my $json_data = {
             $vc_field     => $form->{$vc_field},
@@ -3225,10 +3840,6 @@ $api->get(
             payments      => \@payments,
         };
 
-        if ($link) {
-            $json_data->{file} = $link->{link};
-        }
-
         # Add tax information if present
         if (@taxes) {
             $json_data->{taxes}       = \@taxes;
@@ -3247,11 +3858,10 @@ $api->post(
         my $client = $c->param('client');
         my $data   = $c->req->json;
         my $vc     = $c->param('vc');
-        my $dbs    = $c->dbs($client);
-        my $id     = $c->param('id');
+        return unless my $form = $c->check_perms("$vc.transaction");
+        my $dbs = $c->dbs($client);
+        my $id  = $c->param('id');
         $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
-
-        my $form = new Form;
 
         $form->{type} = 'transaction';
         $form->{vc}   = $vc eq 'vendor' ? 'vendor' : 'customer';
@@ -3356,7 +3966,7 @@ $api->delete(
         my $client = $c->param('client');
         my $id     = $c->param('id');
         my $vc     = $c->param('vc');
-        my $form   = new Form;
+        return unless my $form = $c->check_perms("$vc.transaction");
         $form->{id}               = $id;
         $form->{vc}               = $vc;
         $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
@@ -3380,8 +3990,7 @@ $api->get(
         my $dbs = $c->dbs($client);
         $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
 
-        # Initialize form
-        my $form = Form->new;
+        return unless my $form = $c->check_perms("$vc");
         $form->{id} = $id;
         $form->{vc} = $vc;    # 'customer' or 'vendor'
 
@@ -3394,9 +4003,6 @@ $api->get(
             IR->retrieve_invoice( $c->slconfig, $form );
             IR->invoice_details( $c->slconfig, $form );
         }
-
-        # Debug
-        warn Dumper($form);
 
         my $ml = 1;
 
@@ -3428,6 +4034,10 @@ $api->get(
             }
         }
 
+        if ( $form->{type} eq 'invoice' ) {
+            return unless $c->check_perms("$vc.invoice");
+        }
+        else { return unless $c->check_perms("$vc.invoice.return"); }
         if (
             $form->{type}
             && (   $form->{type} eq 'credit_invoice'
@@ -3536,13 +4146,6 @@ $api->get(
         if (@taxes) {
             $json_data->{taxes}       = \@taxes;
             $json_data->{taxincluded} = $form->{taxincluded};
-        }
-
-        # Optional: If you store a document link
-        my $link = $dbs->query( "SELECT link FROM files WHERE reference = ?",
-            $form->{invnumber} )->hash;
-        if ($link) {
-            $json_data->{file} = $link->{link};
         }
 
         warn Dumper($json_data);
@@ -3722,8 +4325,6 @@ $api->get(
         return unless $c->check_perms('reports.trial');
         my $client = $c->param('client');
 
-        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
-
         my $form = new Form;
 
         my $datefrom = $c->param('fromdate');
@@ -3747,7 +4348,6 @@ $api->get(
             || $c->check_perms('reports.income') );
         my $client = $c->param('client');
         my $dbs    = $c->dbs($client);
-        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
 
         my $form = new Form;
         $form->{fromdate}      = $c->param('fromdate')   || '';
@@ -3812,9 +4412,6 @@ $api->get(
         my $client = $c->param('client');
         my $params = $c->req->params->to_hash;
         warn Dumper $params;
-
-        # Set up database connection for this client
-        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
 
         # Create the required objects
         my $form   = Form->new;
@@ -5654,7 +6251,6 @@ $api->get(
         $invoice_data->{lastpage}          = 0;
         $invoice_data->{sumcarriedforward} = 0;
         $invoice_data->{templates}         = "templates/$client";
-        $invoice_data->{language_code}     = "";
         $invoice_data->{IN}                = "$template.tex";
         $invoice_data->{OUT}               = ">temp/invoice.pdf";
         $invoice_data->{format}            = "pdf";
