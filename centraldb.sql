@@ -66,9 +66,10 @@ CREATE TABLE invite (
     sender_id INTEGER NOT NULL,
     recipient_email VARCHAR(255) NOT NULL,
     dataset_id INTEGER NOT NULL,
-    access_level VARCHAR(50) NOT NULL DEFAULT 'user', -- e.g., owner, admin, or user
+    access_level VARCHAR(50) NOT NULL DEFAULT 'user', 
     role_id INTEGER,
     created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    invite_code VARCHAR(50),
     FOREIGN KEY (sender_id) REFERENCES profile(id) ON DELETE CASCADE,
     FOREIGN KEY (dataset_id) REFERENCES dataset(id) ON DELETE CASCADE,
     FOREIGN KEY (role_id) REFERENCES role(id) ON DELETE SET NULL

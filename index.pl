@@ -36,14 +36,16 @@ use DateTime;
 use DateTime::Format::ISO8601;
 use Date::Parse;
 use File::Path qw(make_path);
-use POSIX      qw(strftime);
+use File::Basename;
+use POSIX qw(strftime);
 use Time::Piece;
 use Mojo::Template;
 use File::Slurp;
 use Dotenv;
 Dotenv->load;
 app->config( hypnotoad => { listen => ['http://*:3000'] } );
-my $base_url = "https://api.neo-ledger.com/";
+my $base_url  = "https://api.neo-ledger.com/";
+my $front_end = "https://app.neo-ledger.com";
 
 my %myconfig = (
     dateformat   => 'yyyy/mm/dd',
@@ -207,8 +209,8 @@ helper send_email_central => sub {
 
     # Create the Email::Stuffer object
     my $email_obj =
-      Email::Stuffer->from('Hashim <hashim1saqib@gmail.com>')->to($to)
-      ->subject($subject)->text_body($content);
+      Email::Stuffer->from("$ENV{SMTP_USERNAME}")->to($to)->subject($subject)
+      ->text_body($content);
 
     # Attach files if provided
     if ( $attachments && ref($attachments) eq 'ARRAY' ) {
@@ -241,9 +243,13 @@ helper get_user_profile => sub {
     my $c          = shift;
     my $dbs        = $c->central_dbs();
     my $sessionkey = $c->req->headers->header('Authorization');
-    my $profile =
-      $dbs->query( "SELECT profile_id FROM session WHERE sessionkey = ?",
-        $sessionkey )->hash;
+    my $profile    = $dbs->query(
+        "SELECT s.profile_id, p.email
+FROM session s
+LEFT JOIN profile p ON s.profile_id = p.id
+WHERE s.sessionkey = ?",
+        $sessionkey
+    )->hash;
     unless ( $profile && $profile->{profile_id} ) {
         return $c->render(
             status => 401,
@@ -296,6 +302,15 @@ $central->post(
             );
         }
 
+        # Check if public signup is allowed.
+        my $public_signup = $ENV{PUBLIC_SIGNUP} // 0;
+        unless ( $public_signup == 1 ) {
+            return $c->render(
+                status => 403,
+                json   => { message => "Public signups are not allowed" }
+            );
+        }
+
         my $central_dbs = $c->central_dbs();
         return unless $central_dbs;
 
@@ -337,11 +352,24 @@ $central->post(
         my $email    = $params->{email};
         my $password = $params->{password};
         my $otp      = $params->{otp};
+        my $invite   = $params->{invite};
 
-        unless ( $email && $password && $otp ) {
+        # Always require email and password.
+        unless ( $email && $password ) {
             return $c->render(
                 status => 400,
                 json   => { message => "Missing required info" }
+            );
+        }
+
+        # Check PUBLIC_SIGNUP flag (defaults to 0 if undefined)
+        my $public_signup = $ENV{PUBLIC_SIGNUP} // 0;
+
+        # When public signup is not allowed, an invite is mandatory.
+        if ( $public_signup != 1 && !$invite ) {
+            return $c->render(
+                status => 400,
+                json   => { message => "Invite code required for signup" }
             );
         }
 
@@ -359,16 +387,35 @@ $central->post(
             );
         }
 
-        # Validate the OTP record
-        my $otp_record =
-          $central_dbs->query(
-            'SELECT id FROM otp WHERE email = ? AND code = ?',
-            $email, $otp )->hash;
-        unless ($otp_record) {
-            return $c->render(
-                status => 400,
-                json   => { message => "Invalid OTP or email" }
-            );
+        # If an invite is provided, validate it
+        if ($invite) {
+            my $invite_record = $central_dbs->query(
+                'SELECT id FROM invite WHERE invite_code = ?', $invite )->hash;
+            unless ($invite_record) {
+                return $c->render(
+                    status => 400,
+                    json   => { message => "Invalid invite code" }
+                );
+            }
+        }
+
+        # Otherwise, if public signup is enabled, OTP is required
+        else {
+            unless ($otp) {
+                return $c->render(
+                    status => 400,
+                    json   => { message => "Missing OTP" }
+                );
+            }
+            my $otp_record = $central_dbs->query(
+                'SELECT id FROM otp WHERE email = ? AND code = ?',
+                $email, $otp )->hash;
+            unless ($otp_record) {
+                return $c->render(
+                    status => 400,
+                    json   => { message => "Invalid OTP or email" }
+                );
+            }
         }
 
         # Insert the new user into the profile table
@@ -387,7 +434,6 @@ $central->post(
      # Retrieve the last inserted id using DBIx::Simple's last_insert_id method.
         my $profile_id =
           $central_dbs->last_insert_id( undef, undef, 'profile', 'id' );
-
         unless ($profile_id) {
             return $c->render(
                 status => 500,
@@ -395,10 +441,87 @@ $central->post(
             );
         }
 
-        return $c->render( json =>
-              { message => "Signup successful", profile_id => $profile_id } );
+        return $c->render(
+            json => {
+                message    => "Signup successful",
+                profile_id => $profile_id
+            }
+        );
     }
 );
+$central->get(
+    '/check_signup' => sub {
+        my $c = shift;
+
+        my $params        = $c->req->params;
+        my $invite        = $c->param('invite');
+        my $public_signup = $ENV{PUBLIC_SIGNUP} || 0;
+        warn($public_signup);
+
+        # Handle public signup disabled case
+        if ( $public_signup == 0 ) {
+            if ($invite) {
+                my $central_dbs = $c->central_dbs();
+                return unless $central_dbs;
+
+                my $invite_record = $central_dbs->query(
+                    'SELECT id FROM invite WHERE invite_code = ?', $invite )
+                  ->hash;
+
+                return $c->render(
+                    json => {
+                        message => $invite_record
+                        ? "Valid invite code"
+                        : "Invalid invite code",
+                        public_signup => 0,
+                        invite_code   => $invite_record ? 1 : 0,
+                    }
+                );
+            }
+            else {
+                return $c->render(
+                    json => {
+                        message       => "Public signups are not allowed",
+                        public_signup => 0,
+                        invite_code   => 0,
+                    }
+                );
+            }
+        }
+
+        # Handle public signup enabled case
+        my $invite_verified = 0;
+        if ($invite) {
+            my $central_dbs = $c->central_dbs();
+            return unless $central_dbs;
+
+            my $invite_record = $central_dbs->query(
+                'SELECT id FROM invite WHERE invite_code = ?', $invite )->hash;
+
+            if ( !$invite_record ) {
+                return $c->render(
+                    json => {
+                        message       => "Invalid invite code",
+                        public_signup => 1,
+                        invite_code   => 0,
+                    }
+                );
+            }
+            $invite_verified = 1;
+        }
+
+        return $c->render(
+            json => {
+                message => $invite
+                ? "Public signup allowed and invite verified"
+                : "Public signup allowed",
+                public_signup => 1,
+                invite_code   => $invite_verified,
+            }
+        );
+    }
+);
+
 $central->post(
     '/login' => sub {
         my $c      = shift;
@@ -663,9 +786,45 @@ $api->post(
     }
 );
 
+#### DATASET CREATION
+$central->get(
+    'create_dataset' => sub {
+        my $c = shift;
+
+        my $sql_dir = "sql/";
+        opendir( my $sql_dh, $sql_dir ) or return ();
+        my @charts =
+          sort map { ( basename($_) =~ s/-chart\.sql$//r ) }
+          grep     { /-chart\.sql$/ && -f $_ }
+          map      { $sql_dir . $_ } readdir($sql_dh);
+        closedir($sql_dh);
+
+        my $templates_dir = "doc/templates/";
+        opendir( my $templates_dh, $templates_dir ) or return ();
+        my @templates = sort grep { !/^\.{1,2}$/ && -d "$templates_dir/$_" }
+          readdir($templates_dh);
+        closedir($templates_dh);
+
+        $c->render(
+            json => {
+                charts    => \@charts,
+                templates => \@templates,
+            }
+        );
+    }
+);
+
 #### INVITE MANAGEMENT
 
 # Create An Invite
+# Helper to generate a random 10-character invite code
+sub generate_invite_code {
+    my @chars = ( 'A' .. 'Z', 'a' .. 'z', 0 .. 9 );
+    my $code  = '';
+    $code .= $chars[ rand @chars ] for 1 .. 10;
+    return $code;
+}
+
 $api->post(
     '/invite' => sub {
         my $c = shift;
@@ -692,10 +851,10 @@ $api->post(
             );
         }
 
-        # Validate that the dataset exists
+        # Validate that the dataset exists and get its db_name
         my $dataset =
-          $dbs->query( "SELECT id FROM dataset WHERE id = ?", $dataset_id )
-          ->hash;
+          $dbs->query( "SELECT id, db_name FROM dataset WHERE id = ?",
+            $dataset_id )->hash;
         unless ($dataset) {
             return $c->render(
                 status => 404,
@@ -703,15 +862,76 @@ $api->post(
             );
         }
 
-        # Insert the invite record
+        # Generate a 10-character invite code
+        my $invite_code = generate_invite_code();
+
+        # Insert the invite record including the invite_code
         my $invite = $dbs->query(
-"INSERT INTO invite (sender_id, recipient_email, dataset_id, access_level, role_id) VALUES (?, ?, ?, ?, ?) RETURNING id",
+"INSERT INTO invite (sender_id, recipient_email, dataset_id, access_level, role_id, invite_code)
+             VALUES (?, ?, ?, ?, ?, ?)
+             RETURNING id, invite_code",
             $sender_id,    $recipient_email, $dataset_id,
-            $access_level, $role_id
+            $access_level, $role_id,         $invite_code
         )->hash;
 
+        # Check if the recipient already has an account (profile)
+        my $existing_user =
+          $dbs->query( "SELECT id, email FROM profile WHERE email = ?",
+            $recipient_email )->hash;
+
+        my ( $subject, $content );
+
+        if ($existing_user) {
+
+            # For existing users, send a login invitation email
+            $subject =
+              "You've been invited to access dataset '$dataset->{db_name}'";
+            $content = <<"EMAIL";
+Hello,
+
+You have been invited by $profile->{email} to access the dataset "$dataset->{db_name}" on Neo-Ledger.
+Please log in at: $front_end/login
+
+Thank you,
+The Neo-Ledger Team
+EMAIL
+        }
+        else {
+            # For new users, send a signup invitation email
+            $subject =
+              "Invitation to join Neo-Ledger and access '$dataset->{db_name}'";
+            $content = <<"EMAIL";
+Hello,
+
+You have been invited by $profile->{email} to access the dataset "$dataset->{db_name}" on Neo-Ledger.
+If you already have an account, please log in at: $front_end/login.
+If not, please sign up using the following link:
+$front_end/signup?invite=$invite->{invite_code}
+
+We look forward to having you onboard.
+
+Best regards,
+$dataset->{db_name}
+EMAIL
+        }
+
+        # Use the provided email helper to send the email
+        my $email_result =
+          $c->send_email_central( $recipient_email, $subject, $content );
+        if ( $email_result->{error} ) {
+            return $c->render(
+                status => 500,
+                json   => { message => $email_result->{error} }
+            );
+        }
+
         return $c->render(
-            json => { message => "Invite sent", invite_id => $invite->{id} } );
+            json => {
+                message     => "Invite sent",
+                invite_id   => $invite->{id},
+                invite_code => $invite->{invite_code}
+            }
+        );
     }
 );
 
