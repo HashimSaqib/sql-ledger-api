@@ -1,0 +1,58 @@
+<body>
+  <h4 align="center">
+    <%company%><br />
+    <%address%>
+  </h4>
+
+  <%if department%>
+  <h4>Department: <%department%></h4>
+  <%end department%> <%if projectnumber%>
+  <h4>Project Number: <%projectnumber%></h4>
+  <%end projectnumber%>
+
+  <table width="100%" border="1" cellspacing="0" cellpadding="5">
+    <thead>
+      <tr>
+        <!-- Empty header cells for row labels -->
+        <th colspan="2"></th>
+        <!-- Period titles as column headers -->
+        <%period_headers_html%>
+      </tr>
+    </thead>
+    <tbody>
+      <!-- Income Section -->
+      <tr>
+        <td colspan="100%" align="left">
+          <strong>INCOME</strong><br />
+          <hr width="300" size="5" align="left" noshade />
+        </td>
+      </tr>
+      <%income_rows%>
+      <tr>
+        <td colspan="2"></td>
+        <%foreach _periods%>
+        <td align="right"><hr noshade size="1" /></td>
+        <%end _periods%>
+      </tr>
+      <%total_income_html%>
+
+      <!-- Expenses Section -->
+      <tr>
+        <td colspan="100%" align="left">
+          <strong>EXPENSES</strong><br />
+          <hr width="300" size="5" align="left" noshade />
+        </td>
+      </tr>
+      <%expense_rows%>
+      <tr>
+        <td colspan="2"></td>
+        <%foreach _periods%>
+        <td align="right"><hr noshade size="1" /></td>
+        <%end _periods%>
+      </tr>
+      <%total_expense_html%> <%total_profit_html%>
+    </tbody>
+  </table>
+
+  <p>All amounts in <%currency%></p>
+</body>

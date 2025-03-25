@@ -37,7 +37,8 @@ use DateTime::Format::ISO8601;
 use Date::Parse;
 use File::Path qw(make_path);
 use File::Basename;
-use POSIX qw(strftime);
+use File::Copy::Recursive qw(dircopy);
+use POSIX                 qw(strftime);
 use Time::Piece;
 use Mojo::Template;
 use File::Slurp;
@@ -192,6 +193,33 @@ get '/logo/:client/' => sub {
 ####   CENTRAL DATABASE    ####
 ####                       ####
 ###############################
+
+my $neoledger_perms = '[
+    "vendor",                 "vendor.transaction",
+    "vendor.invoice",         "vendor.debitinvoice",
+    "vendor.addvendor",       "vendor.transactions",
+    "vendor.search",          "vendor.history",
+    "cash",                   "cash.recon",
+    "items",                  "items.part",
+    "items.search.parts",     "items.search.services",
+    "reports",                "reports.trial",
+    "reports.income",         "system",
+    "system.currencies",      "system.projects",
+    "system.departments",     "system.defaults",
+    "system.chart",           "system.chart.list",
+    "system.chart.add",       "customer",
+    "customer.transaction",   "customer.invoice",
+    "customer.addcustomer",   "customer.transactions",
+    "customer.search",        "customer.history",
+    "customer.creditinvoice", "items.search.allitems",
+    "items.service",          "gl",
+    "gl.add",                 "gl.transactions",
+    "system.user.templates",  "system.templates",
+    "system.gifi",            "system.chart.gifi",
+    "dashboard",              "customer.add",
+    "customer.return",        "vendor.return",
+    "vendor.add"
+]';
 helper send_email_central => sub {
     use Email::Sender::Transport::SMTP;
     use Email::Stuffer;
@@ -813,7 +841,247 @@ $central->get(
         );
     }
 );
+$central->post(
+    'create_dataset' => sub {
+        my $c         = shift;
+        my $params    = $c->req->json;
+        my $dataset   = $params->{dataset};
+        my $company   = $params->{company};
+        my $templates = $params->{templates};
+        my $chart     = $params->{chart};
 
+        # Create spool/images/template directories
+        my $images_dir = "images/$dataset";
+        my $spool_dir  = "spool/$dataset";
+        mkdir $images_dir unless -d $images_dir;
+        mkdir $spool_dir  unless -d $spool_dir;
+
+        # Template directory handling
+        my $templates_dir   = "doc/templates/";
+        my $destination_dir = "templates/$dataset";
+        dircopy( "$templates_dir$templates", $destination_dir );
+        rename( "$destination_dir/$templates", "$destination_dir/$dataset" );
+
+        # Connect to database and create new dataset
+        my $dbh = DBI->connect( 'dbi:Pg:dbname=postgres;host=localhost',
+            'postgres', '', { AutoCommit => 1 } )
+          or die "Failed to connect to database: $DBI::errstr";
+
+        # Create the database for the dataset
+        $dbh->do("CREATE DATABASE $dataset");
+
+        # Load SQL files for dataset creation
+        my $sql_dir   = "sql/";
+        my @sql_files = (
+            "${sql_dir}Pg-tables.sql",    "${sql_dir}Pg-indices.sql",
+            "${sql_dir}Pg-functions.sql", "${sql_dir}Pg-neoledger.sql"
+        );
+        foreach my $sql_file (@sql_files) {
+            run_sql_file( $dataset, $sql_file );
+        }
+
+        # Load chart-specific SQL
+        my $chart_file = "${sql_dir}${chart}-chart.sql";
+        run_sql_file( $dataset, $chart_file );
+
+        my $gifi_file = "${sql_dir}${chart}-gifi.sql";
+        run_sql_file( $dataset, $gifi_file );
+
+        $dbh->disconnect;
+
+        # Insert dataset and dataset access info into central database
+        my $central_dbs = $c->central_dbs();
+        my $profile     = $c->get_user_profile();
+
+        $central_dbs->query(
+            "INSERT INTO dataset (db_name, owner_id) VALUES ( ?, ? )",
+            $dataset, $profile->{profile_id} );
+
+        my $dataset_id =
+          $central_dbs->last_insert_id( undef, undef, 'dataset', 'id' );
+
+        my $role = $central_dbs->query(
+            "INSERT INTO role (dataset_id, name, acs) VALUES (?, ?, ?)",
+            $dataset_id, 'main', $neoledger_perms );
+        my $role_id =
+          $central_dbs->last_insert_id( undef, undef, 'role', 'id' );
+
+        $central_dbs->query(
+"INSERT INTO dataset_access(profile_id, dataset_id, access_level, role_id) VALUES (?,?, 'owner', ?)",
+            $profile->{profile_id},
+            $dataset_id, $role_id
+        );
+    }
+);
+
+sub run_sql_file {
+    my ( $dataset, $sql_file ) = @_;
+    my $dbh = DBI->connect( "dbi:Pg:dbname=$dataset;host=localhost",
+        'postgres', '', { AutoCommit => 1 } )
+      or die "Failed to connect to database: $DBI::errstr";
+
+    open( my $fh, '<', $sql_file ) or die "Cannot open file '$sql_file': $!";
+    my $sql = do { local $/; <$fh> };
+
+    my @statements = split( /;\s*/, $sql );
+    foreach my $statement (@statements) {
+        next if $statement =~ /^\s*$/;
+        eval {
+            $dbh->do($statement);
+            1;
+        } or do {
+            my $error = $@ || 'Unknown error';
+            die
+              "Failed to execute SQL statement: $error\nStatement: $statement";
+        };
+    }
+
+    $dbh->disconnect;
+}
+$central->delete(
+    'dataset' => sub {
+        my $c          = shift;
+        my $dataset_id = $c->param('id');
+        my $owner_pw   = $c->param('owner_pw');
+
+        # Ensure both id and owner_pw are provided
+        unless ( defined $dataset_id
+            && $dataset_id ne ''
+            && defined $owner_pw
+            && $owner_pw ne '' )
+        {
+            return $c->render(
+                status => 400,
+                json   => { message => "Missing dataset id or owner password" }
+            );
+        }
+
+        my $central_dbs = $c->central_dbs();
+        my $profile     = $c->get_user_profile();
+        warn( Dumper $profile );
+        warn($dataset_id);
+
+        # Begin transaction for atomic operations
+        eval {
+            $central_dbs->begin_work();
+
+          # Verify that the user has owner access to the dataset and get db_name
+            my $verification = $central_dbs->query(
+                "SELECT d.db_name 
+                 FROM dataset_access da
+                 JOIN dataset d ON da.dataset_id = d.id 
+                 WHERE da.dataset_id = ? 
+                 AND da.profile_id = ? 
+                 AND da.access_level = ?",
+                $dataset_id, $profile->{profile_id}, 'owner'
+            )->hash;
+            warn( Dumper $verification );
+            unless ( $verification && $verification->{db_name} ) {
+                $central_dbs->rollback();
+                return $c->render(
+                    status => 403,
+                    json   => {
+                        message => "You don't have owner access to this dataset"
+                    }
+                );
+            }
+
+            my $db_name = $verification->{db_name};
+
+            # Validate database name format for security
+            unless ( $db_name =~ /^[a-zA-Z0-9_]+$/ ) {
+                $central_dbs->rollback();
+                return $c->render(
+                    status => 500,
+                    json   => { message => "Invalid database name format" }
+                );
+            }
+
+            # Verify owner password
+            my $owner_verification = $central_dbs->query(
+                "SELECT 1 FROM profile WHERE id = ? 
+                 AND crypt(?, password) = password",
+                $profile->{profile_id}, $owner_pw
+            );
+
+            unless ($owner_verification) {
+                $central_dbs->rollback();
+                return $c->render(
+                    status => 401,
+                    json   => { message => "Incorrect password" }
+                );
+            }
+
+            # Delete directories related to the dataset
+            use File::Path qw(rmtree);
+            my $images_dir    = "images/$db_name";
+            my $spool_dir     = "spool/$db_name";
+            my $templates_dir = "templates/$db_name";
+
+            if ( -d $images_dir ) {
+                rmtree($images_dir)
+                  or $c->app->log->warn("Failed to remove $images_dir: $!");
+            }
+
+            if ( -d $spool_dir ) {
+                rmtree($spool_dir)
+                  or $c->app->log->warn("Failed to remove $spool_dir: $!");
+            }
+
+            if ( -d $templates_dir ) {
+                rmtree($templates_dir)
+                  or $c->app->log->warn("Failed to remove $templates_dir: $!");
+            }
+
+            # Drop the dataset database
+            my $dbh = DBI->connect( 'dbi:Pg:dbname=postgres;host=localhost',
+                'postgres', '', { AutoCommit => 1, RaiseError => 1 } )
+              or die "Failed to connect to database: $DBI::errstr";
+
+            # Ensure nobody is connected to the database before dropping
+            $dbh->do(
+"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = ?",
+                undef, $db_name
+            );
+
+            # Drop the dataset database (if it exists)
+            $dbh->do("DROP DATABASE IF EXISTS \"$db_name\"")
+              or die "Could not drop database $db_name: " . $dbh->errstr;
+            $dbh->disconnect;
+
+            # Remove all dataset relations in a specific order
+            # First remove any access records
+            $central_dbs->query(
+                "DELETE FROM dataset_access WHERE dataset_id = ?",
+                $dataset_id );
+
+            # Remove roles associated with the dataset
+            $central_dbs->query( "DELETE FROM role WHERE dataset_id = ?",
+                $dataset_id );
+
+            # Finally, remove the dataset record itself
+            $central_dbs->query( "DELETE FROM dataset WHERE id = ?",
+                $dataset_id );
+
+            $central_dbs->commit();
+            return $c->render(
+                json => { message => "Dataset deleted successfully" } );
+        };
+
+        if ($@) {
+
+            # Handle any errors that occurred during the transaction
+            $central_dbs->rollback();
+            $c->app->log->error("Error deleting dataset: $@");
+            return $c->render(
+                status => 500,
+                json   => {
+                    message => "Failed to delete dataset: Internal server error"
+                }
+            );
+        }
+    }
+);
 #### INVITE MANAGEMENT
 
 # Create An Invite
@@ -932,35 +1200,6 @@ EMAIL
                 invite_code => $invite->{invite_code}
             }
         );
-    }
-);
-
-# Route to cancel an invite (only sender can cancel)
-$central->delete(
-    '/invite/:id' => sub {
-        my $c         = shift;
-        my $invite_id = $c->param('id');
-        my $dbs       = $c->central_dbs();
-
-        # Validate session and get sender profile id
-        my $profile   = $c->get_user_profile();
-        my $sender_id = $profile->{profile_id};
-
-        # Verify that the invite exists and belongs to the sender
-        my $invite =
-          $dbs->query( "SELECT id FROM invite WHERE id = ? AND sender_id = ?",
-            $invite_id, $sender_id )->hash;
-        unless ($invite) {
-            return $c->render(
-                status => 404,
-                json   =>
-                  { message => "Invite not found or not authorized to cancel" }
-            );
-        }
-
-        # Delete the invite
-        $dbs->query( "DELETE FROM invite WHERE id = ?", $invite_id );
-        return $c->render( json => { message => "Invite canceled" } );
     }
 );
 
@@ -1266,21 +1505,6 @@ $api->post(
         }
     }
 );
-my $neoledger_perms = [
-    "vendor", "vendor.transaction", "vendor.invoice", "vendor.debitinvoice",
-    "vendor.addvendor", "vendor.transactions", "vendor.search", "vendor.h
-istory", "pos", "pos.sale", "cash", "cash.recon", "items", "items.part",
-    "items.search.parts", "items.search.services", "reports", "reports.tria
-l", "reports.income", "system", "system.currencies", "system.projects",
-    "system.departments", "system.defaults", "system.chart", "system.chart.l
-ist", "system.chart.add", "system.user.roles", "customer",
-    "customer.transaction", "customer.invoice", "customer.addcustomer",
-    "customer.transac
-tions", "customer.search", "customer.history", "system.user.employees",
-    "customer.creditinvoice", "items.search.allitems", "items.service", "gl"
-    , "gl.add", "gl.transactions", "system.user.templates", "system.templates",
-    "system.gifi", "system.chart.gifi"
-];
 $api->post(
     '/auth/login' => sub {
         my $c      = shift;
@@ -3457,8 +3681,7 @@ $api->get(
          ORDER BY c.accno"
         )->hashes;
 
-        my $accounts = $c->get_accounts
-          ;    # returns a hash with keys like inventory, income, cogs, expense
+        my $accounts   = $c->get_accounts;
         my $currencies = $c->get_currencies;
         my $customers  = $c->get_vc('customer');
         my $vendors    = $c->get_vc('vendor');
