@@ -6710,7 +6710,7 @@ sub build_invoice {
     my (
         @items,      @numbers,       @descriptions, @deliverydates,
         @qtys,       @units,         @makes,        @models,
-        @sellprices, @discountrates, @linetotals
+        @sellprices, @discountrates, @linetotals,   @itemnotes
     );
 
     my $subtotal = 0;
@@ -6727,9 +6727,10 @@ sub build_invoice {
         push @descriptions,  ( $item->{description} || '' );
         push @deliverydates, ( $form->{transdate}   || '' );
         push @qtys, $form->format_amount( $c->slconfig, $qty );
-        push @units,  ( $item->{unit}  || '' );
-        push @makes,  ( $item->{make}  || '' );
-        push @models, ( $item->{model} || '' );
+        push @units,     ( $item->{unit}      || '' );
+        push @itemnotes, ( $item->{itemnotes} || '' );
+        push @makes,     ( $item->{make}      || '' );
+        push @models,    ( $item->{model}     || '' );
         push @sellprices, $form->format_amount( $c->slconfig, $price );
         push @discountrates, ( $discount ? $discount * 100 : '0' );
         push @linetotals, $form->format_amount( $c->slconfig, $linetotal );
@@ -6936,6 +6937,7 @@ sub build_invoice {
         sellprice     => \@sellprices,
         discountrate  => \@discountrates,
         linetotal     => \@linetotals,
+        itemnotes     => \@itemnotes,
 
         # ---- PARALLEL ARRAYS FOR TAXES ----
         taxdescription => \@taxdescriptions,
@@ -6956,8 +6958,9 @@ sub build_invoice {
     return \%data;
 }
 $api->get(
-    "/print_invoice" => sub {
-        my $c = shift;
+    "/print_invoice/" => sub {
+        my $c    = shift;
+        my $type = $c->param("type");
 
         # Extract parameters
         my $client   = $c->param('client') || die "Missing client parameter";
@@ -6965,50 +6968,82 @@ $api->get(
         my $id       = $c->param('id')     || die "Missing invoice id";
         my $template = $vc eq 'customer' ? 'invoice' : 'vendor_invoice';
 
-        # Fetch invoice data dynamically
+        # Build invoice and letterhead data
         my $invoice_data = build_invoice( $c, $client, $vc, $id );
         my $letterhead   = build_letterhead($c);
 
         # Merge letterhead details into invoice data
-        $invoice_data->{company}           = $letterhead->{company};
-        $invoice_data->{address}           = $letterhead->{address};
-        $invoice_data->{tel}               = $letterhead->{tel};
-        $invoice_data->{companyemail}      = $letterhead->{companyemail};
-        $invoice_data->{companywebsite}    = $letterhead->{companywebsite};
+        for my $key (qw(company address tel companyemail companywebsite)) {
+            $invoice_data->{$key} = $letterhead->{$key};
+        }
         $invoice_data->{lastpage}          = 0;
         $invoice_data->{sumcarriedforward} = 0;
         $invoice_data->{templates}         = "templates/$client";
-        $invoice_data->{IN}                = "$template.tex";
-        $invoice_data->{OUT}               = ">temp/invoice.pdf";
-        $invoice_data->{format}            = "pdf";
-        $invoice_data->{media}             = "screen";
-        $invoice_data->{copies}            = 1;
 
-        my $form      = new Form;
-        my $user_path = "temp/";
-        for my $k ( keys %$invoice_data ) {
-            $form->{$k} = $invoice_data->{$k};
+        # Set input and output based on type
+        if ( $type eq 'tex' ) {
+            $invoice_data->{IN}     = "$template.$type";
+            $invoice_data->{OUT}    = ">temp/invoice.pdf";
+            $invoice_data->{format} = "pdf";
+            $invoice_data->{media}  = "screen";
+            $invoice_data->{copies} = 1;
         }
-        my $dvipdf    = "";
-        my $xelatex   = "";
+        elsif ( $type eq 'html' ) {
+            $invoice_data->{IN}  = "$template.$type";
+            $invoice_data->{OUT} = ">temp/invoice.html";
+        }
+        else {
+            die "Unsupported type: $type";
+        }
+
+        # Create form and copy invoice data into it
+        my $form = new Form;
+        $form->{$_} = $invoice_data->{$_} for keys %$invoice_data;
         my $userspath = "temp/";
-        $form->parse_template( $c->slconfig, $userspath, $dvipdf, $xelatex );
-        my $pdf_path = "temp/invoice.pdf";
 
-        # Read the PDF file content
-        open my $fh, $pdf_path or die "Cannot open file $pdf_path: $!";
-        binmode $fh;
-        my $pdf_content = do { local $/; <$fh> };
-        close $fh;
+        # Process based on type
+        if ( $type eq 'tex' ) {
+            my $dvipdf  = "";
+            my $xelatex = 1;
+            $form->parse_template( $c->slconfig, $userspath, $dvipdf,
+                $xelatex );
+            my $pdf_path = "temp/invoice.pdf";
 
-        # Delete the PDF file after reading
-        unlink $pdf_path or warn "Could not delete $pdf_path: $!";
+            # Read PDF file content
+            open my $fh, $pdf_path or die "Cannot open file $pdf_path: $!";
+            binmode $fh;
+            my $pdf_content = do { local $/; <$fh> };
+            close $fh;
+            unlink $pdf_path or warn "Could not delete $pdf_path: $!";
 
-        # Return the PDF content as response
-        $c->res->headers->content_type('application/pdf');
-        $c->res->headers->content_disposition(
-            "attachment; filename=\"$invoice_data->{invnumber}.pdf\"");
-        $c->render( data => $pdf_content );
+            # Return PDF as response
+            $c->res->headers->content_type('application/pdf');
+            $c->res->headers->content_disposition(
+                "attachment; filename=\"$invoice_data->{invnumber}.pdf\"");
+            $c->render( data => $pdf_content );
+        }
+        elsif ( $type eq 'html' ) {
+            $form->parse_template( $c->slconfig, $userspath );
+
+            # Strip the '>' character from the output file path
+            ( my $file_path = $form->{OUT} ) =~ s/^>//;
+
+            # Read the HTML file content
+            open my $fh, '<', $file_path or die "Cannot open $file_path: $!";
+            { local $/; $form->{html_content} = <$fh> }
+            close $fh;
+            unlink $file_path or warn "Could not delete $file_path: $!";
+
+            # Convert HTML to PDF
+            my $pdf = html_to_pdf( $form->{html_content} );
+            unless ($pdf) {
+                $c->res->status(500);
+                $c->render( text => "Failed to generate PDF" );
+                return;
+            }
+            $c->res->headers->content_type('application/pdf');
+            $c->render( data => $pdf );
+        }
     }
 );
 
