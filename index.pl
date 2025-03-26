@@ -43,6 +43,8 @@ use Time::Piece;
 use Mojo::Template;
 use File::Slurp;
 use Dotenv;
+use IO::Compress::Zip qw(zip $ZipError);
+use Archive::Zip      qw( :ERROR_CODES :CONSTANTS );
 Dotenv->load;
 app->config( hypnotoad => { listen => ['http://*:3000'] } );
 my $base_url  = "https://api.neo-ledger.com/";
@@ -469,10 +471,14 @@ $central->post(
             );
         }
 
+        my $session_key = $central_dbs->query(
+'INSERT INTO session (profile_id, sessionkey) VALUES (?, encode(gen_random_bytes(32), ?)) RETURNING sessionkey',
+            $profile_id, 'hex'
+        )->hash->{sessionkey};
+
         return $c->render(
             json => {
-                message    => "Signup successful",
-                profile_id => $profile_id
+                sessionkey => $session_key,
             }
         );
     }
@@ -885,7 +891,12 @@ $central->post(
         run_sql_file( $dataset, $chart_file );
 
         my $gifi_file = "${sql_dir}${chart}-gifi.sql";
-        run_sql_file( $dataset, $gifi_file );
+        if ( -e $gifi_file ) {
+            run_sql_file( $dataset, $gifi_file );
+        }
+        else {
+            warn "The gifi file '$gifi_file' does not exist!";
+        }
 
         $dbh->disconnect;
 
@@ -911,6 +922,8 @@ $central->post(
             $profile->{profile_id},
             $dataset_id, $role_id
         );
+
+        $c->render( json => { message => "Dataset created successfully" } );
     }
 );
 
@@ -1082,6 +1095,235 @@ $central->delete(
         }
     }
 );
+
+# Route to download the SQL dump of the dataset
+$central->get(
+    'download_db' => sub {
+        my $c          = shift;
+        my $dataset_id = $c->param('id');
+
+        # Ensure dataset id is provided
+        unless ( defined $dataset_id && $dataset_id ne '' ) {
+            return $c->render(
+                status => 400,
+                json   => { message => "Missing dataset id" }
+            );
+        }
+
+        my $central_dbs = $c->central_dbs();
+        my $profile     = $c->get_user_profile();
+
+        # Verify that the user has owner access to the dataset and get db_name
+        my $verification = $central_dbs->query(
+            "SELECT d.db_name 
+             FROM dataset_access da
+             JOIN dataset d ON da.dataset_id = d.id 
+             WHERE da.dataset_id = ? 
+             AND da.profile_id = ? 
+             AND da.access_level = ?",
+            $dataset_id, $profile->{profile_id}, 'owner'
+        )->hash;
+
+        unless ( $verification && $verification->{db_name} ) {
+            return $c->render(
+                status => 403,
+                json   =>
+                  { message => "You don't have owner access to this dataset" }
+            );
+        }
+
+        my $db_name = $verification->{db_name};
+
+        # Validate database name format for security
+        unless ( $db_name =~ /^[a-zA-Z0-9_]+$/ ) {
+            return $c->render(
+                status => 500,
+                json   => { message => "Invalid database name format" }
+            );
+        }
+
+        # Define temporary file path for SQL dump
+        my $sql_file = "/tmp/${db_name}.sql";
+
+        # Create the SQL dump (adjust pg_dump options as needed)
+        my $dump_cmd = "pg_dump -U postgres -h localhost $db_name > $sql_file";
+        my $dump_status = system($dump_cmd);
+        if ( $dump_status != 0 ) {
+            return $c->render(
+                status => 500,
+                json   => { message => "Failed to dump database" }
+            );
+        }
+
+        # Return the dump as a file download
+        $c->res->headers->content_disposition(
+            "attachment; filename=${db_name}.sql");
+        return $c->reply->file($sql_file);
+    }
+);
+
+$central->get(
+    'download_templates' => sub {
+        my $c          = shift;
+        my $dataset_id = $c->param('id');
+
+        # Ensure dataset id is provided
+        unless ( defined $dataset_id && $dataset_id ne '' ) {
+            return $c->render(
+                status => 400,
+                json   => { message => "Missing dataset id" }
+            );
+        }
+
+        my $central_dbs = $c->central_dbs();
+        my $profile     = $c->get_user_profile();
+
+        # Verify that the user has owner access to the dataset and get db_name
+        my $verification = $central_dbs->query(
+            "SELECT d.db_name 
+             FROM dataset_access da
+             JOIN dataset d ON da.dataset_id = d.id 
+             WHERE da.dataset_id = ? 
+             AND da.profile_id = ? 
+             AND da.access_level = ?",
+            $dataset_id, $profile->{profile_id}, 'owner'
+        )->hash;
+
+        unless ( $verification && $verification->{db_name} ) {
+            return $c->render(
+                status => 403,
+                json   =>
+                  { message => "You don't have owner access to this dataset" }
+            );
+        }
+
+        my $db_name = $verification->{db_name};
+
+        # Validate database name format for security
+        unless ( $db_name =~ /^[a-zA-Z0-9_]+$/ ) {
+            return $c->render(
+                status => 500,
+                json   => { message => "Invalid database name format" }
+            );
+        }
+
+        # Define the templates directory for the dataset
+        my $templates_dir = "templates/$db_name";
+        unless ( -d $templates_dir ) {
+            return $c->render(
+                status => 404,
+                json   => { message => "Templates directory not found" }
+            );
+        }
+
+        my $zip_file = "/tmp/${db_name}_templates.zip";
+
+ # Use File::Find to recursively locate all files within the templates directory
+        use File::Find;
+        my %files_to_zip;
+        find(
+            sub {
+                return unless -f $_;    # Only process regular files
+                my $relative_path = $File::Find::name;
+                $relative_path =~ s/^\Q$templates_dir\E\/?//;
+                $files_to_zip{$relative_path} = $File::Find::name;
+            },
+            $templates_dir
+        );
+
+        # Create the ZIP file using Archive::Zip
+        my $zip = Archive::Zip->new();
+        foreach my $rel_path ( keys %files_to_zip ) {
+            my $full_path = $files_to_zip{$rel_path};
+            $zip->addFile( $full_path, $rel_path );
+        }
+
+        # Write the ZIP file
+        my $status = $zip->writeToFileNamed($zip_file);
+        if ( $status != AZ_OK ) {
+            return $c->render(
+                status => 500,
+                json   => { message => "Failed to create ZIP file: $status" }
+            );
+        }
+
+        # Return the ZIP file as a download
+        $c->res->headers->content_disposition(
+            "attachment; filename=${db_name}_templates.zip");
+        return $c->reply->file($zip_file);
+    }
+);
+
+$central->post(
+    '/upload_logo' => sub {
+        my $c           = shift;
+        my $dataset_id  = $c->param('id');
+        my $central_dbs = $c->central_dbs();
+        my $profile     = $c->get_user_profile();
+
+        # Verify that the user has owner access to the dataset and get db_name
+        my $verification = $central_dbs->query(
+            "SELECT d.db_name 
+             FROM dataset_access da
+             JOIN dataset d ON da.dataset_id = d.id 
+             WHERE da.dataset_id = ? 
+             AND da.profile_id = ? 
+             AND da.access_level = ?",
+            $dataset_id, $profile->{profile_id}, 'owner'
+        )->hash;
+
+        unless ( $verification && $verification->{db_name} ) {
+            return $c->render(
+                status => 403,
+                json   =>
+                  { message => "You don't have owner access to this dataset" }
+            );
+        }
+
+        my $db_name = $verification->{db_name};
+
+        # Get uploaded file
+        my $upload = $c->req->upload('file');
+
+        unless ($upload) {
+            return $c->render(
+                json   => { error => "No file uploaded" },
+                status => 400
+            );
+        }
+
+        # Generate safe filename
+        my $original_name = $upload->filename;
+
+        # Use provided name, original filename, or template_id
+        my $target_filename = 'logo.png';
+
+        # Basic sanitization to prevent directory traversal
+        $target_filename =~ s{[^\w\.-]}{}g;
+
+        # Ensure client directory exists
+        my $client_dir = "templates/$db_name";
+        unless ( -d $client_dir ) {
+            mkdir $client_dir
+              or return $c->render(
+                json   => { error => "Cannot create client directory" },
+                status => 500
+              );
+        }
+
+        my $target_path = "$client_dir/$target_filename";
+
+        # Move the file to target location
+        $upload->move_to($target_path);
+
+        $c->render(
+            json => {
+                success => "Template uploaded successfully",
+                name    => $target_filename
+            }
+        );
+    }
+);
 #### INVITE MANAGEMENT
 
 # Create An Invite
@@ -1247,6 +1489,48 @@ $central->post(
         # Optionally, remove the invite after acceptance
         $dbs->query( "DELETE FROM invite WHERE id = ?", $invite_id );
         return $c->render( json => { message => "Invite accepted" } );
+    }
+);
+$central->delete(
+    '/invite/:id' => sub {
+        my $c         = shift;
+        my $invite_id = $c->param('id');
+
+        my $dbs = $c->central_dbs();
+
+        # Validate session and get current profile information
+        my $profile         = $c->get_user_profile();
+        my $current_profile = $profile->{profile_id};
+
+        # Retrieve the invite by id
+        my $invite =
+          $dbs->query( "SELECT * FROM invite WHERE id = ?", $invite_id )->hash;
+
+        # If invite not found, simply return success
+        unless ($invite) {
+            return $c->render( json => { message => "Invite deleted" } );
+        }
+
+        # Check if the current profile has admin or owner access for the dataset
+        my $access = $dbs->query(
+"SELECT access_level FROM dataset_access WHERE profile_id = ? AND dataset_id = ?",
+            $current_profile, $invite->{dataset_id}
+        )->hash;
+        unless (
+            $access
+            && (   $access->{access_level} eq 'admin'
+                || $access->{access_level} eq 'owner' )
+          )
+        {
+            return $c->render(
+                status => 403,
+                json   => { message => "Insufficient permissions" }
+            );
+        }
+
+        # Delete the invite as the user has the required access level
+        $dbs->query( "DELETE FROM invite WHERE id = ?", $invite_id );
+        return $c->render( json => { message => "Invite deleted" } );
     }
 );
 
