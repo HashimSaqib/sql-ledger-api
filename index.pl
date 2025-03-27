@@ -820,11 +820,29 @@ $api->post(
     }
 );
 
-#### DATASET CREATION
 $central->get(
     'create_dataset' => sub {
         my $c = shift;
 
+        # Retrieve environment settings
+        my $allow_db_creation = $ENV{ALLOW_DB_CREATION} // 0;
+
+        # SUPER_USERS is a comma-separated list
+        my @super_users = split /,/, ( $ENV{SUPER_USERS} // '' );
+
+        # Get the current user's profile
+        my $profile = $c->get_user_profile();
+
+        # Determine if the user is allowed to create a database
+        my $db_creation = ( $allow_db_creation
+              || grep { $_ eq $profile->{email} } @super_users ) ? 1 : 0;
+
+        # If not allowed, return only the db_creation flag
+        if ( !$db_creation ) {
+            return $c->render( json => { db_creation => 0 } );
+        }
+
+        # Process charts if allowed
         my $sql_dir = "sql/";
         opendir( my $sql_dh, $sql_dir ) or return ();
         my @charts =
@@ -833,6 +851,7 @@ $central->get(
           map      { $sql_dir . $_ } readdir($sql_dh);
         closedir($sql_dh);
 
+        # Process templates if allowed
         my $templates_dir = "doc/templates/";
         opendir( my $templates_dh, $templates_dir ) or return ();
         my @templates = sort grep { !/^\.{1,2}$/ && -d "$templates_dir/$_" }
@@ -841,12 +860,14 @@ $central->get(
 
         $c->render(
             json => {
-                charts    => \@charts,
-                templates => \@templates,
+                charts      => \@charts,
+                templates   => \@templates,
+                db_creation => $db_creation,
             }
         );
     }
 );
+
 $central->post(
     'create_dataset' => sub {
         my $c         = shift;
@@ -855,6 +876,36 @@ $central->post(
         my $company   = $params->{company};
         my $templates = $params->{templates};
         my $chart     = $params->{chart};
+
+      # Validate dataset parameter (only lower-case letters and numbers allowed)
+        unless ( $dataset =~ /^[a-z0-9]+$/ ) {
+            return $c->render(
+                json => {
+                    error =>
+"Invalid dataset name. Only lower-case alphabets and numbers allowed."
+                },
+                status => 400
+            );
+        }
+
+        # Retrieve environment settings
+        my $allow_db_creation = $ENV{ALLOW_DB_CREATION} // 0;
+
+        # SUPER_USERS is a comma-separated list
+        my @super_users = split /,/, ( $ENV{SUPER_USERS} // '' );
+
+        # Get the current user's profile
+        my $profile = $c->get_user_profile();
+
+        # If DB creation is not allowed, ensure the user is a super user
+        if ( !$allow_db_creation ) {
+            unless ( grep { $_ eq $profile->{email} } @super_users ) {
+                return $c->render(
+                    json   => { error => "Not authorized to create dataset." },
+                    status => 403
+                );
+            }
+        }
 
         # Create spool/images/template directories
         my $images_dir = "images/$dataset";
@@ -890,6 +941,7 @@ $central->post(
         my $chart_file = "${sql_dir}${chart}-chart.sql";
         run_sql_file( $dataset, $chart_file );
 
+        # Check if the gifi file exists before running it
         my $gifi_file = "${sql_dir}${chart}-gifi.sql";
         if ( -e $gifi_file ) {
             run_sql_file( $dataset, $gifi_file );
@@ -902,8 +954,6 @@ $central->post(
 
         # Insert dataset and dataset access info into central database
         my $central_dbs = $c->central_dbs();
-        my $profile     = $c->get_user_profile();
-
         $central_dbs->query(
             "INSERT INTO dataset (db_name, owner_id) VALUES ( ?, ? )",
             $dataset, $profile->{profile_id} );
