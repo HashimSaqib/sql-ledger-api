@@ -1003,9 +1003,13 @@ sub run_sql_file {
 }
 $central->delete(
     'dataset' => sub {
-        my $c          = shift;
+        my $c = shift;
+
         my $dataset_id = $c->param('id');
         my $owner_pw   = $c->param('owner_pw');
+
+        # Trim input
+        $dataset_id =~ s/^\s+|\s+$//g if defined $dataset_id;
 
         # Ensure both id and owner_pw are provided
         unless ( defined $dataset_id
@@ -1016,6 +1020,14 @@ $central->delete(
             return $c->render(
                 status => 400,
                 json   => { message => "Missing dataset id or owner password" }
+            );
+        }
+
+        # Validate dataset_id format (only lowercase alphanumeric)
+        unless ( $dataset_id =~ /^[a-z0-9]+$/ ) {
+            return $c->render(
+                status => 400,
+                json   => { message => "Invalid dataset id format" }
             );
         }
 
@@ -1062,12 +1074,12 @@ $central->delete(
 
             # Verify owner password
             my $owner_verification = $central_dbs->query(
-                "SELECT 1 FROM profile WHERE id = ? 
+                "SELECT id FROM profile WHERE id = ? 
                  AND crypt(?, password) = password",
                 $profile->{profile_id}, $owner_pw
-            );
+            )->hash;
 
-            unless ($owner_verification) {
+            unless ( $owner_verification->{id} ) {
                 $central_dbs->rollback();
                 return $c->render(
                     status => 401,
