@@ -870,14 +870,7 @@ sub parse_template {
   # Convert the tex file to postscript
   if ($self->{format} =~ /(ps|pdf)/) {
     $self->run_latex($userspath, $dvipdf, $xelatex);
-    if (-f "$self->{errfile}") {
-      open(FH, "$self->{errfile}");
-      my @err = <FH>;
-      close(FH);
-      for (@err) {
-        $self->error("@err") if /LaTeX Error:/;
-      }
-    }
+ 
   }
 
   if ($self->{format} =~ /(ps|pdf)/ || $self->{media} eq 'email') {

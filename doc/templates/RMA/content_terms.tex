@@ -1,0 +1,7 @@
+\vspace{0.5cm}
+
+\newcommand{\TermsInvoice}{\ifthenelse{\equal{<%terms%>}{0}}{\LANGuse{invterms_immediate}.}{\LANGuse{invterms_duedate}.}}
+
+\newcommand{\TermsOther}{\ifthenelse{\equal{<%terms%>}{0}}{\LANGuse{other_terms_immediate}}{\LANGuse{other_terms_duedate}}}
+
+\ifthenelse{\equal{\DocType}{Rechnung}}{\TermsInvoice}{\TermsOther}

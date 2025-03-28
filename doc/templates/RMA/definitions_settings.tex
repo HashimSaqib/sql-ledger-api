@@ -1,0 +1,46 @@
+%%%%%%%%%%%%%  GENEREAL SETTINGS FILE FOR ALL TEMPLATES %%%%%%%%%%%%%
+
+
+
+
+%%% FONT %%%
+\usepackage[scaled=1]{helvet}
+\renewcommand{\familydefault}{\sfdefault}
+
+%%% BACKGROUND FOR STANDARD PAGE %%%
+\usepackage{eso-pic}
+\newcommand\BackgroundPic{
+\put(-2.35,0){
+\parbox[b][\paperheight]{\paperwidth}{%
+\vfill
+\includegraphics{\StandardBackground} 
+}}}
+
+%%% BACKGROUND FOR EINZAHLUNGSSCHEIN %%%
+\newcommand\BackgroundPicEZ{
+\put(-2.35,0){
+\parbox[b][\paperheight]{\paperwidth}{%
+\vfill
+\ifthenelse{\equal{\PrintOnPaper}{on}}{\includegraphics{\BackgroundESRwhite}}{\includegraphics{\BackgroundESRorange}}
+}}}
+
+%%% BACKGROUND FOR EINZAHLUNGSSCHEIN %%%
+\newcommand\BackgroundWithoutFooter{
+\put(-2.35,0){
+\parbox[b][\paperheight]{\paperwidth}{%
+\vfill
+\includegraphics{\BackgroundESRwhite}
+}}}
+
+%%% BEGIN DO NOT CHANGE THIS %%%
+\begin{document}
+%%% END DO NOT CHANGE THIS %%%
+
+%%% BACKGROUND AND PAGE SETTINGS %%%
+\AddToShipoutPicture{\BackgroundPic} % MUSS EINKOMMENTIERT WERDEN WENN HINTERGRUND
+\shorthandoff{"}
+\pagestyle{empty}
+
+%%% FONT %%%
+\normalfont
+

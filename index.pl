@@ -7066,7 +7066,7 @@ $api->get(
         # Process based on type
         if ( $type eq 'tex' ) {
             my $dvipdf  = "";
-            my $xelatex = 1;
+            my $xelatex = 0;
             $form->parse_template( $c->slconfig, $userspath, $dvipdf,
                 $xelatex );
             my $pdf_path = "temp/invoice.pdf";
