@@ -7021,14 +7021,14 @@ sub build_invoice {
 }
 $api->get(
     "/print_invoice/" => sub {
-        my $c    = shift;
-        my $type = $c->param("type");
+        my $c        = shift;
+        my $template = $c->param("template");
+        my $format   = $c->param("format");
 
         # Extract parameters
-        my $client   = $c->param('client') || die "Missing client parameter";
-        my $vc       = $c->param('vc')     || die "Missing vc parameter";
-        my $id       = $c->param('id')     || die "Missing invoice id";
-        my $template = $vc eq 'customer' ? 'invoice' : 'vendor_invoice';
+        my $client = $c->param('client') || die "Missing client parameter";
+        my $vc     = $c->param('vc')     || die "Missing vc parameter";
+        my $id     = $c->param('id')     || die "Missing invoice id";
 
         # Build invoice and letterhead data
         my $invoice_data = build_invoice( $c, $client, $vc, $id );
@@ -7041,21 +7041,20 @@ $api->get(
         $invoice_data->{lastpage}          = 0;
         $invoice_data->{sumcarriedforward} = 0;
         $invoice_data->{templates}         = "templates/$client";
+        $invoice_data->{IN}                = "$template.$format";
 
         # Set input and output based on type
-        if ( $type eq 'tex' ) {
-            $invoice_data->{IN}     = "$template.$type";
+        if ( $format eq 'tex' ) {
             $invoice_data->{OUT}    = ">temp/invoice.pdf";
             $invoice_data->{format} = "pdf";
             $invoice_data->{media}  = "screen";
             $invoice_data->{copies} = 1;
         }
-        elsif ( $type eq 'html' ) {
-            $invoice_data->{IN}  = "$template.$type";
+        elsif ( $format eq 'html' ) {
             $invoice_data->{OUT} = ">temp/invoice.html";
         }
         else {
-            die "Unsupported type: $type";
+            die "Unsupported type: $format";
         }
 
         # Create form and copy invoice data into it
@@ -7064,7 +7063,7 @@ $api->get(
         my $userspath = "temp/";
 
         # Process based on type
-        if ( $type eq 'tex' ) {
+        if ( $format eq 'tex' ) {
             my $dvipdf  = "";
             my $xelatex = 0;
             $form->parse_template( $c->slconfig, $userspath, $dvipdf,
@@ -7084,7 +7083,7 @@ $api->get(
                 "attachment; filename=\"$invoice_data->{invnumber}.pdf\"");
             $c->render( data => $pdf_content );
         }
-        elsif ( $type eq 'html' ) {
+        elsif ( $format eq 'html' ) {
             $form->parse_template( $c->slconfig, $userspath );
 
             # Strip the '>' character from the output file path

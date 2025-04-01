@@ -877,7 +877,7 @@ sub parse_template {
 #      for (@err) {
 #        $self->error("@err") if /LaTeX Error:/;
 #      }
-    }
+#    }
   }
 
   if ($self->{format} =~ /(ps|pdf)/ || $self->{media} eq 'email') {
