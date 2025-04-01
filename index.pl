@@ -2916,7 +2916,8 @@ $api->get(
         $checked{person}      = "checked" if $form->{typeofcontact} eq 'person';
         $checked{roundchange} = "checked" if $form->{roundchange};
 
-        for (qw(cdt checkinventory hideaccounts linetax forcewarehouse)) {
+        for (qw(cdt checkinventory hideaccounts linetax forcewarehouse xelatex))
+        {
             $checked{$_} = "checked" if $form->{$_};
         }
 
@@ -2951,7 +2952,7 @@ $api->post(
         warn( Dumper $form );
 
         $form->{optional} =
-"company address tel fax companyemail companywebsite yearend weightunit businessnumber closedto revtrans audittrail method cdt namesbynumber typeofcontact roundchange referenceurl annualinterest latepaymentfee restockingcharge checkinventory hideaccounts linetax forcewarehouse glnumber sinumber sonumber vinumber batchnumber vouchernumber ponumber sqnumber rfqnumber partnumber projectnumber employeenumber customernumber vendornumber lock_glnumber lock_sinumber lock_sonumber lock_ponumber lock_sqnumber lock_rfqnumber lock_employeenumber lock_customernumber lock_vendornumber";
+"company address tel fax companyemail companywebsite yearend weightunit businessnumber closedto revtrans audittrail method cdt namesbynumber xelatex typeofcontact roundchange referenceurl annualinterest latepaymentfee restockingcharge checkinventory hideaccounts linetax forcewarehouse glnumber sinumber sonumber vinumber batchnumber vouchernumber ponumber sqnumber rfqnumber partnumber projectnumber employeenumber customernumber vendornumber lock_glnumber lock_sinumber lock_sonumber lock_ponumber lock_sqnumber lock_rfqnumber lock_employeenumber lock_customernumber lock_vendornumber";
 
         # Save the defaults
         my $result = AM->save_defaults( $c->slconfig, $form );
@@ -7074,11 +7075,13 @@ $api->get(
         my $form = new Form;
         $form->{$_} = $invoice_data->{$_} for keys %$invoice_data;
         my $userspath = "temp/";
+        my $defaults  = $c->get_defaults();
 
         # Process based on type
         if ( $format eq 'tex' ) {
-            my $dvipdf  = "";
-            my $xelatex = 0;
+            my $dvipdf = "";
+
+            my $xelatex = $defaults->{xelatex};
             $form->parse_template( $c->slconfig, $userspath, $dvipdf,
                 $xelatex );
             my $pdf_path = "temp/invoice.pdf";
