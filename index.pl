@@ -3832,6 +3832,20 @@ $api->get(
 ####                       ####
 ###############################
 
+helper get_defaults => sub {
+    my $c        = shift;
+    my $client   = $c->param('client');
+    my $dbs      = $c->dbs($client);
+    my $defaults = $dbs->query("SELECT * FROM defaults")->hashes;
+
+    return {} unless ( $defaults && @$defaults );
+
+    # Transform the array of hashrefs into a hashref keyed by fldname
+    my %defaults_hash = map { $_->{fldname} => $_->{fldvalue} } @$defaults;
+
+    return \%defaults_hash;
+};
+
 helper get_projects => sub {
     my $c        = shift;
     my $client   = $c->param('client');
@@ -4013,12 +4027,6 @@ $api->get(
         return $c->render( json => {} )
           unless grep { $_ eq $module } @valid_modules;
 
-        # Common data that you might reuse
-        my $line_tax_q =
-          $dbs->query( "SELECT fldvalue FROM defaults WHERE fldname = ?",
-            'linetax' )->hash;
-        my $line_tax = $line_tax_q ? 1 : 0;
-
         my $tax_accounts = $dbs->query(
             "SELECT t.rate, t.taxnumber, t.chart_id, c.description, c.accno,
                 CONCAT(c.accno, '--', c.description) AS label
@@ -4033,6 +4041,10 @@ $api->get(
         my $vendors    = $c->get_vc('vendor');
         my $projects   = $c->get_projects;
         my $gifi       = $c->get_gifi;
+        my $defaults   = $c->get_defaults;
+        warn( Dumper $defaults );
+
+        my $line_tax = $defaults->{linetax} ? 1 : 0;
 
         my $response;
 
@@ -4109,6 +4121,7 @@ $api->get(
                 linetax      => $line_tax,
                 departments  => $departments,
                 projects     => $projects,
+                defaults     => $defaults
             };
         }
 
