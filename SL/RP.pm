@@ -116,6 +116,58 @@ sub income_statement_periods {
   $myconfig->{dateformat} = $dateformat;
 }
 
+sub balance_sheet_periods {
+  my ($self, $myconfig, $form, $locale) = @_;
+  
+  # Connect to the database.
+  my $dbh = $form->dbconnect($myconfig);
+  
+  # Set exchange rate if currency differs from default.
+  if ($form->{currency} ne $form->{defaultcurrency}) {
+    $form->{exchangerate} = $form->get_exchangerate($myconfig, $dbh, $form->{currency}, $form->{todate});
+  }
+  $form->{exchangerate} ||= 1;
+  $form->{longformat} *= 1;
+  
+  # Temporarily switch the date format to numeric.
+  my $dateformat = $myconfig->{dateformat};
+  $myconfig->{dateformat} = "yyyymmdd";
+  
+  # Process each balance sheet category:
+  # Assets (A), Liabilities (L), and Equity (Q)
+  for my $category (qw(A L Q)) {
+    foreach my $p (@{ $form->{periods} }) {
+      my $label = $p->{label};  # e.g., 'Period1', 'Period2'
+      my $fromdate = $form->datetonum($myconfig, $p->{fromdate});
+      my $todate   = $form->datetonum($myconfig, $p->{todate});
+      
+      # Save the formatted period information using the label.
+      $form->{period}{$label} = {
+        fromdate => $locale->date($myconfig, $fromdate, $form->{longformat}),
+        todate   => $locale->date($myconfig, $todate,   $form->{longformat}),
+      };
+      
+      # Retrieve and add the account data for the current category and period.
+      my %c = &get_accounts($form, $dbh, $fromdate, $todate, $category, 1);
+      &add_accounts($form, \%c, $label, $category);
+    }
+  }
+  
+  # Retrieve default company information.
+  my %defaults = $form->get_defaults($dbh, \@{['company', 'address', 'businessnumber', 'companywebsite', 'companyemail', 'tel', 'fax']});
+  for (keys %defaults) {
+    $form->{$_} = $defaults{$_};
+  }
+  
+  # Set the report level.
+  $form->report_level($myconfig, $dbh);
+  
+  # Disconnect from the database.
+  $dbh->disconnect;
+  
+  # Restore the original date format.
+  $myconfig->{dateformat} = $dateformat;
+}
 
 sub create_links {
   my ($self, $myconfig, $form, $vc) = @_;
