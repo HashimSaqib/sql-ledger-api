@@ -57,7 +57,9 @@ CREATE TABLE chart (
   link text,
   gifi_accno text,
   contra bool DEFAULT 'f',
-  closed bool DEFAULT 'f'
+  closed bool DEFAULT 'f',
+  allow_gl BOOLEAN DEFAULT true,
+  symbol_link varchar(128) null
 );
 --
 CREATE TABLE gifi (

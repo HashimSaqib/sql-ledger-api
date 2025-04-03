@@ -200,8 +200,7 @@ my $neoledger_perms =
 '["dashboard", "customer", "customer.transaction", "customer.invoice", "customer.creditinvoice", "customer.addcustomer", "customer.transactions", "customer.search", "customer.history"
 , "vendor", "vendor.transaction", "vendor.invoice", "vendor.debitinvoice", "vendor.addvendor", "vendor.transactions", "vendor.search", "vendor.history", "cash", "cash.recon", "gl", "gl.add", "gl.transactions"
 , "items", "items.part", "items.service", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income", "system", "system.currencies", "system.projects"
-, "system.departments", "system.defaults", "system.user.roles", "system.user.employees", "system.chart", "system.chart.list", "system.chart.add", "system.chart.gifi", "customer.return", "vendor.add", "vendor.
-return", "customer.invoice.return", "customer.add", "system.templates", "system.test"]';
+, "system.departments", "system.defaults", "system.user.roles", "system.user.employees", "system.chart", "system.chart.list", "system.chart.add", "system.chart.gifi", "customer.return", "vendor.add", "vendor.return", "customer.invoice.return", "customer.add", "system.templates", "system.test"]';
 
 helper send_email_central => sub {
     use Email::Sender::Transport::SMTP;
@@ -923,7 +922,13 @@ $central->post(
         run_sql_file( $dataset, $chart_file );
 
         # Check if the gifi file exists before running it
-        my $gifi_file = "${sql_dir}${chart}-gifi.sql";
+        my $gifi_file;
+        if ( $chart =~ /^RMA/ ) {
+            $gifi_file = "${sql_dir}RMA-gifi.sql";
+        }
+        else {
+            $gifi_file = "${sql_dir}${chart}-gifi.sql";
+        }
         if ( -e $gifi_file ) {
             run_sql_file( $dataset, $gifi_file );
         }
@@ -960,28 +965,54 @@ $central->post(
 
 sub run_sql_file {
     my ( $dataset, $sql_file ) = @_;
+
+    # Attempt to connect to the dataset database
     my $dbh = DBI->connect( "dbi:Pg:dbname=$dataset;host=localhost",
         'postgres', '', { AutoCommit => 1 } )
-      or die "Failed to connect to database: $DBI::errstr";
+      or die
+      "Failed to connect to database for dataset '$dataset': $DBI::errstr";
 
-    open( my $fh, '<', $sql_file ) or die "Cannot open file '$sql_file': $!";
+    # Open the SQL file
+    open( my $fh, '<', $sql_file )
+      or die "Cannot open file '$sql_file': $!";
     my $sql = do { local $/; <$fh> };
+    close $fh;
 
+    # Check if the file content is empty
+    if ( !defined($sql) || $sql =~ /^\s*$/ ) {
+        if ( $sql_file !~ /-chart\.sql$/ ) {
+            warn "The SQL file '$sql_file' is empty. Skipping this file.";
+            $dbh->disconnect;
+            return;
+        }
+        else {
+            die
+"The chart SQL file '$sql_file' is empty and cannot be processed.";
+        }
+    }
+
+    # Split SQL content into individual statements
     my @statements = split( /;\s*/, $sql );
     foreach my $statement (@statements) {
         next if $statement =~ /^\s*$/;
+
+        # Execute each statement inside an eval block to catch errors
         eval {
             $dbh->do($statement);
             1;
         } or do {
             my $error = $@ || 'Unknown error';
+
+     # Log a trimmed version of the statement for context (first 100 characters)
+            my $trimmed_statement = substr( $statement, 0, 100 );
             die
-              "Failed to execute SQL statement: $error\nStatement: $statement";
+"Failed to execute SQL statement in file '$sql_file': $error\nStatement (truncated): $trimmed_statement...";
         };
     }
 
     $dbh->disconnect;
 }
+
 $central->delete(
     'dataset' => sub {
         my $c = shift;
