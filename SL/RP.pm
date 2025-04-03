@@ -1683,7 +1683,6 @@ sub reminder {
         $found = 0;
         while (($reminder) = $rth->fetchrow_array) {
           $ref->{level} = substr($reminder, -1);
-          $ref->{level}++;
           push @{ $form->{AG} }, $ref;
           $found = 1;
         }

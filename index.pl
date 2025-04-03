@@ -196,33 +196,13 @@ get '/logo/:client/' => sub {
 ####                       ####
 ###############################
 
-my $neoledger_perms = '[
-    "vendor",                 "vendor.transaction",
-    "vendor.invoice",         "vendor.debitinvoice",
-    "vendor.addvendor",       "vendor.transactions",
-    "vendor.search",          "vendor.history",
-    "cash",                   "cash.recon",
-    "items",                  "items.part",
-    "items.search.parts",     "items.search.services",
-    "reports",                "reports.trial",
-    "reports.income",         "system",
-    "system.currencies",      "system.projects",
-    "system.departments",     "system.defaults",
-    "system.chart",           "system.chart.list",
-    "system.chart.add",       "customer",
-    "customer.transaction",   "customer.invoice",
-    "customer.addcustomer",   "customer.transactions",
-    "customer.search",        "customer.history",
-    "customer.creditinvoice", "items.search.allitems",
-    "items.service",          "gl",
-    "gl.add",                 "gl.transactions",
-    "system.user.templates",  "system.templates",
-    "system.gifi",            "system.chart.gifi",
-    "dashboard",              "customer.add",
-    "customer.return",       
-    "customer.reminder", "vendor.return",
-    "vendor.add"
-]';
+my $neoledger_perms =
+'["dashboard", "customer", "customer.transaction", "customer.invoice", "customer.creditinvoice", "customer.addcustomer", "customer.transactions", "customer.search", "customer.history"
+, "vendor", "vendor.transaction", "vendor.invoice", "vendor.debitinvoice", "vendor.addvendor", "vendor.transactions", "vendor.search", "vendor.history", "cash", "cash.recon", "gl", "gl.add", "gl.transactions"
+, "items", "items.part", "items.service", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income", "system", "system.currencies", "system.projects"
+, "system.departments", "system.defaults", "system.user.roles", "system.user.employees", "system.chart", "system.chart.list", "system.chart.add", "system.chart.gifi", "customer.return", "vendor.add", "vendor.
+return", "customer.invoice.return", "customer.add", "system.templates", "system.test"]';
+
 helper send_email_central => sub {
     use Email::Sender::Transport::SMTP;
     use Email::Stuffer;
@@ -4349,12 +4329,49 @@ $api->get(
 
 $api->get(
     '/arap/reminder/customer' => sub {
-        my $c      = shift;
-        my $client = $c->param('client');
-        my $vc     = $c->param('vc');
+        my $c          = shift;
+        my $client     = $c->param('client');
+        my $department = $c->param('department');
+        my $customer   = $c->param('customer');
         return unless my $form = $c->check_perms("customer.reminder");
         $form->{vc} = 'customer';
+        if ($department) {
+            $form->{department} = "a--$department";
+        }
+        if ($customer) {
+            $form->{customer} = "a--$customer";
+        }
         RP->reminder( $c->slconfig, $form );
+        return $c->render( json => { transactions => $form->{AG} } );
+    }
+);
+$api->post(
+    '/arap/reminder/customer' => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+        return unless my $form = $c->check_perms("customer.reminder");
+        my $dbs   = $c->dbs($client);
+        my $data  = $c->req->json;
+        my $id    = $data->{id};
+        my $level = $data->{level};
+        $form->{vc} = "customer";
+
+# Delete any existing status for the given transaction where the formname begins with "reminder_"
+        my $delete_query = qq|DELETE FROM status
+                              WHERE trans_id = ?
+                              AND formname LIKE 'reminder_%'|;
+        $dbs->query( $delete_query, $id );
+
+        # If a valid level is provided, insert a new status record
+        if ( defined $level && $level =~ /^\d+$/ && $level > 0 ) {
+            my $insert_query = qq|INSERT INTO status (trans_id, formname)
+                                  VALUES (?,?)|;
+            $dbs->query( $insert_query, $id, "reminder$level" );
+        }
+
+        # Commit the transaction if the DB handle supports it
+        $dbs->commit if $dbs->can("commit");
+
         return $c->render( json => { transactions => $form->{AG} } );
     }
 );
@@ -7299,6 +7316,7 @@ sub build_invoice {
         paid        => $form->format_amount( $c->slconfig, $paid ),
         invtotal    => $form->format_amount( $c->slconfig, $total ),
         total       => $form->format_amount( $c->slconfig, $total ),
+        due         => $form->format_amount( $c->slconfig, $total ),
         text_amount => $num2text->num2text($total),
         decimal     => $form->{decimal}  || '00',
         currency    => $form->{currency} || '',
