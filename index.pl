@@ -4610,7 +4610,6 @@ $api->get(
         $c->render( json => $form->{CT} );
     }
 );
-
 $api->get(
     '/arap/transaction/:vc/:id' => sub {
         my $c      = shift;
@@ -4633,15 +4632,44 @@ $api->get(
         $form->create_links( $transaction_type, $c->slconfig, $vc );
         Dumper( warn $form );
 
-        # Amount multiplier for AR transactions
-        my $amount_multiplier = $transaction_type eq 'AR' ? -1 : 1;
+# Calculate total amount before applying multiplier to determine if it's negative
+        my $total_amount   = 0;
+        my @sorted_entries = sort { $a->{id} <=> $b->{id} }
+          @{ $form->{acc_trans}{"${transaction_type}_amount"} };
+
+        foreach my $entry (@sorted_entries) {
+            $total_amount += $entry->{amount};
+        }
+
+        # Determine transaction type (normal, credit_note, debit_note)
+        my $is_negative = ( $total_amount < 0 );
+        my $doc_type;
+        my $amount_multiplier;
+
+        if ( $transaction_type eq 'AR' ) {
+            if ($is_negative) {
+                $doc_type          = "credit_note";
+                $amount_multiplier = 1;
+            }
+            else {
+                $doc_type          = "transaction";
+                $amount_multiplier = -1;
+            }
+        }
+        else {    # AP
+            if ($is_negative) {
+                $doc_type          = "debit_note";
+                $amount_multiplier = 1;
+            }
+            else {
+                $doc_type          = "transaction";
+                $amount_multiplier = 1;
+            }
+        }
 
         my @line_items;
 
         # For each transaction item
-        my @sorted_entries = sort { $a->{id} <=> $b->{id} }
-          @{ $form->{acc_trans}{"${transaction_type}_amount"} };
-
         for my $entry (@sorted_entries) {
             push @line_items,
               {
@@ -4714,6 +4742,7 @@ $api->get(
             $vc_id_field  => $form->{$vc_id_field},
             lineitems     => \@line_items,
             payments      => \@payments,
+            type          => $doc_type,
         };
 
         # Add tax information if present
@@ -4728,6 +4757,7 @@ $api->get(
         $c->render( json => $json_data );
     }
 );
+
 $api->post(
     '/arap/transaction/:vc/:id' => { id => undef } => sub {
         my $c      = shift;
@@ -4739,7 +4769,7 @@ $api->post(
         my $id  = $c->param('id');
         $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
 
-        $form->{type} = 'transaction';
+        $form->{type} = $data->{type};
         $form->{vc}   = $vc eq 'vendor' ? 'vendor' : 'customer';
 
         # Basic transaction details
@@ -4879,7 +4909,7 @@ $api->get(
             IR->retrieve_invoice( $c->slconfig, $form );
             IR->invoice_details( $c->slconfig, $form );
         }
-
+        warn( Dumper $form );
         my $ml = 1;
 
         # Create payments array
@@ -4936,7 +4966,7 @@ $api->get(
                     partnumber  => $_->{partnumber},
                     description => $_->{description},
                     qty         => $_->{qty} * $ml,
-                    oh          => $_->{onhand},
+                    onhand      => $_->{onhand},
                     unit        => $_->{unit},
                     price       => $_->{fxsellprice}
                     ? $_->{fxsellprice}
@@ -5089,6 +5119,14 @@ $api->post(
         $form->{shippingpoint} = $data->{shippingPoint} || '';
         $form->{shipvia}       = $data->{shipVia}       || '';
         $form->{waybill}       = $data->{wayBill}       || '';
+
+        my $shipto;
+        foreach my $item (
+            qw(name address1 address2 city state zipcode country contact phone fax email)
+          )
+        {
+            $form->{"shipto$item"} = $form->{shipto}->{$item};
+        }
 
         # Build line items
         $form->{rowcount} = scalar @{ $data->{lines} || [] };
@@ -7126,6 +7164,10 @@ sub build_invoice {
     my $form = Form->new;
     $form->{id} = $id;
     $form->{vc} = $vc;
+    my $arap = "ar";
+    if ( $form->{vc} eq 'vendor' ) {
+        $arap = "ap";
+    }
 
     my $letterhead = build_letterhead($c);
     $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
@@ -7139,6 +7181,7 @@ sub build_invoice {
         IR->retrieve_invoice( $c->slconfig, $form );
         IR->invoice_details( $c->slconfig, $form );
     }
+    my $dbs = $c->dbs($client);
 
     # Flatten line items into parallel arrays.
     my (
@@ -7207,6 +7250,34 @@ sub build_invoice {
 
         $paid_sum += $payment_amount;
     }
+
+    my $credit_remaining = $dbs->query(
+        qq|SELECT SUM(a.amount - a.paid)
+          FROM $arap a
+          WHERE a.amount != a.paid
+          AND $form->{vc}_id = $form->{"$form->{vc}_id"}|
+    )->hash;
+    my $credit        = -$credit_remaining->{sum};
+    my $credit_before = $credit + $subtotal;
+
+    # small epsilon value to handle floating-point precision issues
+    my $epsilon = 1e-10;
+    if ( abs($credit) < $epsilon ) {
+        $credit = 0;
+    }
+    if ( abs($credit_before) < $epsilon ) {
+        $credit_before = 0;
+    }
+
+    # Format the credit values
+    my $display_credit = $form->format_amount( $c->slconfig, abs $credit );
+    $display_credit = "($display_credit)" if $credit > 0;
+    $display_credit = "0"                 if $credit == 0;
+
+    my $display_credit_before =
+      $form->format_amount( $c->slconfig, abs $credit_before );
+    $display_credit_before = "($display_credit_before)" if $credit_before > 0;
+    $display_credit_before = "0"                        if $credit_before == 0;
 
     my $paid  = $paid_sum;
     my $total = ( $subtotal + $taxtotal ) - $paid;
@@ -7343,16 +7414,23 @@ sub build_invoice {
         taxincluded   => $form->{taxincluded}   || 0,
 
         # Totals
-        subtotal    => $form->format_amount( $c->slconfig, $subtotal ),
-        paid        => $form->format_amount( $c->slconfig, $paid ),
-        invtotal    => $form->format_amount( $c->slconfig, $total ),
-        total       => $form->format_amount( $c->slconfig, $total ),
-        due         => $form->format_amount( $c->slconfig, $total ),
-        text_amount => $num2text->num2text($total),
-        decimal     => $form->{decimal}  || '00',
-        currency    => $form->{currency} || '',
-        notes       => $form->{notes}    || '',
-        terms       => $form->{terms}    || '0',
+        subtotal => $form->format_amount( $c->slconfig, $subtotal )
+        ,                                           # invoice total
+        paid     => $form->format_amount( $c->slconfig, $paid ),   # paid amount
+        invtotal => $form->format_amount( $c->slconfig, $total )
+        ,    # invoice total - paid
+        total => $form->format_amount( $c->slconfig, $total )
+        ,    # invoice total - paid
+        credit                => $credit,           # total credit after invoice
+        display_credit        => $display_credit,
+        display_credit_before => $display_credit_before,
+        credit_before         => $credit_before,   # total credit before invoice
+        due                   => $form->format_amount( $c->slconfig, $total ),
+        text_amount           => $num2text->num2text($total),
+        decimal               => $form->{decimal}  || '00',
+        currency              => $form->{currency} || '',
+        notes                 => $form->{notes}    || '',
+        terms                 => $form->{terms}    || '0',
 
         # Letterhead
         company      => $letterhead->{company}      || '',

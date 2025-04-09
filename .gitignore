@@ -3,5 +3,6 @@
 /test/*
 /temp/*
 /spool/*
+/images/*
 hypnotoad.pid
 .env
