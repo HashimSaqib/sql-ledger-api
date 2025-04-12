@@ -4,5 +4,6 @@
 /temp/*
 /spool/*
 /images/*
+/files/*
 hypnotoad.pid
 .env

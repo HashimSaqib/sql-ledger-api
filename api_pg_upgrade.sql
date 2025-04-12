@@ -1,46 +1,23 @@
--- Upgrade script for the database schema
-
--- Table: public.acsapirole
-CREATE TABLE IF NOT EXISTS public.acsapirole (
+CREATE TABLE files (
     id SERIAL PRIMARY KEY,
-    description TEXT,
-    acs JSONB,
-    rn SMALLINT
+    module VARCHAR(50) NOT NULL,          -- ar, ap, gl
+    name TEXT NOT NULL,                   -- system-generated file name
+    extension VARCHAR(10),           -- File extension (.pdf, .jpg)
+    location VARCHAR(20) NOT NULL,        -- E.g., 'local', 'google_drive', 'dropbox'
+    path TEXT NOT NULL,           -- Relative path or external storage key/ID
+    link TEXT,                          -- direct URL to access the file, if applicable
+    upload_timestamp TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+    reference_id INTEGER
 );
 
--- Table: public.login
-CREATE TABLE IF NOT EXISTS public.login (
+CREATE TABLE connections (
     id SERIAL PRIMARY KEY,
-    employeeid INTEGER,
-    password TEXT NOT NULL,
-    created TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    lastlogin TIMESTAMP WITHOUT TIME ZONE,
-    admin BOOLEAN DEFAULT FALSE,
-    acsrole_id INTEGER,
-    CONSTRAINT login_acsrole_fk FOREIGN KEY (acsrole_id) REFERENCES public.acsapirole(id)
+    type VARCHAR(50) NOT NULL,          -- 'google_drive', 'dropbox'
+    access_token TEXT NOT NULL,         -- Short-lived access token (encrypted)
+    refresh_token TEXT,                 -- Long-lived refresh token (encrypted)
+    token_expires TIMESTAMPTZ,          -- Expiration time for the access token
+    status VARCHAR(20),  -- active, error
+    error TEXT,                         -- any error messages
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
-
--- Table: public.session
-CREATE TABLE IF NOT EXISTS public.session (
-    id SERIAL PRIMARY KEY,
-    employeeid INTEGER,
-    sessionkey TEXT NOT NULL,
-    created TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
--- Table: public.files
-CREATE TABLE IF NOT EXISTS public.files (
-    id SERIAL PRIMARY KEY,
-    filename TEXT,
-    timestamp TIMESTAMP WITH TIME ZONE,
-    processed BOOLEAN DEFAULT FALSE,
-    reference TEXT,
-    module VARCHAR(2),
-    link TEXT
-);
-
--- Indexes
-CREATE UNIQUE INDEX IF NOT EXISTS login_pkey ON public.login (id);
-CREATE UNIQUE INDEX IF NOT EXISTS session_pkey ON public.session (id);
-CREATE UNIQUE INDEX IF NOT EXISTS files_pkey ON public.files (id);
-CREATE UNIQUE INDEX IF NOT EXISTS acsapirole_pkey ON public.acsapirole (id);

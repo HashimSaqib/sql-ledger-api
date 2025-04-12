@@ -32,6 +32,7 @@ use SL::RC;
 use SL::IC;
 use SL::PE;
 use SL::HR;
+use SL::FM;
 use DateTime;
 use DateTime::Format::ISO8601;
 use Date::Parse;
@@ -49,6 +50,7 @@ Dotenv->load;
 app->config( hypnotoad => { listen => ['http://*:3000'] } );
 my $base_url  = "https://api.neo-ledger.com/";
 my $front_end = "https://app.neo-ledger.com";
+$front_end = "http://localhost:9000";
 
 my %myconfig = (
     dateformat   => 'yyyy/mm/dd',
@@ -713,8 +715,25 @@ $central->get(
                      WHERE dataset_id = ?",
                     $dataset->{id}
                 )->hashes;
-                $dataset->{roles} = $roles;
-                $dataset->{admin} = 1;
+                $dataset->{roles}            = $roles;
+                $dataset->{admin}            = 1;
+                $dataset->{DROPBOX_KEY}      = $ENV{DROPBOX_KEY};
+                $dataset->{GOOGLE_CLIENT_ID} = $ENV{GOOGLE_CLIENT_ID};
+                my $client_dbs = $c->dbs( $dataset->{db_name} );
+
+                my $connections;
+                eval {
+                    $connections = $client_dbs->query(
+                        "SELECT type, status, error FROM connections")->hashes;
+                    1
+                      ; # Indicate success so we don't jump into the 'or do' block
+                } or do {
+
+                  # If the query fails for any reason (e.g. table doesn't exist)
+                    $connections = [];
+                };
+
+                $dataset->{connections} = $connections;
             }
         }
 
@@ -2439,6 +2458,8 @@ $api->get(
             }
         }
 
+        my $files = FM->get_files( $dbs, $c, $form );
+
         my $response = {
             id            => $form->{id},
             reference     => $form->{reference},
@@ -2454,6 +2475,7 @@ $api->get(
             exchangeRate  => $form->{exchangerate},
             employeeId    => $form->{employee_id},
             lines         => \@lines,
+            files         => $files
         };
 
         $c->render( status => 200, json => $response );
@@ -2465,11 +2487,19 @@ $api->post(
         my $c = shift;
         return unless my $form = $c->check_perms("gl.add");
         my $client = $c->param('client');
-        my $data   = $c->req->json;
+
+        my $data;
+        my $content_type = $c->req->headers->content_type || '';
+
+        if ( $content_type =~ m!multipart/form-data!i ) {
+            $data = handle_multipart_request($c);
+        }
+        else {
+            $data = $c->req->json;
+        }
+
         $data->{form} = $form;
-
         my $dbs = $c->dbs($client);
-
         api_gl_transaction( $c, $dbs, $data );
     }
 );
@@ -2479,14 +2509,21 @@ $api->put(
         my $c = shift;
         return unless my $form = $c->check_perms("gl.add");
         my $client = $c->param('client');
-        my $id;
-        $id = $c->param('id');
-        my $data = $c->req->json;
-        $data->{form} = $form;
+        my $id     = $c->param('id');
 
+        my $data;
+        my $content_type = $c->req->headers->content_type || '';
+
+        if ( $content_type =~ m!multipart/form-data!i ) {
+            $data = handle_multipart_request($c);
+        }
+        else {
+            $data = $c->req->json;
+        }
+
+        $data->{form} = $form;
         my $dbs = $c->dbs($client);
 
-        # Check for existing id in the GL table if id is provided
         if ($id) {
             my $existing_entry =
               $dbs->query( "SELECT id FROM gl WHERE id = ?", $id )->hash;
@@ -2503,7 +2540,36 @@ $api->put(
     }
 );
 
-sub api_gl_transaction () {
+# Function to handle multipart form data
+sub handle_multipart_request {
+    my ($c) = @_;
+
+    my $params = $c->req->params->to_hash;
+    my $data   = {};
+
+    # Copy all parameters to data hash (except files)
+    foreach my $key ( keys %$params ) {
+        next if $key eq 'files';    # Skip file field, handle separately
+
+        if ( defined $params->{$key} && $params->{$key} ne '' ) {
+            $data->{$key} = $params->{$key};
+        }
+    }
+
+    # Parse lines JSON if provided
+    if ( defined $params->{lines} && $params->{lines} ne '' ) {
+        $data->{lines} = decode_json( $params->{lines} );
+    }
+
+    # Handle file uploads if present
+    if ( $c->param('files') ) {
+        $data->{files} = $c->req->every_upload('files');
+    }
+
+    return $data;
+}
+
+sub api_gl_transaction {
     my ( $c, $dbs, $data, $id ) = @_;
 
     # Check if 'transdate' is present in the data
@@ -2640,7 +2706,11 @@ sub api_gl_transaction () {
     # Call the function to add the transaction
     $id = GL->post_transaction( $c->slconfig, $form );
 
-    warn $c->dumper($form);
+    if ( $data->{files} && ref $data->{files} eq 'ARRAY' ) {
+        $form->{files}  = $data->{files};
+        $form->{client} = $c->param('client');
+        FM->upload_files( $dbs, $c, $form, 'gl' );
+    }
 
     # Convert the Form object back into a JSON-like structure
     my $response_json = {
@@ -2656,6 +2726,11 @@ sub api_gl_transaction () {
         department   => $form->{department},
         lines        => []
     };
+
+    # Add file information to response if files were uploaded
+    if ( $form->{files} && ref $form->{files} eq 'ARRAY' ) {
+        $response_json->{files} = $form->{files};
+    }
 
     for my $i ( 1 .. $form->{rowcount} ) {
 
@@ -2713,6 +2788,7 @@ $api->delete(
 
         # Delete the transaction
         GL->delete_transaction( $c->slconfig, $form );
+        FM->delete_files( $dbs, $c, $form );
 
         # Delete the entry from the gl table
         $dbs->query( "DELETE FROM gl WHERE id = ?", $id );
@@ -7836,6 +7912,170 @@ $api->get(
         $c->res->headers->content_disposition(
             "attachment; filename=\"$transaction_data->{invnumber}.pdf\"");
         $c->render( data => $pdf_content );
+    }
+);
+
+#############################
+####                     ####
+####   File Management   ####
+####                     ####
+#############################
+$api->post(
+    '/connection/exchange-token' => sub {
+        my $c = shift;
+
+# Extract the state from the query parameters (format: "clientName|serviceType")
+        my $state = $c->param('state');
+        unless ($state) {
+            return $c->render(
+                json => { success => 0, message => 'State parameter missing' },
+                status => 400
+            );
+        }
+        my ( $client, $service_type ) = split( /\|/, $state );
+        unless ( $client && $service_type ) {
+            return $c->render(
+                json =>
+                  { success => 0, message => 'Invalid state parameter format' },
+                status => 400
+            );
+        }
+
+        # Get the authorization code from the JSON request body
+        my $data = $c->req->json || {};
+        my $code = $data->{code};
+        unless ($code) {
+            return $c->render(
+                json => {
+                    success => 0,
+                    message =>
+                      'Authorization code missing or user cancelled the request'
+                },
+                status => 400
+            );
+        }
+
+        my $redirect_uri = "$front_end/connection"
+          ;    # Make sure $front_end is appropriately defined
+        my $ua = Mojo::UserAgent->new;
+
+        # Define service configurations
+        my %services = (
+            dropbox => {
+                url           => 'https://api.dropboxapi.com/oauth2/token',
+                client_id     => $ENV{DROPBOX_KEY},
+                client_secret => $ENV{DROPBOX_SECRET},
+                type          => 'dropbox',
+            },
+            google_drive => {
+                url           => 'https://oauth2.googleapis.com/token',
+                client_id     => $ENV{GOOGLE_CLIENT_ID},
+                client_secret => $ENV{GOOGLE_SECRET},
+                type          => 'google_drive',
+            },
+            drive => {
+
+                # Alias for google_drive support
+                url           => 'https://oauth2.googleapis.com/token',
+                client_id     => $ENV{GOOGLE_CLIENT_ID},
+                client_secret => $ENV{GOOGLE_SECRET},
+                type          => 'google_drive',
+            },
+        );
+
+        # Check for unsupported service types
+        my $service = $services{$service_type};
+        unless ($service) {
+            return $c->render(
+                json => { success => 0, message => 'Unsupported service type' },
+                status => 400
+            );
+        }
+
+        # Perform token exchange API request
+        my $res = $ua->post(
+            $service->{url} => form => {
+                code          => $code,
+                grant_type    => 'authorization_code',
+                client_id     => $service->{client_id},
+                client_secret => $service->{client_secret},
+                redirect_uri  => $redirect_uri,
+            }
+        )->result;
+
+        if ( $res->is_success ) {
+            my $token_data   = $res->json;
+            my $access_token = $token_data->{access_token};
+            my $refresh_token =
+              defined $token_data->{refresh_token}
+              ? $token_data->{refresh_token}
+              : '';
+            my $token_expires =
+              $token_data->{expires_in}
+              ? time() + $token_data->{expires_in}
+              : time();
+
+            # Update the database connection
+            my $dbs = $c->dbs($client);
+            $dbs->query("DELETE FROM connections");
+            $dbs->query(
+                q{
+                INSERT INTO connections
+                  (type, access_token, refresh_token, token_expires, status, created_at, updated_at)
+                VALUES (?, ?, ?, to_timestamp(?), ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            },
+                $service->{type}, $access_token, $refresh_token,
+                $token_expires,   'active'
+            );
+
+            return $c->render(
+                json => {
+                    success => 1,
+                    message => ucfirst( $service->{type} )
+                      . ' successfully connected'
+                }
+            );
+        }
+        else {
+            my $error_details = $res->json || { error => $res->message };
+            return $c->render(
+                json => {
+                    success => 0,
+                    message =>
+                      "Error retrieving access token from $service_type",
+                    error => $error_details,
+                },
+                status => 500
+            );
+        }
+    }
+);
+
+$api->delete(
+    "/files/:module/:id" => sub {
+        my $c        = shift;
+        my $module   = $c->param('module');
+        my $client   = $c->param('client');
+        my $dbs      = $c->dbs($client);
+        my $form     = new Form;
+        my $filename = $c->param('id');
+        $form->{filename} = $filename;
+
+        # Call your deletion subroutine (e.g., from FM module)
+        my $result = FM->delete_file( $dbs, $c, $form );
+
+        if ( $result->{success} ) {
+
+            # Return 204 No Content for a successful deletion.
+            return $c->render( status => 204, text => '' );
+        }
+        else {
+            # Return error message with a proper status if needed.
+            return $c->render(
+                status => 500,
+                json   => { error => $result->{error} }
+            );
+        }
     }
 );
 
