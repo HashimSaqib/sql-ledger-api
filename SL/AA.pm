@@ -1027,9 +1027,40 @@ sub transactions {
 
     $ref->{netamount} = $ref->{amount} - $ref->{tax};
 
+    # In case we're filtering for outstanding transactions, skip those fully paid.
     if ($form->{outstanding}) {
       next if $form->round_amount($ref->{amount}, $form->{precision}) == $form->round_amount($ref->{paid}, $form->{precision});
     }
+
+    # --- Begin New Status Calculation ---
+    # Determine the current local date in YYYY-MM-DD format.
+    my ($sec, $min, $hour, $mday, $mon, $year) = localtime();
+    $year += 1900;
+    $mon++;
+    my $today = sprintf("%04d-%02d-%02d", $year, $mon, $mday);
+    
+    my $amount_rounded = $form->round_amount($ref->{amount}, $form->{precision});
+    my $paid_rounded   = $form->round_amount($ref->{paid},   $form->{precision});
+    
+    if ($paid_rounded > $amount_rounded) {
+      $ref->{status} = "over_paid";
+    } elsif ($paid_rounded == $amount_rounded) {
+      $ref->{status} = "paid";
+    } else {
+      # Not fully paid; check due date conditions.
+      if ($ref->{duedate}) {
+        if ($ref->{duedate} eq $today) {
+          $ref->{status} = "due_today";
+        } elsif ($ref->{duedate} lt $today) {
+          $ref->{status} = "over_due";
+        } else {
+          $ref->{status} = "open";
+        }
+      } else {
+        $ref->{status} = "open";
+      }
+    }
+    # --- End New Status Calculation ---
 
     for (qw(address1 address2)) { $ref->{address} .= "$ref->{$_} " }
     
@@ -1058,6 +1089,7 @@ sub transactions {
   $dbh->disconnect;
 
 }
+
 
 
 # this is also used in IS, IR to retrieve the name
