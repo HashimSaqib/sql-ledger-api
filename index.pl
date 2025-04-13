@@ -2564,6 +2564,9 @@ sub handle_multipart_request {
     if ( defined $params->{lines} && $params->{lines} ne '' ) {
         $data->{lines} = decode_json( $params->{lines} );
     }
+    if ( defined $params->{payments} && $params->{payments} ne '' ) {
+        $data->{payments} = decode_json( $params->{payments} );
+    }
 
     # Handle file uploads if present
     if ( $c->param('files') ) {
@@ -5143,9 +5146,18 @@ $api->post(
     '/arap/invoice/:vc/:id' => { id => undef } => sub {
         my $c      = shift;
         my $client = $c->param('client');
-        my $data   = $c->req->json;
         my $id     = $c->param('id');
         my $vc     = $c->param('vc');
+
+        my $data;
+        my $content_type = $c->req->headers->content_type || '';
+
+        if ( $content_type =~ m!multipart/form-data!i ) {
+            $data = handle_multipart_request($c);
+        }
+        else {
+            $data = $c->req->json;
+        }
 
         warn Dumper($data);
 
@@ -8006,7 +8018,6 @@ $api->post(
                 redirect_uri  => $redirect_uri,
             }
         )->result;
-
         if ( $res->is_success ) {
             my $token_data   = $res->json;
             my $access_token = $token_data->{access_token};
@@ -8014,20 +8025,22 @@ $api->post(
               defined $token_data->{refresh_token}
               ? $token_data->{refresh_token}
               : '';
-            my $token_expires =
+            my $token_expires_epoch =
               $token_data->{expires_in}
               ? time() + $token_data->{expires_in}
               : time();
+            my $token_expires =
+              strftime( '%Y-%m-%d %H:%M:%S', localtime($token_expires_epoch) );
 
-            # Update the database connection
+  # Update the database connection using the formatted string without conversion
             my $dbs = $c->dbs($client);
             $dbs->query("DELETE FROM connections");
             $dbs->query(
                 q{
-                INSERT INTO connections
-                  (type, access_token, refresh_token, token_expires, status, created_at, updated_at)
-                VALUES (?, ?, ?, to_timestamp(?), ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-            },
+            INSERT INTO connections
+              (type, access_token, refresh_token, token_expires, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        },
                 $service->{type}, $access_token, $refresh_token,
                 $token_expires,   'active'
             );
