@@ -815,7 +815,11 @@ sub _get_date_parts {
 sub _generate_unique_filename {
     my ($original_filename) = @_;
     my $unique_filename = time() . '_' . $original_filename;
-    $unique_filename =~ s/[^a-zA-Z0-9_.-]/_/g;
+
+    $unique_filename = lc($unique_filename);
+
+    # Replace any character that is not alphanumeric, underscore, dot, or dash.
+    $unique_filename =~ s/[^a-z0-9_.-]/_/g;
     return $unique_filename;
 }
 
@@ -886,7 +890,6 @@ sub _update_connection_status {
 
 sub get_files {
     my ( $self, $dbs, $c, $data ) = @_;
-    my $form = $c->{form};
 
     # Get all the file rows for the given reference id
     my @files =
@@ -900,10 +903,12 @@ sub get_files {
 
         # For local files, construct URL from base_url
         if ( $file->{location} eq 'local' ) {
-            $link = $form->{base_url} . $file->{path};
+            $link =
+"$data->{api_url}client/$data->{client}/files/$file->{module}/$file->{id}";
+            warn( $data->{api_url} );
+            warn($link);
         }
         else {
-            # Otherwise, use the link provided in the database
             $link = $file->{link};
         }
 

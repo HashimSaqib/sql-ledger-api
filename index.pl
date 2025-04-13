@@ -50,7 +50,8 @@ Dotenv->load;
 app->config( hypnotoad => { listen => ['http://*:3000'] } );
 my $base_url  = "https://api.neo-ledger.com/";
 my $front_end = "https://app.neo-ledger.com";
-$front_end = "http://localhost:9000";
+
+#$front_end = "http://localhost:9000";
 
 my %myconfig = (
     dateformat   => 'yyyy/mm/dd',
@@ -1820,6 +1821,9 @@ helper check_perms => sub {
         $profile->{profile_id}, $dataset->{id}
     )->hash;
     my $form = new Form;
+    $form->{api_url}      = $base_url;
+    $form->{frontend_url} = $front_end;
+    $form->{client}       = $c->param('client');
     return $form if $admin;
 
     # Fetch all roles for the given dataset
@@ -8079,4 +8083,27 @@ $api->delete(
     }
 );
 
+$api->get(
+    '/files/:module/:file' => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+        my $module = $c->param('module');
+        my $file   = $c->param('file');
+
+        warn("Hello 123");
+        my $dbs  = $c->dbs($client);
+        my $path = $dbs->query( "SELECT path FROM files WHERE id = ?", $file )
+          ->hash->{path};
+
+        my $path = $c->app->home->rel_file($path);
+
+        # Check if the file exists, and serve it if it does
+        if ( -e $path ) {
+            return $c->reply->file($path);
+        }
+        else {
+            return $c->reply->not_found;
+        }
+    }
+);
 app->start;
