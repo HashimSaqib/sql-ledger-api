@@ -519,6 +519,50 @@ sub get_files {
     return \@result;
 }
 
+sub get_files_for_transactions {
+    my ( $self, $dbs, $c, $data, $transactions ) = @_;
+
+    return [] unless @$transactions;
+
+    # Get all transaction IDs
+    my @transaction_ids = map { $_->{id} } @$transactions;
+
+    # Get all files for these transactions in a single query
+    my @files = $dbs->query(
+        "SELECT * FROM files WHERE reference_id IN ("
+          . join( ',', ('?') x @transaction_ids ) . ")",
+        @transaction_ids
+    )->hashes;
+
+    # Create a hash to group files by transaction ID
+    my %files_by_transaction;
+    foreach my $file (@files) {
+        my $link;
+        if ( $file->{location} eq 'local' ) {
+            $link =
+"$data->{api_url}client/$data->{client}/files/$file->{module}/$file->{id}";
+        }
+        else {
+            $link = $file->{link};
+        }
+
+        push @{ $files_by_transaction{ $file->{reference_id} } },
+          {
+            name => $file->{name},
+            link => $link,
+            id   => $file->{id}
+          };
+    }
+
+    # Add files array to each transaction
+    foreach my $transaction (@$transactions) {
+        $transaction->{files} =
+          $files_by_transaction{ $transaction->{id} } || [];
+    }
+
+    return $transactions;
+}
+
 sub delete_files {
     my ( $self, $dbs, $c, $data ) = @_;
 

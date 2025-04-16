@@ -2161,7 +2161,7 @@ $api->post(
 #         my $acs_id   = $form->{acsrole_id};
 #         my $password = $form->{password};
 
-#         # Remove these from the form so they aren’t saved in the employee record
+#         # Remove these from the form so they aren't saved in the employee record
 #         $form->{password}   = undef;
 #         $form->{acsrole_id} = undef;
 
@@ -2256,6 +2256,7 @@ $api->get(
         my $params = $c->req->params->to_hash;
         my $client = $c->param('client');
 
+        my $dbs = $c->dbs($client);
         for ( keys %$params ) { $form->{$_} = $params->{$_} if $params->{$_} }
         $form->{category} = 'X';
         GL->transactions( $c->slconfig, $form );
@@ -2270,8 +2271,6 @@ $api->get(
                 json   => { message => "No transactions found" },
             );
         }
-
-        # Assuming $form->{GL} is an array reference with hash references
         foreach my $transaction ( @{ $form->{GL} } ) {
             my $full_address = join( ' ',
                 $form->{address1} // '',
@@ -2279,7 +2278,20 @@ $api->get(
                 $form->{city}     // '',
                 $form->{state}    // '',
                 $form->{country}  // '' );
-
+        }
+        eval {
+            # Fetch files for all transactions in a single operation
+            FM->get_files_for_transactions(
+                $dbs, $c,
+                {
+                    api_url => $base_url,
+                    client  => $client
+                },
+                $form->{GL}
+            );
+        };
+        if ($@) {
+            $c->app->log->error("Error getting files for transactions: $@");
         }
 
         $c->render( status => 200, json => $form->{GL} );
@@ -2570,10 +2582,9 @@ sub handle_multipart_request {
     if ( defined $params->{taxes} && $params->{taxes} ne '' ) {
         $data->{taxes} = decode_json( $params->{taxes} );
     }
-       if ( defined $params->{shipto} && $params->{shipto} ne '' ) {
+    if ( defined $params->{shipto} && $params->{shipto} ne '' ) {
         $data->{shipto} = decode_json( $params->{shipto} );
     }
-
 
     # Handle file uploads if present
     if ( $c->param('files') ) {
@@ -4437,6 +4448,21 @@ $api->get(
             $totals->{paid}        += $transaction->{paid}        || 0;
             $totals->{paymentdiff} += $transaction->{paymentdiff} || 0;
         }
+        my $dbs = $c->dbs($client);
+        eval {
+            # Fetch files for all transactions in a single operation
+            FM->get_files_for_transactions(
+                $dbs, $c,
+                {
+                    api_url => $base_url,
+                    client  => $client
+                },
+                $form->{transactions}
+            );
+        };
+        if ($@) {
+            $c->app->log->error("Error getting files for transactions: $@");
+        }
 
         # Return both transactions and totals
         return $c->render(
@@ -5142,7 +5168,7 @@ $api->get(
           $vc eq 'vendor'
           ? ( 'vendornumber', 'vendor_id' )
           : ( 'customernumber', 'customer_id' );
-          
+
         my $files = FM->get_files( $dbs, $c, $form );
 
         # Build JSON response
@@ -5170,8 +5196,8 @@ $api->get(
             id            => $form->{id},
             department_id => $form->{department_id},
             files         => $files,
-            lines    => \@lines,
-            payments => \@payments,
+            lines         => \@lines,
+            payments      => \@payments,
         };
 
         if (@taxes) {
@@ -5249,7 +5275,7 @@ $api->post(
         }
         else {
             # AP fields
-            $form->{AP} = $data->{recordAccount};
+            $form->{AP}        = $data->{recordAccount};
             $form->{vendor_id} = $data->{selectedVendor}->{id};
             $form->{vendor}    = $data->{selectedVendor}->{name};
         }
@@ -5349,7 +5375,6 @@ $api->post(
             $form->{client} = $c->param('client');
             FM->upload_files( $dbs, $c, $form, $vc );
         }
-
 
         # Return the newly posted or updated invoice ID
         $c->render( json => { id => $form->{id} } );
@@ -5461,6 +5486,20 @@ $api->get(
             $response->{transactions} = \@combined_transactions;
             $response->{accno}        = $heading_row->{accno};
             $response->{description}  = $heading_row->{description};
+        }
+        eval {
+            # Fetch files for all transactions in a single operation
+            FM->get_files_for_transactions(
+                $dbs, $c,
+                {
+                    api_url => $base_url,
+                    client  => $client
+                },
+                $response->{transactions}
+            );
+        };
+        if ($@) {
+            $c->app->log->error("Error getting files for transactions: $@");
         }
 
         $c->render( json => $response );
@@ -7098,6 +7137,7 @@ $api->get(
         my $category =
           $dbs->query( "SELECT category FROM chart WHERE accno = ?",
             $form->{accno} )->list;
+
         $c->render(
             status => 200,
             json   => {
