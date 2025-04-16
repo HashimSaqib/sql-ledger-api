@@ -2567,6 +2567,9 @@ sub handle_multipart_request {
     if ( defined $params->{payments} && $params->{payments} ne '' ) {
         $data->{payments} = decode_json( $params->{payments} );
     }
+    if ( defined $params->{taxes} && $params->{taxes} ne '' ) {
+        $data->{taxes} = decode_json( $params->{taxes} );
+    }
 
     # Handle file uploads if present
     if ( $c->param('files') ) {
@@ -4464,23 +4467,39 @@ $api->post(
         my $c      = shift;
         my $client = $c->param('client');
         return unless my $form = $c->check_perms("customer.reminder");
-        my $dbs   = $c->dbs($client);
-        my $data  = $c->req->json;
-        my $id    = $data->{id};
-        my $level = $data->{level};
+        my $dbs  = $c->dbs($client);
+        my $data = $c->req->json;
+
+        # Expect an array reference for the items
+        my $items = $data->{items};
+        unless ( ref $items eq 'ARRAY' ) {
+            return $c->render(
+                json => { error => "Invalid data: expected an array of items" }
+            );
+        }
+
         $form->{vc} = "customer";
 
-# Delete any existing status for the given transaction where the formname begins with "reminder_"
-        my $delete_query = qq|DELETE FROM status
-                              WHERE trans_id = ?
-                              AND formname LIKE 'reminder_%'|;
-        $dbs->query( $delete_query, $id );
+        foreach my $item (@$items) {
+            my $id    = $item->{id};
+            my $level = $item->{level};
 
-        # If a valid level is provided, insert a new status record
-        if ( defined $level && $level =~ /^\d+$/ && $level > 0 ) {
-            my $insert_query = qq|INSERT INTO status (trans_id, formname)
-                                  VALUES (?,?)|;
-            $dbs->query( $insert_query, $id, "reminder$level" );
+# Delete any existing status for the given transaction where the formname begins with "reminder_"
+            my $delete_query = qq|
+                DELETE FROM status
+                WHERE trans_id = ?
+                AND formname LIKE 'reminder_%'
+            |;
+            $dbs->query( $delete_query, $id );
+
+            # If a valid level is provided, insert a new status record
+            if ( defined $level && $level =~ /^\d+$/ && $level > 0 ) {
+                my $insert_query = qq|
+                    INSERT INTO status (trans_id, formname)
+                    VALUES (?, ?)
+                |;
+                $dbs->query( $insert_query, $id, "reminder$level" );
+            }
         }
 
         # Commit the transaction if the DB handle supports it
@@ -4845,8 +4864,16 @@ $api->post(
     '/arap/transaction/:vc/:id' => { id => undef } => sub {
         my $c      = shift;
         my $client = $c->param('client');
-        my $data   = $c->req->json;
-        my $vc     = $c->param('vc');
+        my $data;
+        my $content_type = $c->req->headers->content_type || '';
+        if ( $content_type =~ m!multipart/form-data!i ) {
+            $data = handle_multipart_request($c);
+        }
+        else {
+            $data = $c->req->json;
+        }
+
+        my $vc = $c->param('vc');
         return unless my $form = $c->check_perms("$vc.transaction");
         my $dbs = $c->dbs($client);
         my $id  = $c->param('id');
@@ -4866,14 +4893,14 @@ $api->post(
 
         # Handle vendor/customer specific fields
         if ( $vc eq 'vendor' ) {
-            $form->{vendor_id} = $data->{selectedVendor}->{id};
-            $form->{vendor}    = $data->{selectedVendor}->{name};
-            $form->{AP}        = $data->{recordAccount}->{accno};
+            $form->{vendor_id} = $data->{vendor_id};
+            $form->{vendor}    = $data->{vendor};
+            $form->{AP}        = $data->{recordAccount};
         }
         else {
-            $form->{customer_id} = $data->{selectedCustomer}->{id};
-            $form->{customer}    = $data->{selectedCustomer}->{name};
-            $form->{AR}          = $data->{recordAccount}->{accno};
+            $form->{customer_id} = $data->{customer_id};
+            $form->{customer}    = $data->{customer};
+            $form->{AR}          = $data->{recordAccount};
         }
 
         # Currency and other details
@@ -5137,6 +5164,14 @@ $api->get(
             $json_data->{taxincluded} = $form->{taxincluded};
         }
 
+        my $shipto;
+        foreach my $item (
+            qw(name address1 address2 city state zipcode country contact phone fax email)
+          )
+        {
+            $json_data->{shipto}->{$item} = $form->{"shipto$item"};
+        }
+
         warn Dumper($json_data);
 
         $c->render( json => $json_data );
@@ -5217,7 +5252,7 @@ $api->post(
             qw(name address1 address2 city state zipcode country contact phone fax email)
           )
         {
-            $form->{"shipto$item"} = $form->{shipto}->{$item};
+            $form->{"shipto$item"} = $data->{shipto}->{$item};
         }
 
         # Build line items
@@ -7351,6 +7386,8 @@ sub build_invoice {
     )->hash;
     my $credit        = -$credit_remaining->{sum};
     my $credit_before = $credit + $subtotal;
+    $credit        = sprintf( "%.2f", $credit );
+    $credit_before = sprintf( "%.2f", $credit_before );
 
     # small epsilon value to handle floating-point precision issues
     my $epsilon = 1e-10;
@@ -7359,6 +7396,12 @@ sub build_invoice {
     }
     if ( abs($credit_before) < $epsilon ) {
         $credit_before = 0;
+    }
+
+    sub round {
+        my ( $number, $precision ) = @_;
+        my $factor = 10**$precision;
+        return int( $number * $factor + 0.5 ) / $factor;
     }
 
     # Format the credit values
@@ -7377,8 +7420,6 @@ sub build_invoice {
     # Grab vendor/customer info
     my $vc_data = build_vc( $c, $id, $vc );
 
-    # Attempt to get one row from "shipto"
-    my $dbs = $c->dbs($client);
     my $shipto_row =
       $dbs->query( "SELECT * FROM shipto WHERE trans_id = ? LIMIT 1", $id )
       ->hash;
