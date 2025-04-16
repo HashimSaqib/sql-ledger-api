@@ -2570,6 +2570,10 @@ sub handle_multipart_request {
     if ( defined $params->{taxes} && $params->{taxes} ne '' ) {
         $data->{taxes} = decode_json( $params->{taxes} );
     }
+       if ( defined $params->{shipto} && $params->{shipto} ne '' ) {
+        $data->{shipto} = decode_json( $params->{shipto} );
+    }
+
 
     # Handle file uploads if present
     if ( $c->param('files') ) {
@@ -4822,6 +4826,8 @@ $api->get(
             } @{ $form->{acc_trans}{"${transaction_type}_tax"} };
         }
 
+        my $files = FM->get_files( $dbs, $c, $form );
+
         # Create the transformed data structure
         my $json_data = {
             $vc_field     => $form->{$vc_field},
@@ -4845,6 +4851,7 @@ $api->get(
             lineitems     => \@line_items,
             payments      => \@payments,
             type          => $doc_type,
+            files         => $files,
         };
 
         # Add tax information if present
@@ -4972,6 +4979,12 @@ $api->post(
         warn( Dumper($form) );
 
         AA->post_transaction( $c->slconfig, $form );
+
+        if ( $data->{files} && ref $data->{files} eq 'ARRAY' ) {
+            $form->{files}  = $data->{files};
+            $form->{client} = $c->param('client');
+            FM->upload_files( $dbs, $c, $form, $vc );
+        }
 
         $c->render( json => { id => $form->{id} } );
     }
@@ -5129,6 +5142,8 @@ $api->get(
           $vc eq 'vendor'
           ? ( 'vendornumber', 'vendor_id' )
           : ( 'customernumber', 'customer_id' );
+          
+        my $files = FM->get_files( $dbs, $c, $form );
 
         # Build JSON response
         my $json_data = {
@@ -5154,7 +5169,7 @@ $api->get(
             exchangerate  => $form->{"$form->{currency}"},
             id            => $form->{id},
             department_id => $form->{department_id},
-
+            files         => $files,
             lines    => \@lines,
             payments => \@payments,
         };
@@ -5216,7 +5231,7 @@ $api->post(
         $form->{type}         = $data->{type};
         $form->{transdate}    = $data->{invDate};
         $form->{duedate}      = $data->{dueDate};
-        $form->{currency}     = $data->{selectedCurrency}->{curr};
+        $form->{currency}     = $data->{currency};
         $form->{exchangerate} = $data->{exchangerate} || 1;
         $form->{notes}        = $data->{notes}        || '';
         $form->{intnotes}     = $data->{intnotes}     || '';
@@ -5228,14 +5243,13 @@ $api->post(
         if ( $invoice_type eq 'AR' ) {
 
             # AR fields
-            $form->{AR}          = $data->{recordAccount}->{accno};
-            $form->{customer_id} = $data->{selectedCustomer}->{id};
-            $form->{customer}    = $data->{selectedCustomer}->{name};
+            $form->{AR}          = $data->{recordAccount};
+            $form->{customer_id} = $data->{customer_id};
+            $form->{customer}    = $data->{customer};
         }
         else {
             # AP fields
-            $form->{AP} =
-              $data->{recordAccount}->{accno};
+            $form->{AP} = $data->{recordAccount};
             $form->{vendor_id} = $data->{selectedVendor}->{id};
             $form->{vendor}    = $data->{selectedVendor}->{name};
         }
@@ -5329,6 +5343,13 @@ $api->post(
         else {
             IR->post_invoice( $c->slconfig, $form );
         }
+
+        if ( $data->{files} && ref $data->{files} eq 'ARRAY' ) {
+            $form->{files}  = $data->{files};
+            $form->{client} = $c->param('client');
+            FM->upload_files( $dbs, $c, $form, $vc );
+        }
+
 
         # Return the newly posted or updated invoice ID
         $c->render( json => { id => $form->{id} } );
