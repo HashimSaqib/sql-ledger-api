@@ -11,7 +11,7 @@ CREATE TABLE files (
     location VARCHAR(20) NOT NULL,        -- E.g., 'local', 'google_drive', 'dropbox'
     path TEXT NOT NULL,           -- Relative path or external storage key/ID
     link TEXT,                          -- direct URL to access the file, if applicable
-    upload_timestamp TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+    upload_timestamp TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     reference_id INTEGER
 );
 

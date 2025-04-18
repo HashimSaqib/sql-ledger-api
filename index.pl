@@ -11,7 +11,7 @@ use Mojo::Util qw(unquote);
 use Mojo::JSON qw(encode_json);
 use JSON       qw (decode_json);
 use Mojo::File;
-use Encode;
+use Encode qw(decode encode);
 use MIME::Base64;
 use Mojo::UserAgent;
 use DBI;
@@ -46,6 +46,8 @@ use File::Slurp;
 use Dotenv;
 use IO::Compress::Zip qw(zip $ZipError);
 use Archive::Zip      qw( :ERROR_CODES :CONSTANTS );
+use utf8;
+use open qw(:std :utf8);
 Dotenv->load;
 app->config( hypnotoad => { listen => ['http://*:3000'] } );
 my $base_url  = "https://api.neo-ledger.com/";
@@ -203,7 +205,7 @@ my $neoledger_perms =
 '["dashboard", "customer", "customer.transaction", "customer.invoice", "customer.creditinvoice", "customer.addcustomer", "customer.transactions", "customer.search", "customer.history"
 , "vendor", "vendor.transaction", "vendor.invoice", "vendor.debitinvoice", "vendor.addvendor", "vendor.transactions", "vendor.search", "vendor.history", "cash", "cash.recon", "gl", "gl.add", "gl.transactions"
 , "items", "items.part", "items.service", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income", "system", "system.currencies", "system.projects"
-, "system.departments", "system.defaults", "system.user.roles", "system.user.employees", "system.chart", "system.chart.list", "system.chart.add", "system.chart.gifi", "customer.return", "vendor.add", "vendor.return", "customer.invoice.return", "customer.add", "system.templates", "system.test"]';
+, "system.departments", "system.defaults", "system.user.roles", "system.user.employees", "system.chart", "system.chart.list", "system.chart.add", "system.chart.gifi", "system.taxes", "customer.return", "vendor.add", "vendor.return", "customer.invoice.return", "customer.add", "system.templates", "system.test"]';
 
 helper send_email_central => sub {
     use Email::Sender::Transport::SMTP;
@@ -211,14 +213,13 @@ helper send_email_central => sub {
     my ( $c, $to, $subject, $content, $attachments ) = @_;
 
     my $transport = Email::Sender::Transport::SMTP->new(
-        host          => $ENV{SMTP_HOST},
-        port          => $ENV{SMTP_PORT},
-        ssl           => $ENV{SMTP_SSL},
-        sasl_username => $ENV{SMTP_USERNAME},
-        sasl_password => $ENV{SMTP_PASSWORD},
-        sasl          => $ENV{SMTP_SASL}
+        host                 => $ENV{SMTP_HOST},
+        port                 => $ENV{SMTP_PORT},
+        ssl                  => $ENV{SMTP_SSL},
+        sasl_username        => $ENV{SMTP_USERNAME},
+        sasl_password        => $ENV{SMTP_PASSWORD},
+        SMTP_SASL_MECHANISMS => 'PLAIN'
     );
-    my $error_message;
 
     # Create the Email::Stuffer object
     my $email_obj =
@@ -232,13 +233,14 @@ helper send_email_central => sub {
         }
     }
 
-    # Attempt to send the email
-    my $email_sent;
-    eval { $email_sent = $email_obj->transport($transport)->send; };
+    # Attempt to send the email using send_or_die
+    my $success = eval {
+        $email_obj->transport($transport)->send_or_die;
+        1;
+    };
 
-    if ( $@ || !$email_sent ) {
+    if ( !$success ) {
         my $error_message = Dumper($@);
-        $c->app->log->warn("Failed to send email: $error_message");
         return {
             error =>
               "Failed to send email. Please try again later. $error_message",
@@ -2035,215 +2037,6 @@ $api->post(
 ####                 ####
 #########################
 
-# $api->get(
-#     '/system/employees' => sub {
-#         my $c = shift;
-#         return unless my $login = $c->check_perms("system.user.employees");
-#         my $client = $c->param('client');
-#         my $form   = new Form;
-#         $form->{login} = $login;
-#         $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
-
-#         # Retrieve all employees using HR module.
-#         HR->employees( $c->slconfig, $form );
-
-#         my $dbs = $c->dbs($client);
-
-#         # For each employee, fetch login data.
-#         foreach my $employee ( @{ $form->{all_employee} } ) {
-#             my $emp_id = $employee->{id};
-
-#             # Retrieve login info from the login table.
-#             my $login_query = $dbs->query(
-# "SELECT acsrole_id, created, admin FROM login WHERE employeeid = ?",
-#                 $emp_id
-#             );
-#             my $login_info =
-#             $login_query->hash;    # Get the first row as a hash reference.
-
-#             if ($login_info) {
-
-#                 # Append login data to the employee record.
-#                 $employee->{acsrole_id} = $login_info->{acsrole_id};
-#                 $employee->{created}    = $login_info->{created};
-#                 $employee->{admin}      = $login_info->{admin};
-
-#                 # Now, fetch the role description from the acsapirole table.
-#                 my $role_query = $dbs->query(
-#                     "SELECT description FROM acsapirole WHERE id = ?",
-#                     $login_info->{acsrole_id} );
-#                 my $role_info = $role_query->hash;
-#                 if ($role_info) {
-#                     $employee->{acsrole} = $role_info->{description};
-#                 }
-#                 else {
-#                     $employee->{acsrole} = undef;
-#                 }
-#             }
-#             else {
-#                 # Set defaults if no login record exists.
-#                 $employee->{acsrole_id} = undef;
-#                 $employee->{created}    = undef;
-#                 $employee->{admin}      = undef;
-#                 $employee->{acsrole}    = undef;
-#             }
-#         }
-
-#     # Render the modified employee list with login info and role description.
-#         $c->render( json => $form->{all_employee} );
-#     }
-# );
-# $api->get(
-#     '/system/employees/:id' => sub {
-#         my $c = shift;
-#         return unless my $login = $c->check_perms("system.user.employees");
-
-#         my $client = $c->param('client');
-#         my $id     = $c->param('id');
-#         my $form   = new Form;
-#         $form->{id} = $id;
-#         $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
-
-#         # Retrieve the employee data using the HR module.
-#         HR->get_employee( $c->slconfig, $form );
-
-#         # Connect using DBIx::Simple.
-#         my $dbs = $c->dbs($client);
-
-#         # Determine the employee id for login lookup.
-#         my $emp_id = $form->{employeeid} // $id;
-
-# # Fetch login info for this employee. We need this because API doesn't use default ACS and we need to overwrite the values
-#         my $login_query = $dbs->query(
-#             "SELECT acsrole_id, created, admin FROM login WHERE employeeid = ?",
-#             $emp_id
-#         );
-
-#         my $login_info =
-#         $login_query->hash;    # Get the first row as a hash reference.
-
-#         # Append the login data to the employee record.
-#         if ($login_info) {
-#             $form->{acsrole_id} = $login_info->{acsrole_id};
-#             $form->{created}    = $login_info->{created};
-#             $form->{admin}      = $login_info->{admin};
-#         }
-#         else {
-#             # Set to undef or a default value if no login record exists.
-#             $form->{acsrole_id} = undef;
-#             $form->{created}    = undef;
-#             $form->{admin}      = undef;
-#         }
-
-#         # Render the employee data (with login info) as JSON.
-#         $c->render( json => {%$form} );
-#     }
-# );
-# $api->post(
-#     '/system/employees/:id' => { id => undef } => sub {
-#         my $c = shift;
-#         return unless my $login = $c->check_perms("system.user.employees");
-
-#         my $client = $c->param('client');
-
-#         # Set up the database connection using the provided client name
-#         $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
-#         my $form = new Form;
-#         my $dbs  = $c->dbs($client);
-#         my $data = $c->req->json;
-
-#         # --- Populate form with provided JSON data ---
-#         for my $key ( keys %$data ) {
-#             $form->{$key} = $data->{$key} if defined $data->{$key};
-#         }
-
-#         # Extract the acsrole_id and password for later use
-#         my $acs_id   = $form->{acsrole_id};
-#         my $password = $form->{password};
-
-#         # Remove these from the form so they aren't saved in the employee record
-#         $form->{password}   = undef;
-#         $form->{acsrole_id} = undef;
-
-# # --- For create requests: ensure password is provided and check employeenumber ---
-#         if ( !defined $c->param('id') ) {
-
-#     # Check that a non-empty password is provided when creating a new employee
-#             if ( !defined $password or $password eq '' ) {
-#                 $c->render( json =>
-#                     { error => 'Password is required for new employee' } );
-#                 return;
-#             }
-
-# # If an employeenumber is provided, check that it doesn't already exist in the employee table
-#             if ( defined $form->{employeenumber}
-#                 and $form->{employeenumber} ne '' )
-#             {
-#                 my $exists = $dbs->selectrow_array(
-#                     "SELECT COUNT(*) FROM employee WHERE employeenumber = ?",
-#                     undef, $form->{employeenumber} );
-#                 if ($exists) {
-#                     $c->render(
-#                         json => { error => 'Employeenumber already exists' } );
-#                     return;
-#                 }
-#             }
-#         }
-#         $form->{employeelogin} = $form->{login};
-
-#         # --- Save the employee record ---
-#         HR->save_employee( $c->slconfig, $form );
-#         my $employee_id = $form->{id};
-#         warn($employee_id);
-
-# # --- Insert or update the login record using PostgreSQL crypt and gen_salt ---
-#         if ( !defined $c->param('id') ) {    # Create request
-#             # For new employees, insert a login record, hashing the password with Postgres's crypt function.
-#             $dbs->query(
-# "INSERT INTO login (employeeid, password, acsrole_id) VALUES (?, crypt(?, gen_salt('bf')), ?)",
-#                 $employee_id, $password, $acs_id );
-#         }
-#         else {    # Update request
-#             my $rows;
-#             if ( defined $password and $password ne '' ) {
-
-#     # Try updating both password and acsrole_id if a new password is provided.
-#                 $rows = $dbs->query(
-# "UPDATE login SET password = crypt(?, gen_salt('bf')), acsrole_id = ? WHERE employeeid = ?",
-#                     $password, $acs_id, $employee_id );
-#                 warn( Dumper $rows );
-
-# # If no record was updated (i.e. no login record exists), insert a new login record.
-
-#                 warn("TEsting");
-#                 $dbs->query(
-# "INSERT INTO login (employeeid, password, acsrole_id) VALUES (?, crypt(?, gen_salt('bf')), ?)",
-#                     $employee_id, $password, $acs_id );
-#             }
-
-#             else {
-#             # Try updating only the acsrole_id if no new password is provided.
-#                 $rows = $dbs->query(
-#                     "UPDATE login SET acsrole_id = ? WHERE employeeid = ?",
-#                     $acs_id, $employee_id );
-
-#                 # If no record was updated, insert a new login record.
-#                 if ( !defined $rows or $rows == 0 ) {
-
-# # Note: When inserting without a password, make sure your database accepts a NULL or default value.
-#                     $dbs->query(
-# "INSERT INTO login (employeeid, acsrole_id) VALUES (?, ?)",
-#                         $employee_id, $acs_id
-#                     );
-#                 }
-#             }
-#         }
-
-#     # Render the saved employee record (assumed to be contained in $form->{ALL})
-#         $c->render( json => $form->{ALL} );
-#     }
-# );
-
 #########################
 ####                 ####
 #### GL Transactions ####
@@ -2567,23 +2360,25 @@ sub handle_multipart_request {
     foreach my $key ( keys %$params ) {
         next if $key eq 'files';    # Skip file field, handle separately
 
-        if ( defined $params->{$key} && $params->{$key} ne '' ) {
-            $data->{$key} = $params->{$key};
+        # Decode UTF-8 data first before comparing
+        my $param_value = $params->{$key};
+        if ( defined $param_value ) {
+            $param_value = decode( 'UTF-8', $param_value, Encode::FB_DEFAULT );
+        }
+
+        if ( defined $param_value && $param_value ne '' ) {
+            $data->{$key} = $param_value;
         }
     }
 
-    # Parse lines JSON if provided
-    if ( defined $params->{lines} && $params->{lines} ne '' ) {
-        $data->{lines} = decode_json( $params->{lines} );
-    }
-    if ( defined $params->{payments} && $params->{payments} ne '' ) {
-        $data->{payments} = decode_json( $params->{payments} );
-    }
-    if ( defined $params->{taxes} && $params->{taxes} ne '' ) {
-        $data->{taxes} = decode_json( $params->{taxes} );
-    }
-    if ( defined $params->{shipto} && $params->{shipto} ne '' ) {
-        $data->{shipto} = decode_json( $params->{shipto} );
+    # Parse JSON fields
+    for my $field (qw(lines payments taxes shipto)) {
+        if ( defined $params->{$field} && $params->{$field} ne '' ) {
+
+            my $json_text =
+              decode( 'UTF-8', $params->{$field}, Encode::FB_CROAK );
+            $data->{$field} = decode_json($json_text);
+        }
     }
 
     # Handle file uploads if present
@@ -3341,6 +3136,80 @@ $api->delete(
 );
 ############################
 ####                    ####
+####       Taxes        ####
+####                    ####
+############################
+$api->get(
+    '/system/taxes' => sub {
+        my $c = shift;
+        return unless my $form = $c->check_perms("system.taxes");
+        my $client = $c->param('client');
+        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+
+        AM->taxes( $c->slconfig, $form );
+
+        $c->render( json => $form->{taxrates} );
+    }
+);
+
+$api->post(
+    '/system/taxes' => sub {
+        my $c = shift;
+        return unless my $form = $c->check_perms("system.taxes");
+        my $client = $c->param('client');
+        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+
+        my $data = $c->req->json;
+
+# If taxes is provided as an array, convert to the format expected by AM->save_taxes
+        if ( ref $data->{taxes} eq 'ARRAY' && @{ $data->{taxes} } ) {
+            my @tax_accounts;
+            my $i = 1;
+
+            foreach my $tax ( @{ $data->{taxes} } ) {
+                if ( $tax->{chart_id} ) {
+                    push @tax_accounts, $tax->{chart_id} . "_" . $i;
+                    $form->{"taxrate_$i"}   = $tax->{rate}      || 0;
+                    $form->{"taxnumber_$i"} = $tax->{taxnumber} || '';
+                    $form->{"validto_$i"}   = $tax->{validto}   || '';
+
+                    # Handle closed status for charts
+                    if ( defined $tax->{closed} ) {
+                        $form->{ "closed_" . $tax->{chart_id} } =
+                          $tax->{closed} ? 1 : 0;
+                    }
+
+                    $i++;
+                }
+            }
+
+            $form->{taxaccounts} = join( ' ', @tax_accounts );
+        }
+
+        my $result = AM->save_taxes( $c->slconfig, $form );
+
+        if ($result) {
+            $c->render(
+                json => {
+                    status  => 'success',
+                    message => 'Tax information saved successfully'
+                }
+            );
+        }
+        else {
+            $c->render(
+                status => 500,
+                json   => {
+                    status  => 'error',
+                    message => 'Failed to save tax'
+                }
+            );
+        }
+    }
+);
+
+############################
+####                    ####
 ####     Departments    ####
 ####                    ####
 ############################
@@ -3506,8 +3375,8 @@ $api->get(    # to be replaced with get_links
 );
 $api->get(
     '/ic/items' => sub {
-        my $c      = shift;
-        my $vc     = $c->param('vc');
+        my $c = shift;
+        return unless my $form = $c->check_perms("items.search.allitems");
         my $client = $c->param('client');
         my $params = $c->req->params->to_hash;
         $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
@@ -4125,7 +3994,21 @@ helper get_accounts => sub {
 };
 
 # Available modules: customer, vendor, goodsservices, gl_report, projects, incomestatement, employees
+helper lock_number => sub {
+    my $c      = shift;
+    my $dbs    = shift;
+    my $module = shift;
 
+    my $lock =
+      $dbs->query( "SELECT 1 FROM defaults WHERE fldname = 'lock_' || ?",
+        $module )->hash;
+    if ($lock) {
+        return 1;
+    }
+    else {
+        return 0;
+    }
+};
 $api->get(
     '/create_links/:module' => sub {
         my $c      = shift;
@@ -4142,7 +4025,7 @@ $api->get(
           unless grep { $_ eq $module } @valid_modules;
 
         my $tax_accounts = $dbs->query(
-            "SELECT t.rate, t.taxnumber, t.chart_id, c.description, c.accno,
+            "SELECT t.*, c.description, c.accno,
                 CONCAT(c.accno, '--', c.description) AS label
          FROM tax t
          JOIN chart c ON (c.id = t.chart_id)
@@ -4275,6 +4158,7 @@ $api->get(
             return unless $c->check_perms('gl.add');
             my $role        = undef;
             my $departments = $c->get_departments($role);
+            my $lock        = $c->lock_number( $dbs, 'glnumber' );
 
             $response = {
                 currencies   => $currencies,
@@ -4285,6 +4169,7 @@ $api->get(
                 linetax      => $line_tax,
                 departments  => $departments,
                 projects     => $projects,
+                locknumber   => $lock,
             };
         }
 
@@ -7371,34 +7256,63 @@ sub build_invoice {
     }
     my $dbs = $c->dbs($client);
 
-    # Flatten line items into parallel arrays.
+    # Precompute common values and config
+    my $config       = $c->slconfig;
+    my $default_date = $form->{transdate} || '';
+    my $precision    = $form->{precision} || 2;
+
+    # Initialize all arrays at once for better memory allocation
     my (
         @items,      @numbers,       @descriptions, @deliverydates,
         @qtys,       @units,         @makes,        @models,
         @sellprices, @discountrates, @linetotals,   @itemnotes
     );
 
+    # Pre-allocate memory for arrays based on number of items
+    my $item_count = scalar( @{ $form->{invoice_details} } );
+    for my $arrayref (
+        \@items,      \@numbers,       \@descriptions, \@deliverydates,
+        \@qtys,       \@units,         \@makes,        \@models,
+        \@sellprices, \@discountrates, \@linetotals,   \@itemnotes
+      )
+    {
+        $#$arrayref = $item_count - 1;    # Pre-extend array to required size
+    }
+
+    # Process all items in one pass with minimal function calls
     my $subtotal = 0;
     my $i        = 1;
     foreach my $item ( @{ $form->{invoice_details} } ) {
+
+        # Precompute values once
         my $qty      = $item->{qty}         || 0;
         my $price    = $item->{fxsellprice} || $item->{sellprice} || 0;
         my $discount = $item->{discount}    || 0;
 
+        # Calculate line total once
         my $linetotal = $qty * $price * ( 1 - $discount );
         $subtotal += $linetotal;
-        push @items, $i;
-        push @numbers,       ( $item->{partnumber}  || '' );
-        push @descriptions,  ( $item->{description} || '' );
-        push @deliverydates, ( $form->{transdate}   || '' );
-        push @qtys, $form->format_amount( $c->slconfig, $qty );
-        push @units,     ( $item->{unit}      || '' );
-        push @itemnotes, ( $item->{itemnotes} || '' );
-        push @makes,     ( $item->{make}      || '' );
-        push @models,    ( $item->{model}     || '' );
-        push @sellprices, $form->format_amount( $c->slconfig, $price );
-        push @discountrates, ( $discount ? $discount * 100 : '0' );
-        push @linetotals, $form->format_amount( $c->slconfig, $linetotal );
+
+        # Format values once
+        my $formatted_qty       = $form->format_amount( $config, $qty );
+        my $formatted_price     = $form->format_amount( $config, $price );
+        my $formatted_linetotal = $form->format_amount( $config, $linetotal );
+
+        # Batch assignments using direct array access
+        my $idx = $i - 1;
+        $items[$idx]         = $i;
+        $numbers[$idx]       = $item->{partnumber}  || '';
+        $descriptions[$idx]  = $item->{description} || '';
+        $deliverydates[$idx] = $default_date;
+        $qtys[$idx]          = $formatted_qty;
+        $units[$idx]         = $item->{unit}  || '';
+        $makes[$idx]         = $item->{make}  || '';
+        $models[$idx]        = $item->{model} || '';
+        $sellprices[$idx]    = $formatted_price;
+        $discountrates[$idx] = $discount ? $discount * 100 : '0';
+        $linetotals[$idx]    = $formatted_linetotal;
+        $itemnotes[$idx]     = $item->{itemnotes} || '';
+
         $i++;
     }
 
