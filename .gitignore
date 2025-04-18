@@ -2,6 +2,7 @@
 /templates/*
 /test/*
 /temp/*
+/tmp/*
 /spool/*
 /images/*
 /files/*

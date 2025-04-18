@@ -7229,46 +7229,36 @@ sub build_vc {
 }
 
 sub build_invoice {
-    my ( $c, $client, $vc, $id ) = @_;
+    my ( $c, $client, $form, $dbs ) = @_;
 
-    my $invoice_type = $vc eq 'vendor' ? 'AP' : 'AR';
+    my $invoice_type = $form->{vc} eq 'vendor' ? 'AP' : 'AR';
     my $arap_key     = $invoice_type;
 
-    my $form = Form->new;
-    $form->{id} = $id;
-    $form->{vc} = $vc;
     my $arap = "ar";
     if ( $form->{vc} eq 'vendor' ) {
         $arap = "ap";
     }
 
-    my $letterhead = build_letterhead($c);
-    $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
-
-    # Retrieve & populate $form->{invoice_details}, etc.
     if ( $invoice_type eq 'AR' ) {
         IS->retrieve_invoice( $c->slconfig, $form );
-        IS->invoice_details( $c->slconfig, $form );
     }
     else {
         IR->retrieve_invoice( $c->slconfig, $form );
-        IR->invoice_details( $c->slconfig, $form );
     }
-    my $dbs = $c->dbs($client);
+    $form->{invdate}        = $form->{transdate};
+    $form->{invdescription} = $form->{description};
+    AA->company_details( $c->slconfig, $form );
 
     # Precompute common values and config
-    my $config       = $c->slconfig;
     my $default_date = $form->{transdate} || '';
     my $precision    = $form->{precision} || 2;
 
-    # Initialize all arrays at once for better memory allocation
     my (
         @items,      @numbers,       @descriptions, @deliverydates,
         @qtys,       @units,         @makes,        @models,
         @sellprices, @discountrates, @linetotals,   @itemnotes
     );
 
-    # Pre-allocate memory for arrays based on number of items
     my $item_count = scalar( @{ $form->{invoice_details} } );
     for my $arrayref (
         \@items,      \@numbers,       \@descriptions, \@deliverydates,
@@ -7276,10 +7266,9 @@ sub build_invoice {
         \@sellprices, \@discountrates, \@linetotals,   \@itemnotes
       )
     {
-        $#$arrayref = $item_count - 1;    # Pre-extend array to required size
+        $#$arrayref = $item_count - 1;
     }
 
-    # Process all items in one pass with minimal function calls
     my $subtotal = 0;
     my $i        = 1;
     foreach my $item ( @{ $form->{invoice_details} } ) {
@@ -7293,12 +7282,11 @@ sub build_invoice {
         my $linetotal = $qty * $price * ( 1 - $discount );
         $subtotal += $linetotal;
 
-        # Format values once
-        my $formatted_qty       = $form->format_amount( $config, $qty );
-        my $formatted_price     = $form->format_amount( $config, $price );
-        my $formatted_linetotal = $form->format_amount( $config, $linetotal );
+        my $formatted_qty   = $form->format_amount( $c->slconfig, $qty );
+        my $formatted_price = $form->format_amount( $c->slconfig, $price );
+        my $formatted_linetotal =
+          $form->format_amount( $c->slconfig, $linetotal );
 
-        # Batch assignments using direct array access
         my $idx = $i - 1;
         $items[$idx]         = $i;
         $numbers[$idx]       = $item->{partnumber}  || '';
@@ -7336,7 +7324,7 @@ sub build_invoice {
         $form->{type} && ( $form->{type} eq 'credit_invoice'
             || $form->{type} eq 'debit_invoice' )
     ) ? -1 : 1;
-    $ml *= -1 if $vc eq 'customer';
+    $ml *= -1 if $form->{vc} eq 'customer';
 
     # Flatten payment data into parallel arrays.
     my ( @paymentdates, @paymentaccounts, @paymentsources, @paymentamounts );
@@ -7392,61 +7380,49 @@ sub build_invoice {
     my $paid  = $paid_sum;
     my $total = ( $subtotal + $taxtotal ) - $paid;
 
-    # Grab vendor/customer info
-    my $vc_data = build_vc( $c, $id, $vc );
+    my @f =
+      qw(email name address1 address2 city state zipcode country contact phone fax);
 
-    my $shipto_row =
-      $dbs->query( "SELECT * FROM shipto WHERE trans_id = ? LIMIT 1", $id )
-      ->hash;
+    my $fillshipto = 1;
 
-    my %shipto_data;
-    if ($shipto_row) {
-        %shipto_data = (
-            shiptoname     => $shipto_row->{shiptoname}     || "",
-            shiptoaddress1 => $shipto_row->{shiptoaddress1} || "",
-            shiptoaddress2 => $shipto_row->{shiptoaddress2} || "",
-            shiptocity     => $shipto_row->{shiptocity}     || "",
-            shiptostate    => $shipto_row->{shiptostate}    || "",
-            shiptozipcode  => $shipto_row->{shiptozipcode}  || "",
-            shiptocountry  => $shipto_row->{shiptocountry}  || "",
-            shiptocontact  => $shipto_row->{shiptocontact}  || "",
-            shiptophone    => $shipto_row->{shiptophone}    || "",
-            shiptofax      => $shipto_row->{shiptofax}      || "",
-            shiptoemail    => $shipto_row->{shiptoemail}    || "",
-        );
+    # check for shipto
+    foreach my $item (@f) {
+        if ( $form->{"shipto$item"} ) {
+            $fillshipto = 0;
+            last;
+        }
     }
-    else {
-        # Fallback if no shipto row
-        if ( $vc eq 'customer' ) {
-            %shipto_data = (
-                shiptoname     => $form->{customer}         || '',
-                shiptoaddress1 => $vc_data->{address1}      || '',
-                shiptoaddress2 => $vc_data->{address2}      || '',
-                shiptocity     => $vc_data->{city}          || '',
-                shiptostate    => $vc_data->{state}         || '',
-                shiptozipcode  => $vc_data->{zipcode}       || '',
-                shiptocountry  => $vc_data->{country}       || '',
-                shiptocontact  => $vc_data->{contact}       || '',
-                shiptophone    => $vc_data->{customerphone} || '',
-                shiptofax      => $vc_data->{customerfax}   || '',
-                shiptoemail    => $vc_data->{email}         || '',
-            );
+
+    if ($fillshipto) {
+        $fillshipto = 0;
+        $fillshipto = 1
+          if $form->{formname} =~
+          /(credit_invoice|purchase_order|request_quotation|bin_list)/;
+        $fillshipto = 1
+          if ( $form->{type} eq 'invoice' && $form->{vc} eq 'vendor' );
+
+        $form->{shiptophone}   = $form->{tel};
+        $form->{shiptofax}     = $form->{fax};
+        $form->{shiptocontact} = $form->{employee};
+
+        if ($fillshipto) {
+            if ( $form->{warehouse} ) {
+                $form->{shiptoname} = $form->{company};
+                for (qw(address1 address2 city state zipcode country)) {
+                    $form->{"shipto$_"} = $form->{"warehouse$_"};
+                }
+            }
+            else {
+                # fill in company address
+                $form->{shiptoname}     = $form->{company};
+                $form->{shiptoaddress1} = $form->{address};
+            }
         }
         else {
-            my @address_lines = split( /\n/, $letterhead->{address} || '' );
-            %shipto_data = (
-                shiptoname     => $letterhead->{company} || '',
-                shiptoaddress1 => $address_lines[0]      || '',
-                shiptoaddress2 => $address_lines[1]      || '',
-                shiptocity     => $address_lines[2]      || '',
-                shiptostate    => '',
-                shiptozipcode  => '',
-                shiptocountry  => $address_lines[3] || '',
-                shiptocontact  => '',
-                shiptophone    => $letterhead->{tel} || '',
-                shiptofax      => '',
-                shiptoemail    => $letterhead->{companyemail} || '',
-            );
+            for (@f) { $form->{"shipto$_"} = $form->{$_} }
+            for (qw(phone fax)) {
+                $form->{"shipto$_"} = $form->{"$form->{vc}$_"};
+            }
         }
     }
 
@@ -7459,124 +7435,52 @@ sub build_invoice {
     }
     $num2text->init;
 
-    my %data = (
+    # Totals
+    $form->{subtotal} = $form->format_amount( $c->slconfig, $subtotal );
+    $form->{paid}     = $form->format_amount( $c->slconfig, $paid );
+    $form->{invtotal} = $form->format_amount( $c->slconfig, $total );
+    $form->{total}    = $form->format_amount( $c->slconfig, $total );
+    $form->{credit}                = $credit;
+    $form->{display_credit}        = $display_credit;
+    $form->{display_credit_before} = $display_credit_before;
+    $form->{credit_before}         = $credit_before;
+    $form->{due}         = $form->format_amount( $c->slconfig, $total );
+    $form->{text_amount} = $num2text->num2text($total);
+    $form->{decimal}     = $form->{decimal}  || '00';
+    $form->{currency}    = $form->{currency} || '';
+    $form->{notes}       = $form->{notes}    || '';
+    $form->{terms}       = $form->{terms}    || '0';
 
-        # Basic address / vendor-customer info
-        name => $vc_data->{name}
-          || '',
-        address1 => $vc_data->{address1}
-          || '',
-        address2 => $vc_data->{address2}
-          || '',
-        city => $vc_data->{city}
-          || '',
-        state => $vc_data->{state}
-          || '',
-        zipcode => $vc_data->{zipcode}
-          || '',
-        country => $vc_data->{country}
-          || '',
-        contact => $vc_data->{contact}
-          || '',
-        email => $vc_data->{email}
-          || '',
-        vendortaxnumber => $vc_data->{vendortaxnumber}
-          || '',
-        (
-            $vc eq 'customer'
-            ? (
-                customerphone => $vc_data->{customerphone}
-                  || '',
-                customerfax => $vc_data->{customerfax}
-                  || '',
-              )
-            : (
-                vendorphone => $vc_data->{vendorphone}
-                  || '',
-                vendorfax => $vc_data->{vendorfax}
-                  || '',
-            )
-        ),
+    # ---- PARALLEL ARRAYS FOR LINE ITEMS ----
+    $form->{runningnumber} = \@items;
+    $form->{number}        = \@numbers;
+    $form->{description}   = \@descriptions;
+    $form->{deliverydate}  = \@deliverydates;
+    $form->{qty}           = \@qtys;
+    $form->{unit}          = \@units;
+    $form->{make}          = \@makes;
+    $form->{model}         = \@models;
+    $form->{sellprice}     = \@sellprices;
+    $form->{discountrate}  = \@discountrates;
+    $form->{linetotal}     = \@linetotals;
+    $form->{itemnotes}     = \@itemnotes;
 
-        # Shipto data
-        shiptoname     => $shipto_data{shiptoname},
-        shiptoaddress1 => $shipto_data{shiptoaddress1},
-        shiptoaddress2 => $shipto_data{shiptoaddress2},
-        shiptocity     => $shipto_data{shiptocity},
-        shiptostate    => $shipto_data{shiptostate},
-        shiptozipcode  => $shipto_data{shiptozipcode},
-        shiptocountry  => $shipto_data{shiptocountry},
-        shiptocontact  => $shipto_data{shiptocontact},
-        shiptophone    => $shipto_data{shiptophone},
-        shiptofax      => $shipto_data{shiptofax},
-        shiptoemail    => $shipto_data{shiptoemail},
+    # ---- PARALLEL ARRAYS FOR TAXES ----
+    $form->{taxdescription} = \@taxdescriptions;
+    $form->{taxbase}        = \@taxbases;
+    $form->{taxrate}        = \@taxrates;
+    $form->{tax}            = \@taxamounts;
 
-        # Invoice meta
-        invnumber     => $form->{invnumber}     || '',
-        invdate       => $form->{transdate}     || '',
-        duedate       => $form->{duedate}       || '',
-        ordnumber     => $form->{ordnumber}     || '',
-        employee      => $form->{employee}      || '',
-        shippingpoint => $form->{shippingpoint} || '',
-        shipvia       => $form->{shipvia}       || '',
-        taxincluded   => $form->{taxincluded}   || 0,
+    # ---- PARALLEL ARRAYS FOR PAYMENTS ----
+    $form->{paymentdate}    = \@paymentdates;
+    $form->{paymentaccount} = \@paymentaccounts;
+    $form->{paymentsource}  = \@paymentsources;
+    $form->{payment}        = \@paymentamounts;
 
-        # Totals
-        subtotal => $form->format_amount( $c->slconfig, $subtotal )
-        ,                                           # invoice total
-        paid     => $form->format_amount( $c->slconfig, $paid ),   # paid amount
-        invtotal => $form->format_amount( $c->slconfig, $total )
-        ,    # invoice total - paid
-        total => $form->format_amount( $c->slconfig, $total )
-        ,    # invoice total - paid
-        credit                => $credit,           # total credit after invoice
-        display_credit        => $display_credit,
-        display_credit_before => $display_credit_before,
-        credit_before         => $credit_before,   # total credit before invoice
-        due                   => $form->format_amount( $c->slconfig, $total ),
-        text_amount           => $num2text->num2text($total),
-        decimal               => $form->{decimal}  || '00',
-        currency              => $form->{currency} || '',
-        notes                 => $form->{notes}    || '',
-        terms                 => $form->{terms}    || '0',
+    # This indicates there's at least 1 payment
+    $form->{paid_1} = @paymentamounts ? 1 : "";
 
-        # Letterhead
-        company      => $letterhead->{company}      || '',
-        address      => $letterhead->{address}      || '',
-        tel          => $letterhead->{tel}          || '',
-        companyemail => $letterhead->{companyemail} || '',
-
-        # ---- PARALLEL ARRAYS FOR LINE ITEMS ----
-        runningnumber => \@items,
-        number        => \@numbers,
-        description   => \@descriptions,
-        deliverydate  => \@deliverydates,
-        qty           => \@qtys,
-        unit          => \@units,
-        make          => \@makes,
-        model         => \@models,
-        sellprice     => \@sellprices,
-        discountrate  => \@discountrates,
-        linetotal     => \@linetotals,
-        itemnotes     => \@itemnotes,
-
-        # ---- PARALLEL ARRAYS FOR TAXES ----
-        taxdescription => \@taxdescriptions,
-        taxbase        => \@taxbases,
-        taxrate        => \@taxrates,
-        tax            => \@taxamounts,
-
-        # ---- PARALLEL ARRAYS FOR PAYMENTS ----
-        paymentdate    => \@paymentdates,
-        paymentaccount => \@paymentaccounts,
-        paymentsource  => \@paymentsources,
-        payment        => \@paymentamounts,
-
-        # This indicates there's at least 1 payment
-        paid_1 => @paymentamounts ? 1 : "",
-    );
-
-    return \%data;
+    return $form;
 }
 $api->get(
     "/print_invoice/" => sub {
@@ -7588,37 +7492,34 @@ $api->get(
         my $client = $c->param('client') || die "Missing client parameter";
         my $vc     = $c->param('vc')     || die "Missing vc parameter";
         my $id     = $c->param('id')     || die "Missing invoice id";
+        my $dbs    = $c->dbs($client);
+
+        return unless my $form = $c->check_perms("$vc.transaction");
+        $form->{vc} = $vc;
+        $form->{id} = $id;
 
         # Build invoice and letterhead data
-        my $invoice_data = build_invoice( $c, $client, $vc, $id );
-        my $letterhead   = build_letterhead($c);
+        build_invoice( $c, $client, $form, $dbs );
 
-        # Merge letterhead details into invoice data
-        for my $key (qw(company address tel companyemail companywebsite)) {
-            $invoice_data->{$key} = $letterhead->{$key};
-        }
-        $invoice_data->{lastpage}          = 0;
-        $invoice_data->{sumcarriedforward} = 0;
-        $invoice_data->{templates}         = "templates/$client";
-        $invoice_data->{IN}                = "$template.$format";
+        $form->{lastpage}          = 0;
+        $form->{sumcarriedforward} = 0;
+        $form->{templates}         = "templates/$client";
+        $form->{IN}                = "$template.$format";
 
         # Set input and output based on type
         if ( $format eq 'tex' ) {
-            $invoice_data->{OUT}    = ">temp/invoice.pdf";
-            $invoice_data->{format} = "pdf";
-            $invoice_data->{media}  = "screen";
-            $invoice_data->{copies} = 1;
+            $form->{OUT}    = ">temp/invoice.pdf";
+            $form->{format} = "pdf";
+            $form->{media}  = "screen";
+            $form->{copies} = 1;
         }
         elsif ( $format eq 'html' ) {
-            $invoice_data->{OUT} = ">temp/invoice.html";
+            $form->{OUT} = ">temp/invoice.html";
         }
         else {
             die "Unsupported type: $format";
         }
 
-        # Create form and copy invoice data into it
-        my $form = new Form;
-        $form->{$_} = $invoice_data->{$_} for keys %$invoice_data;
         my $userspath = "temp/";
         my $defaults  = $c->get_defaults();
 
@@ -7641,7 +7542,7 @@ $api->get(
             # Return PDF as response
             $c->res->headers->content_type('application/pdf');
             $c->res->headers->content_disposition(
-                "attachment; filename=\"$invoice_data->{invnumber}.pdf\"");
+                "attachment; filename=\"$form->{invnumber}.pdf\"");
             $c->render( data => $pdf_content );
         }
         elsif ( $format eq 'html' ) {
