@@ -51,19 +51,21 @@ use open qw(:std :utf8);
 Dotenv->load;
 Dotenv->load('.conf');
 app->config( hypnotoad => { listen => ['http://*:3000'] } );
-my $base_url  = $ENV{BACKEND_URL};
-my $front_end = $ENV{FRONT_END_URL};
+my $base_url          = $ENV{BACKEND_URL};
+my $front_end         = $ENV{FRONT_END_URL};
+my $postgres_user     = $ENV{POSTGRES_USER};
+my $postgres_password = $ENV{POSTGRES_PASSWORD};
 
 #$front_end = "http://localhost:9000";
 
 my %myconfig = (
     dateformat   => 'yyyy/mm/dd',
     dbdriver     => 'Pg',
-    dbhost       => '',
+    dbhost       => 'localhost',
     dbname       => '',
-    dbpasswd     => '',
-    dbport       => '',
-    dbuser       => 'postgres',
+    dbpasswd     => $postgres_password,
+    dbport       => '5432',
+    dbuser       => $postgres_user,
     numberformat => '1,000.00',
 );
 
@@ -74,8 +76,8 @@ helper dbs => sub {
 
     my $dbh;
     eval {
-        $dbh = DBI->connect( "dbi:Pg:dbname=$dbname", 'postgres', '',
-            { RaiseError => 1, PrintError => 1 } );
+        $dbh = DBI->connect( "dbi:Pg:dbname=$dbname", $postgres_user,
+            $postgres_password, { RaiseError => 1, PrintError => 1 } );
     };
 
     if ( $@ || !$dbh ) {
@@ -103,8 +105,8 @@ helper central_dbs => sub {
     my $dbname = "centraldb";
     my $dbh;
     eval {
-        $dbh = DBI->connect( "dbi:Pg:dbname=$dbname", 'postgres', '',
-            { RaiseError => 1, PrintError => 1 } );
+        $dbh = DBI->connect( "dbi:Pg:dbname=$dbname", $postgres_user,
+            $postgres_password, { RaiseError => 1, PrintError => 1 } );
     };
 
     if ( $@ || !$dbh ) {
@@ -923,8 +925,8 @@ $central->post(
         rename( "$destination_dir/$templates", "$destination_dir/$dataset" );
 
         # Connect to database and create new dataset
-        my $dbh = DBI->connect( 'dbi:Pg:dbname=postgres;host=localhost',
-            'postgres', '', { AutoCommit => 1 } )
+        my $dbh = DBI->connect( "dbi:Pg:dbname=postgres;host=localhost",
+            $postgres_user, $postgres_password, { AutoCommit => 1 } )
           or die "Failed to connect to database: $DBI::errstr";
 
         # Create the database for the dataset
@@ -991,7 +993,7 @@ sub run_sql_file {
 
     # Attempt to connect to the dataset database
     my $dbh = DBI->connect( "dbi:Pg:dbname=$dataset;host=localhost",
-        'postgres', '', { AutoCommit => 1 } )
+        $postgres_user, $postgres_password, { AutoCommit => 1 } )
       or die
       "Failed to connect to database for dataset '$dataset': $DBI::errstr";
 
@@ -1144,8 +1146,9 @@ $central->delete(
             }
 
             # Drop the dataset database
-            my $dbh = DBI->connect( 'dbi:Pg:dbname=postgres;host=localhost',
-                'postgres', '', { AutoCommit => 1, RaiseError => 1 } )
+            my $dbh = DBI->connect( "dbi:Pg:dbname=postgres;host=localhost",
+                $postgres_user, $postgres_password,
+                { AutoCommit => 1, RaiseError => 1 } )
               or die "Failed to connect to database: $DBI::errstr";
 
             # Ensure nobody is connected to the database before dropping
@@ -3046,8 +3049,6 @@ $api->get(
         return unless my $form = $c->check_perms("system.chart.gifi");
         my $client = $c->param('client');
 
-        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
-
         my $result = AM->gifi_accounts( $c->slconfig, $form );
         if ($result) {
             $c->render( json => $form->{ALL} );
@@ -3145,7 +3146,6 @@ $api->get(
         my $c = shift;
         return unless my $form = $c->check_perms("system.taxes");
         my $client = $c->param('client');
-        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
 
         AM->taxes( $c->slconfig, $form );
 
@@ -3158,7 +3158,6 @@ $api->post(
         my $c = shift;
         return unless my $form = $c->check_perms("system.taxes");
         my $client = $c->param('client');
-        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
 
         my $data = $c->req->json;
 
@@ -3380,7 +3379,6 @@ $api->get(
         return unless my $form = $c->check_perms("items.search.allitems");
         my $client = $c->param('client');
         my $params = $c->req->params->to_hash;
-        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
         my $search = $params->{searchitems};
 
         # Return a 400 response if search parameter is not defined
@@ -4513,7 +4511,6 @@ $api->get(
         return unless my $form = $c->check_perms("$vc.search");
         my $client = $c->param('client');
         my $params = $c->req->params->to_hash;
-        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
 
         $form->{db} = $vc;
         for ( keys %$params ) { $form->{$_} = $params->{$_} if $params->{$_} }
@@ -4532,8 +4529,6 @@ $api->get(
         my $vc = $c->param('vc');
         return unless my $form = $c->check_perms("$vc.add");
         my $client = $c->param('client');
-
-        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
 
         $form->{id} = $id;
         $form->{db} = $vc;
@@ -4567,7 +4562,6 @@ $api->post(
         return unless my $form = $c->check_perms("$vc.add");
 
         my $params = $c->req->json;
-        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
 
         $form->{db} = lc($vc);
         for ( keys %$params ) { $form->{$_} = $params->{$_} if $params->{$_} }
@@ -4585,8 +4579,6 @@ $api->get(
         my $client = $c->param('client');
         my $vc     = $c->param('vc');
         return unless my $form = $c->check_perms("$vc.history");
-
-        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
 
         $form->{db} = $vc;
 
@@ -8021,7 +8013,6 @@ $api->get(
         my $module = $c->param('module');
         my $file   = $c->param('file');
 
-        warn("Hello 123");
         my $dbs  = $c->dbs($client);
         my $path = $dbs->query( "SELECT path FROM files WHERE id = ?", $file )
           ->hash->{path};
