@@ -961,7 +961,37 @@ $central->post(
             warn "The gifi file '$gifi_file' does not exist!";
         }
 
+        # Grant privileges on the database itself
+        $dbh->do("GRANT ALL PRIVILEGES ON DATABASE $dataset TO $postgres_user");
         $dbh->disconnect;
+
+     # Connect directly to the dataset database to grant schema-level privileges
+        my $dataset_dbh = DBI->connect( "dbi:Pg:dbname=$dataset;host=localhost",
+            $postgres_user, $postgres_password, { AutoCommit => 1 } )
+          or die "Failed to connect to dataset '$dataset': $DBI::errstr";
+
+        $dataset_dbh->do(
+"GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO $postgres_user"
+        );
+        $dataset_dbh->do(
+"GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO $postgres_user"
+        );
+        $dataset_dbh->do(
+"GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public TO $postgres_user"
+        );
+
+        # Set default privileges for future objects
+        $dataset_dbh->do(
+"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON TABLES TO $postgres_user"
+        );
+        $dataset_dbh->do(
+"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON SEQUENCES TO $postgres_user"
+        );
+        $dataset_dbh->do(
+"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON FUNCTIONS TO $postgres_user"
+        );
+
+        $dataset_dbh->disconnect;
 
         # Insert dataset and dataset access info into central database
         my $central_dbs = $c->central_dbs();
@@ -5471,10 +5501,10 @@ $api->get(
               . $locale->text('To') . qq| |
               . $locale->date( \%myconfig, $form->{todate},
                 $form->{longformat} );
-            my $userspath = tmp;
+            my $userspath = "tmp";
             $form->{templates} = "templates/$client/";
             $form->{IN}        = "income_statement_new.html";
-            $form->{OUT}       = ">tmpincome_statement.html";
+            $form->{OUT}       = ">tmp/income_statement.html";
 
             # Build the report; pass the objects and needed variables
             build_report( $form, $locale, $account_map, $myconfig,
@@ -5966,10 +5996,10 @@ $api->get(
                 $timeperiod =
                   join( " / ", map { $_->{label} } @{ $form->{periods} } );
             }
-            my $userspath = tmp;
+            my $userspath = "tmp";
             $form->{templates} = "templates/$client/";
             $form->{IN}        = "balance_sheet_new.html";
-            $form->{OUT}       = ">tmpbalance_sheet.html";
+            $form->{OUT}       = ">tmp/balance_sheet.html";
 
             build_report( $form, $locale, $account_map, $myconfig, $timeperiod,
                 'balance_sheet' );
@@ -7501,13 +7531,13 @@ $api->get(
 
         # Set input and output based on type
         if ( $format eq 'tex' ) {
-            $form->{OUT}    = ">tmpinvoice.pdf";
+            $form->{OUT}    = ">tmp/invoice.pdf";
             $form->{format} = "pdf";
             $form->{media}  = "screen";
             $form->{copies} = 1;
         }
         elsif ( $format eq 'html' ) {
-            $form->{OUT} = ">tmpinvoice.html";
+            $form->{OUT} = ">tmp/invoice.html";
         }
         else {
             die "Unsupported type: $format";
@@ -7523,7 +7553,7 @@ $api->get(
             my $xelatex = $defaults->{xelatex};
             $form->parse_template( $c->slconfig, $userspath, $dvipdf,
                 $xelatex );
-            my $pdf_path = "tmpinvoice.pdf";
+            my $pdf_path = "tmp/invoice.pdf";
 
             # Read PDF file content
             open my $fh, $pdf_path or die "Cannot open file $pdf_path: $!";
@@ -7804,7 +7834,7 @@ $api->get(
         $transaction_data->{templates}         = "templates/$client";
         $transaction_data->{language_code}     = "en";
         $transaction_data->{IN}                = "$template.tex";
-        $transaction_data->{OUT}               = ">tmptransaction.pdf";
+        $transaction_data->{OUT}               = ">tmp/transaction.pdf";
         $transaction_data->{format}            = "pdf";
         $transaction_data->{media}             = "screen";
         $transaction_data->{copies}            = 1;
@@ -7822,7 +7852,7 @@ $api->get(
         $form->parse_template( $c->slconfig, $userspath, $dvipdf, $xelatex )
           or die "parse_template failed!";
 
-        my $pdf_path = "tmptransaction.pdf";
+        my $pdf_path = "tmp/transaction.pdf";
 
         # Read the PDF file content
         open my $fh, $pdf_path or die "Cannot open file $pdf_path: $!";
