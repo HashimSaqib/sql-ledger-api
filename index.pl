@@ -220,7 +220,7 @@ helper send_email_central => sub {
         ssl                  => $ENV{SMTP_SSL},
         sasl_username        => $ENV{SMTP_USERNAME},
         sasl_password        => $ENV{SMTP_PASSWORD},
-        SMTP_SASL_MECHANISMS => 'PLAIN'
+        sasl                 => $ENV{SMTP_SASL},
     );
 
     # Create the Email::Stuffer object
@@ -722,8 +722,7 @@ $central->get(
                 )->hashes;
                 $dataset->{roles}            = $roles;
                 $dataset->{admin}            = 1;
-                $dataset->{DROPBOX_KEY}      = $ENV{DROPBOX_KEY};
-                $dataset->{GOOGLE_CLIENT_ID} = $ENV{GOOGLE_CLIENT_ID};
+
                 my $client_dbs = $c->dbs( $dataset->{db_name} );
 
                 my $connections;
@@ -871,6 +870,14 @@ $central->get(
         );
     }
 );
+
+$central->get("connection_keys", sub {
+    my $c = shift;
+    $c->render(json => {
+        DROPBOX_KEY      => $ENV{DROPBOX_KEY},
+        GOOGLE_CLIENT_ID => $ENV{GOOGLE_CLIENT_ID},
+    });
+});
 
 $central->post(
     'create_dataset' => sub {
