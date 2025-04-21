@@ -49,7 +49,6 @@ use Archive::Zip      qw( :ERROR_CODES :CONSTANTS );
 use utf8;
 use open qw(:std :utf8);
 Dotenv->load;
-Dotenv->load('.conf');
 app->config( hypnotoad => { listen => ['http://*:3000'] } );
 my $base_url          = $ENV{BACKEND_URL};
 my $front_end         = $ENV{FRONT_END_URL};
