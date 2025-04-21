@@ -5471,10 +5471,10 @@ $api->get(
               . $locale->text('To') . qq| |
               . $locale->date( \%myconfig, $form->{todate},
                 $form->{longformat} );
-            my $userspath = "temp";
+            my $userspath = tmp;
             $form->{templates} = "templates/$client/";
             $form->{IN}        = "income_statement_new.html";
-            $form->{OUT}       = ">temp/income_statement.html";
+            $form->{OUT}       = ">tmpincome_statement.html";
 
             # Build the report; pass the objects and needed variables
             build_report( $form, $locale, $account_map, $myconfig,
@@ -5966,10 +5966,10 @@ $api->get(
                 $timeperiod =
                   join( " / ", map { $_->{label} } @{ $form->{periods} } );
             }
-            my $userspath = "temp";
+            my $userspath = tmp;
             $form->{templates} = "templates/$client/";
             $form->{IN}        = "balance_sheet_new.html";
-            $form->{OUT}       = ">temp/balance_sheet.html";
+            $form->{OUT}       = ">tmpbalance_sheet.html";
 
             build_report( $form, $locale, $account_map, $myconfig, $timeperiod,
                 'balance_sheet' );
@@ -7501,19 +7501,19 @@ $api->get(
 
         # Set input and output based on type
         if ( $format eq 'tex' ) {
-            $form->{OUT}    = ">temp/invoice.pdf";
+            $form->{OUT}    = ">tmpinvoice.pdf";
             $form->{format} = "pdf";
             $form->{media}  = "screen";
             $form->{copies} = 1;
         }
         elsif ( $format eq 'html' ) {
-            $form->{OUT} = ">temp/invoice.html";
+            $form->{OUT} = ">tmpinvoice.html";
         }
         else {
             die "Unsupported type: $format";
         }
 
-        my $userspath = "temp/";
+        my $userspath = "tmp";
         my $defaults  = $c->get_defaults();
 
         # Process based on type
@@ -7523,7 +7523,7 @@ $api->get(
             my $xelatex = $defaults->{xelatex};
             $form->parse_template( $c->slconfig, $userspath, $dvipdf,
                 $xelatex );
-            my $pdf_path = "temp/invoice.pdf";
+            my $pdf_path = "tmpinvoice.pdf";
 
             # Read PDF file content
             open my $fh, $pdf_path or die "Cannot open file $pdf_path: $!";
@@ -7804,25 +7804,25 @@ $api->get(
         $transaction_data->{templates}         = "templates/$client";
         $transaction_data->{language_code}     = "en";
         $transaction_data->{IN}                = "$template.tex";
-        $transaction_data->{OUT}               = ">temp/transaction.pdf";
+        $transaction_data->{OUT}               = ">tmptransaction.pdf";
         $transaction_data->{format}            = "pdf";
         $transaction_data->{media}             = "screen";
         $transaction_data->{copies}            = 1;
 
         my $form      = new Form;
-        my $user_path = "temp/";
+        my $user_path = "tmp";
         for my $k ( keys %$transaction_data ) {
             $form->{$k} = $transaction_data->{$k};
         }
         warn( Dumper $form );
         my $dvipdf    = "";
         my $xelatex   = "";
-        my $userspath = "temp/";
+        my $userspath = "tmp";
 
         $form->parse_template( $c->slconfig, $userspath, $dvipdf, $xelatex )
           or die "parse_template failed!";
 
-        my $pdf_path = "temp/transaction.pdf";
+        my $pdf_path = "tmptransaction.pdf";
 
         # Read the PDF file content
         open my $fh, $pdf_path or die "Cannot open file $pdf_path: $!";
