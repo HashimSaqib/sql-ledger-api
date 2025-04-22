@@ -55,7 +55,7 @@ my $front_end         = $ENV{FRONT_END_URL};
 my $postgres_user     = $ENV{POSTGRES_USER};
 my $postgres_password = $ENV{POSTGRES_PASSWORD};
 
-#$front_end = "http://localhost:9000";
+$front_end = "http://localhost:9000";
 
 my %myconfig = (
     dateformat   => 'yyyy/mm/dd',
@@ -728,7 +728,7 @@ $central->get(
                 my $connections;
                 eval {
                     $connections = $client_dbs->query(
-                        "SELECT type, status, error FROM connections")->hashes;
+                        "SELECT type, status, error, drive_id FROM connections")->hashes;
                     1
                       ; # Indicate success so we don't jump into the 'or do' block
                 } or do {
@@ -744,6 +744,27 @@ $central->get(
         $c->render( json => $datasets );
     }
 );
+$api->get('get_drives' => sub {
+    my $c = shift;
+    return unless $c->is_admin();
+    my $client = $c->param('client');
+    my $dbs = $c->dbs($client);
+    my $drives = FM->get_drives($dbs, $c);
+
+    $c->render(json => $drives);
+});
+$api->post('select_drive' => sub { 
+    my $c = shift;
+    return unless $c->is_admin();
+    my $drive_id = $c->req->json->{'drive_id'};
+    my $client = $c->param('client');
+    my $dbs = $c->dbs($client);
+    $dbs->query("UPDATE connections SET drive_id = ? WHERE type = 'google_drive'", $drive_id);
+       return $c->render(
+        status => 200,
+        json   => { success => 1, message => "Drive ID updated successfully for client '$client'." }
+    );
+});
 
 # ADD EDIT OR MANAGE A ROLE
 $api->post(
@@ -876,6 +897,7 @@ $central->get("connection_keys", sub {
     $c->render(json => {
         DROPBOX_KEY      => $ENV{DROPBOX_KEY},
         GOOGLE_CLIENT_ID => $ENV{GOOGLE_CLIENT_ID},
+        ALL_DRIVE       => $ENV{ALL_DRIVE} * 1,
     });
 });
 

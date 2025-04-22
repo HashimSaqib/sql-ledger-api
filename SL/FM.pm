@@ -123,7 +123,12 @@ qq/{"path": "$dbx_path", "mode": "add", "autorename": true, "mute": false}/,
                     $shared_link_url => {
                         'Authorization' => "Bearer $access_token",
                         'Content-Type'  => 'application/json'
-                    } => encode_json( { path => $dbx_path } )
+                    } => encode_json( { 
+                        path => $dbx_path,
+                        settings => {
+                            requested_visibility => "no_access"
+                        }
+                    } )
                 );
 
                 my $link_res = $link_tx->result;
@@ -230,6 +235,11 @@ sub process_google_drive {
     my $ua               = Mojo::UserAgent->new;
     my $upload_url =
       'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart';
+      
+    # Add driveId parameter if using a shared drive
+    if ($connection->{drive_id} && $connection->{drive_id} ne 'root') {
+        $upload_url .= "&supportsAllDrives=true&includeItemsFromAllDrives=true&driveId=" . $connection->{drive_id};
+    }
 
     my $access_token = $connection->{access_token};
 
@@ -297,6 +307,12 @@ sub process_google_drive {
             # Add metadata part
             $body .= "--$boundary\r\n";
             $body .= "Content-Type: application/json; charset=UTF-8\r\n\r\n";
+            
+            # If using a shared drive, add driveId to the metadata
+            if ($connection->{drive_id} && $connection->{drive_id} ne 'root') {
+                $metadata->{driveId} = $connection->{drive_id};
+            }
+            
             $body .= encode_json($metadata) . "\r\n";
 
             # Add file content part
@@ -321,7 +337,7 @@ sub process_google_drive {
                 # Make the file publicly accessible and get a link
                 my $file_id = $file_data->{id};
                 my $link = _create_google_drive_public_link( $ua, $access_token,
-                    $file_id );
+                    $file_id, $connection );
 
                 push @processed_files,
                   {
@@ -679,6 +695,12 @@ sub delete_files {
             );
             my $delete_url =
               "https://www.googleapis.com/drive/v3/files/$file_id";
+              
+            # Add parameters for shared drives if necessary
+            if ($connection->{drive_id} && $connection->{drive_id} ne 'root') {
+                $delete_url .= "?supportsAllDrives=true&includeItemsFromAllDrives=true";
+            }
+            
             my $tx = $ua->delete(
                 $delete_url => { 'Authorization' => "Bearer $access_token" } );
             my $res = $tx->result;
@@ -837,8 +859,15 @@ sub delete_file {
             $ENV{GOOGLE_CLIENT_SECRET} || '',
             'google_drive'
         );
-        my $delete_url = "https://www.googleapis.com/drive/v3/files/$file_id";
-        my $tx         = $ua->delete(
+        my $delete_url =
+          "https://www.googleapis.com/drive/v3/files/$file_id";
+          
+        # Add parameters for shared drives if necessary
+        if ($connection->{drive_id} && $connection->{drive_id} ne 'root') {
+            $delete_url .= "?supportsAllDrives=true&includeItemsFromAllDrives=true";
+        }
+        
+        my $tx = $ua->delete(
             $delete_url => { 'Authorization' => "Bearer $access_token" } );
         my $res = $tx->result;
         if ( $res->is_success ) {
@@ -884,6 +913,117 @@ sub delete_file {
         };
     }
     return { success => 0, error => "File deletion was not successful." };
+}
+
+sub get_drives {
+    my ( $self, $dbs, $c ) = @_;
+    my $ua = Mojo::UserAgent->new;
+    
+    # Get an active Google Drive connection
+    my $connection = $dbs->query(
+        "SELECT * FROM connections WHERE status = 'active' AND type = 'google_drive' LIMIT 1"
+    )->hash;
+    
+    unless ($connection && $connection->{access_token}) {
+        $c->app->log->error("No active Google Drive connection found");
+        return {
+            success => 0,
+            error => "No active Google Drive connection."
+        };
+    }
+    
+    # Check and refresh token if needed
+    my $access_token = _check_and_refresh_token(
+        $dbs, $c, $connection,
+        $ENV{GOOGLE_CLIENT_ID} || '',
+        $ENV{GOOGLE_CLIENT_SECRET} || '',
+        'google_drive'
+    );
+    
+    my @drives = (
+        {
+            id => 'root',
+            name => 'My Drive',
+            type => 'personal'
+        }
+    );
+    
+    # Get shared drives
+    my $drives_url = 'https://www.googleapis.com/drive/v3/drives?pageSize=100&supportsAllDrives=true&includeItemsFromAllDrives=true';
+    my $tx = $ua->get(
+        $drives_url => { 'Authorization' => "Bearer $access_token" }
+    );
+    my $res = $tx->result;
+    
+    if ($res->is_success) {
+        my $drives_data = eval { decode_json($res->body) };
+        if ($@) {
+            $c->app->log->error("Failed to parse Google Drive API response: $@");
+        } elsif ($drives_data && $drives_data->{drives}) {
+            foreach my $drive (@{$drives_data->{drives}}) {
+                push @drives, {
+                    id => $drive->{id},
+                    name => $drive->{name},
+                    type => 'shared'
+                };
+            }
+        }
+    } else {
+        warn(Dumper $res);
+        my $status_code = $res->code;
+        my $error_message = $res->message || "Unknown Error";
+        $c->app->log->error("Google Drive API error: $status_code - $error_message");
+        
+        # If unauthorized, try token refresh and try again
+        if ($status_code == 401) {
+            $access_token = _refresh_token(
+                $dbs, $c, $connection,
+                $ENV{GOOGLE_CLIENT_ID} || '',
+                $ENV{GOOGLE_CLIENT_SECRET} || '',
+                'google_drive'
+            );
+            
+            if ($access_token) {
+                $tx = $ua->get(
+                    $drives_url => { 'Authorization' => "Bearer $access_token" }
+                );
+                $res = $tx->result;
+                
+                if ($res->is_success) {
+                    my $drives_data = eval { decode_json($res->body) };
+                    if ($drives_data && $drives_data->{drives}) {
+                        foreach my $drive (@{$drives_data->{drives}}) {
+                            push @drives, {
+                                id => $drive->{id},
+                                name => $drive->{name},
+                                type => 'shared'
+                            };
+                        }
+                    }
+                } else {
+                    return {
+                        success => 0,
+                        error => "Failed to fetch Google Drive list after token refresh: " . $res->message
+                    };
+                }
+            } else {
+                return {
+                    success => 0,
+                    error => "Failed to refresh Google Drive token."
+                };
+            }
+        } else {
+            return {
+                success => 0,
+                error => "Failed to fetch Google Drive list: " . $error_message
+            };
+        }
+    }
+    
+    return {
+        success => 1,
+        drives => \@drives
+    };
 }
 
 #----------------------------------------------------------------
@@ -946,22 +1086,60 @@ sub _refresh_token {
     return $new_access_token;
 }
 
+# Helper function to consistently parse token_expires
+sub _parse_token_expires {
+    my ($token_expires_str, $c) = @_;
+    
+    return 0 unless defined $token_expires_str;
+    
+    # If already numeric (epoch), return as is
+    return $token_expires_str if $token_expires_str =~ /^\d+$/;
+    
+    # Log the input for debugging
+    if ($c) {
+        $c->app->log->debug("Parsing token_expires: '$token_expires_str'");
+    }
+    
+    # Parse from timestamp format
+    my $expiry = 0;
+    eval {
+        # Handle the specific format: '2025-04-22 07:56:56+00'
+        my $datetime = $token_expires_str;
+        
+        # Handle the timezone offset format you have (+00)
+        $datetime =~ s/([+-]\d{2})$//;
+        
+        if ($c) {
+            $c->app->log->debug("Cleaned datetime: '$datetime'");
+        }
+        
+        # Parse the datetime string using the exact format in your database
+        my $t = Time::Piece->strptime($datetime, '%Y-%m-%d %H:%M:%S');
+        $expiry = $t->epoch;
+        
+        if ($c) {
+            $c->app->log->debug("Successfully parsed to epoch: $expiry");
+        }
+    } or do {
+        my $error = $@ || "Unknown error";
+        if ($c) {
+            $c->app->log->error("Failed to parse token_expires: '$token_expires_str' - $error");
+            $expiry = 0; # Force a refresh by returning 0
+        } else {
+            warn "Failed to parse token_expires: '$token_expires_str' - $error";
+            $expiry = 0;
+        }
+    };
+    
+    return $expiry;
+}
+
 # Checks if the token is near expiry (less than 5 minutes left) and refreshes if needed.
 sub _check_and_refresh_token {
     my ( $dbs, $c, $connection, $client_id, $client_secret, $platform ) = @_;
     if ( $connection->{token_expires} ) {
-        my $expiry = $connection->{token_expires};
-
-        # If token_expires is not numeric, try parsing it.
-        if ( $expiry !~ /^\d+$/ ) {
-            eval {
-                my $t = Time::Piece->strptime( $expiry, '%Y-%m-%d %H:%M:%S%z' );
-                $expiry = $t->epoch;
-            } or do {
-                $c->app->log->error("Failed to parse token_expires");
-                $expiry = 0;
-            };
-        }
+        my $expiry = _parse_token_expires($connection->{token_expires}, $c);
+        
         if ( $expiry - time() < 300 ) {    # less than 5 minutes remaining
             my $new_access_token =
               _refresh_token( $dbs, $c, $connection, $client_id,
@@ -987,15 +1165,25 @@ sub _ensure_google_drive_folders {
     my $folder_url = 'https://www.googleapis.com/drive/v3/files';
 
     my @folders = grep { $_ } split( '/', $folder_path );
-    return 'root' unless @folders;
+    
+    # Use drive_id from connection if available, otherwise use 'root'
+    my $parent_id = $connection->{drive_id} || 'root';
+    return $parent_id unless @folders;
 
-    my $parent_id = 'root';
     foreach my $folder_name (@folders) {
         my $search_query =
 "name='$folder_name' and mimeType='application/vnd.google-apps.folder' and '$parent_id' in parents and trashed=false";
+        
+        # Add corpora and driveId parameters if using a shared drive
+        my $additional_params = '';
+        if ($connection->{drive_id} && $connection->{drive_id} ne 'root') {
+            $additional_params = "&corpora=drive&driveId=" . $connection->{drive_id} . "&supportsAllDrives=true&includeItemsFromAllDrives=true";
+        }
+        
         my $encoded_query = url_escape($search_query);
-        my $tx            = $ua->get( "$folder_url?q=$encoded_query" =>
+        my $tx = $ua->get( "$folder_url?q=$encoded_query$additional_params" =>
               { 'Authorization' => "Bearer $access_token" } );
+        
         my $res = $tx->result;
 
         if ( !$res->is_success ) {
@@ -1023,6 +1211,7 @@ sub _ensure_google_drive_folders {
                 }
             }
             else {
+                warn(Dumper $res);  
                 $c->app->log->error(
                     "Google Drive folder query failed: $error_message");
                 return undef;
@@ -1040,15 +1229,29 @@ sub _ensure_google_drive_folders {
             $parent_id = $folder_data->{files}[0]{id};
         }
         else {
+            # Add parameters for shared drives if necessary
+            my $create_folder_url = $folder_url;
+            if ($connection->{drive_id} && $connection->{drive_id} ne 'root') {
+                $create_folder_url .= "?supportsAllDrives=true&includeItemsFromAllDrives=true";
+            }
+            
+            # Create the folder metadata
+            my $folder_metadata = {
+                name     => $folder_name,
+                mimeType => 'application/vnd.google-apps.folder',
+                parents  => [$parent_id]
+            };
+            
+            # Add driveId to metadata for shared drives
+            if ($connection->{drive_id} && $connection->{drive_id} ne 'root') {
+                $folder_metadata->{driveId} = $connection->{drive_id};
+            }
+            
             my $create_tx = $ua->post(
-                $folder_url => {
+                $create_folder_url => {
                     'Authorization' => "Bearer $access_token",
                     'Content-Type'  => 'application/json'
-                } => json => {
-                    name     => $folder_name,
-                    mimeType => 'application/vnd.google-apps.folder',
-                    parents  => [$parent_id]
-                }
+                } => json => $folder_metadata
             );
 
             my $create_res = $create_tx->result;
@@ -1071,20 +1274,17 @@ sub _ensure_google_drive_folders {
 }
 
 sub _create_google_drive_public_link {
-    my ( $ua, $access_token, $file_id ) = @_;
-    my $permission_url =
-      "https://www.googleapis.com/drive/v3/files/$file_id/permissions";
-    my $tx = $ua->post(
-        $permission_url => {
-            'Authorization' => "Bearer $access_token",
-            'Content-Type'  => 'application/json'
-        } => json => {
-            role => 'reader',
-            type => 'anyone'
-        }
-    );
+    my ( $ua, $access_token, $file_id, $connection ) = @_;
+    # We'll skip setting public permissions and just retrieve the link
+    
     my $file_url =
       "https://www.googleapis.com/drive/v3/files/$file_id?fields=webViewLink";
+      
+    # Add parameters for shared drives if necessary
+    if ($connection && $connection->{drive_id} && $connection->{drive_id} ne 'root') {
+        $file_url .= "&supportsAllDrives=true&includeItemsFromAllDrives=true";
+    }
+    
     my $link_tx =
       $ua->get( $file_url => { 'Authorization' => "Bearer $access_token" } );
     my $link_res = $link_tx->result;
@@ -1179,8 +1379,8 @@ sub _update_connection_status {
     my @params = ( $status, $error_message );
 
     if ( defined $new_token && defined $expiry ) {
-
-        # Convert the epoch to a properly formatted timestamp
+        # Convert the epoch to a properly formatted timestamp in the standard format
+        # This format must match what's used in _parse_token_expires
         my $formatted_expiry =
           strftime( '%Y-%m-%d %H:%M:%S', localtime($expiry) );
         $sql .= ", access_token = ?, token_expires = ?";

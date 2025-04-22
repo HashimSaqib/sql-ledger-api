@@ -18,6 +18,7 @@ CREATE TABLE connections (
     token_expires TIMESTAMPTZ,          -- Expiration time for the access token
     status VARCHAR(20),  -- active, error
     error TEXT,                         -- any error messages
+    drive_id VARCHAR(255),              -- Google Drive ID
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );

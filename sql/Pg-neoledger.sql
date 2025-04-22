@@ -24,7 +24,8 @@ CREATE TABLE connections (
     status VARCHAR(20),  -- active, error
     error TEXT,                         -- any error messages
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    drive_id VARCHAR(255)              -- Google Drive ID
 );
 
 CREATE INDEX idx_files_module ON files(module);
