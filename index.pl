@@ -212,8 +212,76 @@ my $neoledger_perms =
 helper send_email_central => sub {
     use Email::Sender::Transport::SMTP;
     use Email::Stuffer;
+    use Data::Dumper;
+    use MIME::Base64;
     my ( $c, $to, $subject, $content, $attachments ) = @_;
-
+    
+    # Check if Send in Blue should be used
+    if ($ENV{SEND_IN_BLUE}) {
+        # Use Send in Blue API with Mojo::UserAgent
+        my $api_key = $ENV{SEND_IN_BLUE};
+        my $ua = $c->ua;
+        
+        # Prepare the payload for Send in Blue API
+        my $payload = {
+            sender => {
+                email => $ENV{SMTP_USERNAME},
+                name => $ENV{SMTP_FROM_NAME} 
+            },
+            to => [
+                {
+                    email => $to,
+                    name => $to
+                }
+            ],
+            subject => $subject,
+            htmlContent => $content
+        };
+        
+        # Add attachments if provided
+        if ($attachments && ref($attachments) eq 'ARRAY') {
+            my @attachment_list;
+            foreach my $file_path (@$attachments) {
+                if (-f $file_path) {
+                    my $filename = (split('/', $file_path))[-1];
+                    open my $fh, '<:raw', $file_path or next;
+                    my $content = do { local $/; <$fh> };
+                    close $fh;
+                    
+                    push @attachment_list, {
+                        name => $filename,
+                        content => MIME::Base64::encode_base64($content)
+                    };
+                }
+            }
+            $payload->{attachment} = \@attachment_list if @attachment_list;
+        }
+        
+        # Make the API request
+        my $tx = $ua->post(
+            'https://api.sendinblue.com/v3/smtp/email' => {
+                'api-key' => $api_key,
+                'Content-Type' => 'application/json',
+                'Accept' => 'application/json'
+            } => json => $payload
+        );
+        
+        # Handle the response
+        if ($tx->res->code == 201) {
+            return {
+                message => "Email sent successfully via Send in Blue.",
+                status => 200
+            };
+        } else {
+            my $error = $tx->res->json || { message => $tx->res->message };
+            return {
+                error => "Failed to send email via Send in Blue: " . ($error->{message} || "Unknown error"),
+                status => 500
+            };
+        }
+    }
+    
+    # Fall back to the original email sending method
     my $transport = Email::Sender::Transport::SMTP->new(
         host                 => $ENV{SMTP_HOST},
         port                 => $ENV{SMTP_PORT},
