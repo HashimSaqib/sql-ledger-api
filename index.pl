@@ -3606,7 +3606,7 @@ $api->get(
             service  => "items.search.services",
         );
 
-        return unless my $form = $c->check_perms( $permissions{$search} );
+        return unless $form = $c->check_perms( $permissions{$search} );
 
         $form->{searchitems}  = $params->{searchitems};
         $form->{partnumber}   = $params->{partnumber};
@@ -4279,7 +4279,7 @@ $api->get(
 
             # Here, do module-specific parameter checks
             # E.g., return unless $c->check_params('customer_check');
-
+            my $lock        = $c->lock_number( $dbs, 'sinumber' );
             my $role        = 'P';
             my $departments = $c->get_departments($role);
 
@@ -4292,6 +4292,9 @@ $api->get(
                 linetax      => $line_tax,
                 departments  => $departments,
                 projects     => $projects,
+                locknumber   => $lock,
+                revtrans     => $defaults->{revtrans},
+                closedto     => $formatted_closedto,
             };
         }
 
@@ -4301,9 +4304,7 @@ $api->get(
         elsif ( $module eq 'vendor' ) {
             return unless $c->check_perms('customer');
 
-            # Module-specific checks
-            # E.g., return unless $c->check_params('vendor_check');
-
+            my $lock        = $c->lock_number( $dbs, 'vinumber' );
             my $role        = undef;
             my $departments = $c->get_departments($role);
 
@@ -4316,6 +4317,9 @@ $api->get(
                 linetax      => $line_tax,
                 departments  => $departments,
                 projects     => $projects,
+                locknumber   => $lock,
+                revtrans     => $defaults->{revtrans},
+                closedto     => $formatted_closedto,
             };
         }
 
@@ -8258,7 +8262,7 @@ $api->get(
         my $path = $dbs->query( "SELECT path FROM files WHERE id = ?", $file )
           ->hash->{path};
 
-        my $path = $c->app->home->rel_file($path);
+        $path = $c->app->home->rel_file($path);
 
         # Check if the file exists, and serve it if it does
         if ( -e $path ) {
