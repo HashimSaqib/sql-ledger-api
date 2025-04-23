@@ -8086,4 +8086,153 @@ $api->get(
         }
     }
 );
+
+$api->post(
+    "/send_email" => sub {
+        my $c = shift;
+        my $client = $c->param('client');
+        
+        # Extract JSON data from request
+        my $json = $c->req->json;
+        
+        # Extract parameters from JSON
+        my $vc = $json->{vc} || die "Missing vc parameter";
+        my $id = $json->{id} || die "Missing id parameter";
+        my $type = $json->{type} || die "Missing type parameter";
+        my $attachment = $json->{attachment} || '';  # html, pdf or empty
+        my $inline = $json->{inline} || 0;  # 0 or 1
+        my $email = $json->{email} || die "Missing email parameter";
+        my $cc = $json->{cc} || '';
+        my $bcc = $json->{bcc} || '';
+        my $message = $json->{message} || '';
+        
+        my $dbs = $c->dbs($client);
+        
+        # Check permissions
+        return unless my $form = $c->check_perms("$vc.transaction");
+        $form->{vc} = $vc;
+        $form->{id} = $id;
+        
+        # Build invoice data
+        build_invoice($c, $client, $form, $dbs);
+        
+        # Set up email content and attachments
+        my @attachments = ();
+        
+        # Process attachment if requested
+        if ($attachment) {
+            $form->{lastpage} = 0;
+            $form->{sumcarriedforward} = 0;
+            $form->{templates} = "templates/$client";
+            $form->{IN} = "$type.$attachment";
+            
+            my $userspath = "tmp";
+            my $defaults = $c->get_defaults();
+            my $attachment_path;
+            my $attachment_content;
+            
+            # Generate appropriate file based on attachment type
+            if ($attachment eq 'tex') {
+                $form->{OUT} = ">tmp/invoice.pdf";
+                $form->{format} = "pdf";
+                $form->{media} = "screen";
+                $form->{copies} = 1;
+                
+                my $dvipdf = "";
+                my $xelatex = $defaults->{xelatex};
+                $form->parse_template($c->slconfig, $userspath, $dvipdf, $xelatex);
+                $attachment_path = "tmp/invoice.pdf";
+                
+                # Add the file path to attachments
+                push @attachments, $attachment_path;
+                
+                # Set up a cleanup handler
+                $c->on(finish => sub {
+                    unlink $attachment_path if -e $attachment_path;
+                });
+            } 
+            elsif ($attachment eq 'html') {
+                $form->{OUT} = ">tmp/invoice.html";
+                $form->parse_template($c->slconfig, $userspath);
+                
+                # Strip the '>' character from the output file path
+                (my $file_path = $form->{OUT}) =~ s/^>//;
+                
+                # Read the HTML file content
+                open my $fh, '<', $file_path or die "Cannot open $file_path: $!";
+                { local $/; $form->{html_content} = <$fh> }
+                close $fh;
+                
+                # Convert HTML to PDF
+                my $pdf = html_to_pdf($form->{html_content});
+                unless ($pdf) {
+                    $c->res->status(500);
+                    $c->render(text => "Failed to generate PDF");
+                    return;
+                }
+                
+                # Write the PDF to a file
+                my $pdf_path = "tmp/invoice_html.pdf";
+                open my $pdf_fh, '>', $pdf_path or die "Cannot write to $pdf_path: $!";
+                binmode $pdf_fh;
+                print $pdf_fh $pdf;
+                close $pdf_fh;
+                
+                # Add the file path to attachments
+                push @attachments, $pdf_path;
+                
+                # Set up a cleanup handler
+                $c->on(finish => sub {
+                    unlink $pdf_path if -e $pdf_path;
+                });
+            }
+        }
+        
+        # Set up the email content
+        my $subject = "Invoice $form->{invnumber}";
+        
+        # Add CC and BCC if provided
+        my $to = $email;
+        if ($cc) {
+            $to .= ",$cc";
+        }
+        if ($bcc) {
+            $to .= ",$bcc";
+        }
+          
+        my  $now = scalar localtime;
+        my $locale = Locale->new;
+        # Send email with or without attachments
+        my $status = $c->send_email_central($to, $subject, $message, \@attachments);
+        $cc = $locale->text('Cc').qq|: $cc\n| if $cc;
+        $bcc = $locale->text('Bcc').qq|: $bcc\n| if $bcc;
+        my $int_notes = qq| $form->{intnotes}\n\n|;
+        $int_notes .= qq|[email]\n|
+        .$locale->text('Date').qq|: $now\n|
+        .$locale->text('To').qq|: $email\n${cc}${bcc}|
+        .$locale->text('Subject').qq|: $subject\n|;
+        $int_notes .= qq|\n|.$locale->text('Message').qq|:|;
+        $int_notes .= ($message) ? $message : $locale->text('sent');
+        warn($int_notes);
+        warn($form->{intnotes});
+        warn($form->{id});
+        $form->{intnotes} = $int_notes;
+        $form->save_intnotes($c->slconfig, 'ar');
+        if ($form->{emailed} !~ /$type/) {
+        $form->{emailed} .= " $type";
+        $form->{emailed} =~ s/^ //;
+        $form->{"$type\_emailed"} = 1;
+        # save status
+        $form->update_status($c->slconfig);
+    }
+        
+        if ($status && $status->{status} == 200) {
+            $c->render(json => { success => 1, message => $status->{message} });
+        } else {
+            my $error_msg = $status ? $status->{error} : "Failed to send email";
+            $c->render(json => { success => 0, message => $error_msg }, status => 500);
+        }
+    }
+);
+
 app->start;
