@@ -207,7 +207,7 @@ my $neoledger_perms =
 '["dashboard", "customer", "customer.transaction", "customer.invoice", "customer.creditinvoice", "customer.addcustomer", "customer.transactions", "customer.search", "customer.history"
 , "vendor", "vendor.transaction", "vendor.invoice", "vendor.debitinvoice", "vendor.addvendor", "vendor.transactions", "vendor.search", "vendor.history", "cash", "cash.recon", "gl", "gl.add", "gl.transactions"
 , "items", "items.part", "items.service", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income", "system", "system.currencies", "system.projects"
-, "system.departments", "system.defaults", "system.user.roles", "system.user.employees", "system.chart", "system.chart.list", "system.chart.add", "system.chart.gifi", "system.taxes", "customer.return", "vendor.add", "vendor.return", "customer.invoice.return", "customer.add", "system.templates", "system.test"]';
+, "system.departments", "system.defaults", "system.user.roles", "system.user.employees", "system.chart", "system.chart.list", "system.chart.add", "system.chart.gifi", "system.taxes", "customer.return", "vendor.add", "vendor.return", "customer.invoice.return", "customer.add", "system.templates", "system.audit"]';
 
 helper send_email_central => sub {
     use Email::Sender::Transport::SMTP;
@@ -215,80 +215,84 @@ helper send_email_central => sub {
     use Data::Dumper;
     use MIME::Base64;
     my ( $c, $to, $subject, $content, $attachments ) = @_;
-    
+
     # Check if Send in Blue should be used
-    if ($ENV{SEND_IN_BLUE}) {
+    if ( $ENV{SEND_IN_BLUE} ) {
+
         # Use Send in Blue API with Mojo::UserAgent
         my $api_key = $ENV{SEND_IN_BLUE};
-        my $ua = $c->ua;
-        
+        my $ua      = $c->ua;
+
         # Prepare the payload for Send in Blue API
         my $payload = {
             sender => {
                 email => $ENV{SMTP_USERNAME},
-                name => $ENV{SMTP_FROM_NAME} 
+                name  => $ENV{SMTP_FROM_NAME}
             },
             to => [
                 {
                     email => $to,
-                    name => $to
+                    name  => $to
                 }
             ],
-            subject => $subject,
+            subject     => $subject,
             htmlContent => $content
         };
-        
+
         # Add attachments if provided
-        if ($attachments && ref($attachments) eq 'ARRAY') {
+        if ( $attachments && ref($attachments) eq 'ARRAY' ) {
             my @attachment_list;
             foreach my $file_path (@$attachments) {
-                if (-f $file_path) {
-                    my $filename = (split('/', $file_path))[-1];
+                if ( -f $file_path ) {
+                    my $filename = ( split( '/', $file_path ) )[-1];
                     open my $fh, '<:raw', $file_path or next;
                     my $content = do { local $/; <$fh> };
                     close $fh;
-                    
-                    push @attachment_list, {
-                        name => $filename,
+
+                    push @attachment_list,
+                      {
+                        name    => $filename,
                         content => MIME::Base64::encode_base64($content)
-                    };
+                      };
                 }
             }
             $payload->{attachment} = \@attachment_list if @attachment_list;
         }
-        
+
         # Make the API request
         my $tx = $ua->post(
             'https://api.sendinblue.com/v3/smtp/email' => {
-                'api-key' => $api_key,
+                'api-key'      => $api_key,
                 'Content-Type' => 'application/json',
-                'Accept' => 'application/json'
+                'Accept'       => 'application/json'
             } => json => $payload
         );
-        
+
         # Handle the response
-        if ($tx->res->code == 201) {
+        if ( $tx->res->code == 201 ) {
             return {
                 message => "Email sent successfully via Send in Blue.",
-                status => 200
+                status  => 200
             };
-        } else {
+        }
+        else {
             my $error = $tx->res->json || { message => $tx->res->message };
             return {
-                error => "Failed to send email via Send in Blue: " . ($error->{message} || "Unknown error"),
+                error => "Failed to send email via Send in Blue: "
+                  . ( $error->{message} || "Unknown error" ),
                 status => 500
             };
         }
     }
-    
+
     # Fall back to the original email sending method
     my $transport = Email::Sender::Transport::SMTP->new(
-        host                 => $ENV{SMTP_HOST},
-        port                 => $ENV{SMTP_PORT},
-        ssl                  => $ENV{SMTP_SSL},
-        sasl_username        => $ENV{SMTP_USERNAME},
-        sasl_password        => $ENV{SMTP_PASSWORD},
-        sasl                 => $ENV{SMTP_SASL},
+        host          => $ENV{SMTP_HOST},
+        port          => $ENV{SMTP_PORT},
+        ssl           => $ENV{SMTP_SSL},
+        sasl_username => $ENV{SMTP_USERNAME},
+        sasl_password => $ENV{SMTP_PASSWORD},
+        sasl          => $ENV{SMTP_SASL},
     );
 
     # Create the Email::Stuffer object
@@ -788,15 +792,16 @@ $central->get(
                      WHERE dataset_id = ?",
                     $dataset->{id}
                 )->hashes;
-                $dataset->{roles}            = $roles;
-                $dataset->{admin}            = 1;
+                $dataset->{roles} = $roles;
+                $dataset->{admin} = 1;
 
                 my $client_dbs = $c->dbs( $dataset->{db_name} );
 
                 my $connections;
                 eval {
                     $connections = $client_dbs->query(
-                        "SELECT type, status, error, drive_id FROM connections")->hashes;
+                        "SELECT type, status, error, drive_id FROM connections")
+                      ->hashes;
                     1
                       ; # Indicate success so we don't jump into the 'or do' block
                 } or do {
@@ -812,27 +817,36 @@ $central->get(
         $c->render( json => $datasets );
     }
 );
-$api->get('get_drives' => sub {
-    my $c = shift;
-    return unless $c->is_admin();
-    my $client = $c->param('client');
-    my $dbs = $c->dbs($client);
-    my $drives = FM->get_drives($dbs, $c);
+$api->get(
+    'get_drives' => sub {
+        my $c = shift;
+        return unless $c->is_admin();
+        my $client = $c->param('client');
+        my $dbs    = $c->dbs($client);
+        my $drives = FM->get_drives( $dbs, $c );
 
-    $c->render(json => $drives);
-});
-$api->post('select_drive' => sub { 
-    my $c = shift;
-    return unless $c->is_admin();
-    my $drive_id = $c->req->json->{'drive_id'};
-    my $client = $c->param('client');
-    my $dbs = $c->dbs($client);
-    $dbs->query("UPDATE connections SET drive_id = ? WHERE type = 'google_drive'", $drive_id);
-       return $c->render(
-        status => 200,
-        json   => { success => 1, message => "Drive ID updated successfully for client '$client'." }
-    );
-});
+        $c->render( json => $drives );
+    }
+);
+$api->post(
+    'select_drive' => sub {
+        my $c = shift;
+        return unless $c->is_admin();
+        my $drive_id = $c->req->json->{'drive_id'};
+        my $client   = $c->param('client');
+        my $dbs      = $c->dbs($client);
+        $dbs->query(
+            "UPDATE connections SET drive_id = ? WHERE type = 'google_drive'",
+            $drive_id );
+        return $c->render(
+            status => 200,
+            json   => {
+                success => 1,
+                message => "Drive ID updated successfully for client '$client'."
+            }
+        );
+    }
+);
 
 # ADD EDIT OR MANAGE A ROLE
 $api->post(
@@ -960,14 +974,19 @@ $central->get(
     }
 );
 
-$central->get("connection_keys", sub {
-    my $c = shift;
-    $c->render(json => {
-        DROPBOX_KEY      => $ENV{DROPBOX_KEY},
-        GOOGLE_CLIENT_ID => $ENV{GOOGLE_CLIENT_ID},
-        ALL_DRIVE       => $ENV{ALL_DRIVE} * 1,
-    });
-});
+$central->get(
+    "connection_keys",
+    sub {
+        my $c = shift;
+        $c->render(
+            json => {
+                DROPBOX_KEY      => $ENV{DROPBOX_KEY},
+                GOOGLE_CLIENT_ID => $ENV{GOOGLE_CLIENT_ID},
+                ALL_DRIVE        => $ENV{ALL_DRIVE} * 1,
+            }
+        );
+    }
+);
 
 $central->post(
     'create_dataset' => sub {
@@ -1952,10 +1971,14 @@ helper check_perms => sub {
          LIMIT 1",
         $profile->{profile_id}, $dataset->{id}
     )->hash;
-    my $form = new Form;
+    my $defaults = $c->get_defaults;
+    my $form     = new Form;
     $form->{api_url}      = $base_url;
     $form->{frontend_url} = $front_end;
     $form->{client}       = $c->param('client');
+    $form->{closedto}     = $defaults->{closedto}   || '';
+    $form->{revtrans}     = $defaults->{revtrans}   || 0;
+    $form->{audittrail}   = $defaults->{audittrail} || 0;
     return $form if $admin;
 
     # Fetch all roles for the given dataset
@@ -3012,6 +3035,70 @@ $api->post(
                 }
             );
         }
+    }
+);
+
+$api->get(
+    '/system/audit' => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+        return unless my $form = $c->check_perms("system.audit");
+        my $defaults = $c->get_defaults;
+        $form->{closedto}   = $defaults->{closedto}   || 0;
+        $form->{revtrans}   = $defaults->{revtrans}   || 0;
+        $form->{audittrail} = $defaults->{audittrail} || 0;
+
+       # Format closedto as yyyy-mm-dd if it exists and is in the 8-digit format
+        my $formatted_closedto = $form->{closedto};
+        if (   $formatted_closedto
+            && $formatted_closedto =~ /^(\d{4})(\d{2})(\d{2})$/ )
+        {
+            $formatted_closedto = "$1-$2-$3";
+        }
+
+        $c->render(
+            json => {
+                closedto   => $formatted_closedto,
+                revtrans   => $form->{revtrans},
+                audittrail => $form->{audittrail}
+            }
+        );
+    }
+);
+
+$api->post(
+    '/system/audit' => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+        return unless my $form = $c->check_perms("system.audit");
+
+        my $closedto   = $c->req->json->{closedto}   || 0;
+        my $revtrans   = $c->req->json->{revtrans}   || 0;
+        my $audittrail = $c->req->json->{audittrail} || '';
+
+        # Convert closedto from yyyy-mm-dd to yyyymmdd format if needed
+        if ( $closedto && $closedto =~ /^(\d{4})-(\d{2})-(\d{2})$/ ) {
+            $closedto = "$1$2$3";
+        }
+
+        $form->{closedto}   = $closedto;
+        $form->{revtrans}   = $revtrans * 1;
+        $form->{audittrail} = $audittrail * 1;
+
+        my $result = AM->closebooks( $c->slconfig, $form );
+
+        $c->render(
+            json => {
+                status  => 'success',
+                message => 'Audit settings updated successfully',
+                data    => {
+                    closedto   => $closedto,
+                    revtrans   => $revtrans,
+                    audittrail => $audittrail
+                }
+            }
+        );
+
     }
 );
 
@@ -4157,14 +4244,20 @@ $api->get(
          ORDER BY c.accno"
         )->hashes;
 
-        my $accounts   = $c->get_accounts;
-        my $currencies = $c->get_currencies;
-        my $customers  = $c->get_vc('customer');
-        my $vendors    = $c->get_vc('vendor');
-        my $projects   = $c->get_projects;
-        my $gifi       = $c->get_gifi;
-        my $defaults   = $c->get_defaults;
-        warn( Dumper $defaults );
+        my $accounts           = $c->get_accounts;
+        my $currencies         = $c->get_currencies;
+        my $customers          = $c->get_vc('customer');
+        my $vendors            = $c->get_vc('vendor');
+        my $projects           = $c->get_projects;
+        my $gifi               = $c->get_gifi;
+        my $defaults           = $c->get_defaults;
+        my $formatted_closedto = $defaults->{closedto};
+
+        if (   $formatted_closedto
+            && $formatted_closedto =~ /^(\d{4})(\d{2})(\d{2})$/ )
+        {
+            $formatted_closedto = "$1-$2-$3";
+        }
 
         my $line_tax = $defaults->{linetax} ? 1 : 0;
 
@@ -4295,6 +4388,8 @@ $api->get(
                 departments  => $departments,
                 projects     => $projects,
                 locknumber   => $lock,
+                revtrans     => $defaults->{revtrans},
+                closedto     => $formatted_closedto,
             };
         }
 
@@ -4360,6 +4455,26 @@ $api->get(
 
         # If we got here, it means we have a valid module and passed checks
         $c->render( json => $response );
+    }
+);
+
+$api->get(
+    '/last_transactions/:module' => sub {
+        my $c      = shift;
+        my $module = $c->param('module');
+        my $client = $c->param('client');
+        my $dbs    = $c->dbs($client);
+        my $vc     = $c->param('vc');
+        if ( $module eq 'gl' ) {
+            return unless $c->check_perms('gl.transactions');
+        }
+        elsif ( $module eq 'ar' ) {
+            return unless $c->check_perms('customer.transactions');
+        }
+        elsif ( $module eq 'ap' ) {
+            return unless $c->check_perms('vendor.transactions');
+        }
+
     }
 );
 
@@ -8157,108 +8272,115 @@ $api->get(
 
 $api->post(
     "/send_email" => sub {
-        my $c = shift;
+        my $c      = shift;
         my $client = $c->param('client');
-        
+
         # Extract JSON data from request
         my $json = $c->req->json;
-        
+
         # Extract parameters from JSON
-        my $vc = $json->{vc} || die "Missing vc parameter";
-        my $id = $json->{id} || die "Missing id parameter";
-        my $type = $json->{type} || die "Missing type parameter";
-        my $attachment = $json->{attachment} || '';  # html, pdf or empty
-        my $inline = $json->{inline} || 0;  # 0 or 1
-        my $email = $json->{email} || die "Missing email parameter";
-        my $cc = $json->{cc} || '';
-        my $bcc = $json->{bcc} || '';
-        my $message = $json->{message} || '';
-        
+        my $vc         = $json->{vc}         || die "Missing vc parameter";
+        my $id         = $json->{id}         || die "Missing id parameter";
+        my $type       = $json->{type}       || die "Missing type parameter";
+        my $attachment = $json->{attachment} || '';    # html, pdf or empty
+        my $inline     = $json->{inline}     || 0;     # 0 or 1
+        my $email      = $json->{email}      || die "Missing email parameter";
+        my $cc         = $json->{cc}         || '';
+        my $bcc        = $json->{bcc}        || '';
+        my $message    = $json->{message}    || '';
+
         my $dbs = $c->dbs($client);
-        
+
         # Check permissions
         return unless my $form = $c->check_perms("$vc.transaction");
         $form->{vc} = $vc;
         $form->{id} = $id;
-        
+
         # Build invoice data
-        build_invoice($c, $client, $form, $dbs);
-        
+        build_invoice( $c, $client, $form, $dbs );
+
         # Set up email content and attachments
         my @attachments = ();
-        
+
         # Process attachment if requested
         if ($attachment) {
-            $form->{lastpage} = 0;
+            $form->{lastpage}          = 0;
             $form->{sumcarriedforward} = 0;
-            $form->{templates} = "templates/$client";
-            $form->{IN} = "$type.$attachment";
-            
+            $form->{templates}         = "templates/$client";
+            $form->{IN}                = "$type.$attachment";
+
             my $userspath = "tmp";
-            my $defaults = $c->get_defaults();
+            my $defaults  = $c->get_defaults();
             my $attachment_path;
             my $attachment_content;
-            
+
             # Generate appropriate file based on attachment type
-            if ($attachment eq 'tex') {
-                $form->{OUT} = ">tmp/invoice.pdf";
+            if ( $attachment eq 'tex' ) {
+                $form->{OUT}    = ">tmp/invoice.pdf";
                 $form->{format} = "pdf";
-                $form->{media} = "screen";
+                $form->{media}  = "screen";
                 $form->{copies} = 1;
-                
-                my $dvipdf = "";
+
+                my $dvipdf  = "";
                 my $xelatex = $defaults->{xelatex};
-                $form->parse_template($c->slconfig, $userspath, $dvipdf, $xelatex);
+                $form->parse_template( $c->slconfig, $userspath, $dvipdf,
+                    $xelatex );
                 $attachment_path = "tmp/invoice.pdf";
-                
+
                 # Add the file path to attachments
                 push @attachments, $attachment_path;
-                
+
                 # Set up a cleanup handler
-                $c->on(finish => sub {
-                    unlink $attachment_path if -e $attachment_path;
-                });
-            } 
-            elsif ($attachment eq 'html') {
+                $c->on(
+                    finish => sub {
+                        unlink $attachment_path if -e $attachment_path;
+                    }
+                );
+            }
+            elsif ( $attachment eq 'html' ) {
                 $form->{OUT} = ">tmp/invoice.html";
-                $form->parse_template($c->slconfig, $userspath);
-                
+                $form->parse_template( $c->slconfig, $userspath );
+
                 # Strip the '>' character from the output file path
-                (my $file_path = $form->{OUT}) =~ s/^>//;
-                
+                ( my $file_path = $form->{OUT} ) =~ s/^>//;
+
                 # Read the HTML file content
-                open my $fh, '<', $file_path or die "Cannot open $file_path: $!";
+                open my $fh, '<', $file_path
+                  or die "Cannot open $file_path: $!";
                 { local $/; $form->{html_content} = <$fh> }
                 close $fh;
-                
+
                 # Convert HTML to PDF
-                my $pdf = html_to_pdf($form->{html_content});
+                my $pdf = html_to_pdf( $form->{html_content} );
                 unless ($pdf) {
                     $c->res->status(500);
-                    $c->render(text => "Failed to generate PDF");
+                    $c->render( text => "Failed to generate PDF" );
                     return;
                 }
-                
+
                 # Write the PDF to a file
                 my $pdf_path = "tmp/invoice_html.pdf";
-                open my $pdf_fh, '>', $pdf_path or die "Cannot write to $pdf_path: $!";
+                open my $pdf_fh, '>', $pdf_path
+                  or die "Cannot write to $pdf_path: $!";
                 binmode $pdf_fh;
                 print $pdf_fh $pdf;
                 close $pdf_fh;
-                
+
                 # Add the file path to attachments
                 push @attachments, $pdf_path;
-                
+
                 # Set up a cleanup handler
-                $c->on(finish => sub {
-                    unlink $pdf_path if -e $pdf_path;
-                });
+                $c->on(
+                    finish => sub {
+                        unlink $pdf_path if -e $pdf_path;
+                    }
+                );
             }
         }
-        
+
         # Set up the email content
         my $subject = "Invoice $form->{invnumber}";
-        
+
         # Add CC and BCC if provided
         my $to = $email;
         if ($cc) {
@@ -8267,38 +8389,51 @@ $api->post(
         if ($bcc) {
             $to .= ",$bcc";
         }
-          
-        my  $now = scalar localtime;
+
+        my $now    = scalar localtime;
         my $locale = Locale->new;
+
         # Send email with or without attachments
-        my $status = $c->send_email_central($to, $subject, $message, \@attachments);
-        $cc = $locale->text('Cc').qq|: $cc\n| if $cc;
-        $bcc = $locale->text('Bcc').qq|: $bcc\n| if $bcc;
+        my $status =
+          $c->send_email_central( $to, $subject, $message, \@attachments );
+        $cc  = $locale->text('Cc') . qq|: $cc\n|   if $cc;
+        $bcc = $locale->text('Bcc') . qq|: $bcc\n| if $bcc;
         my $int_notes = qq| $form->{intnotes}\n\n|;
-        $int_notes .= qq|[email]\n|
-        .$locale->text('Date').qq|: $now\n|
-        .$locale->text('To').qq|: $email\n${cc}${bcc}|
-        .$locale->text('Subject').qq|: $subject\n|;
-        $int_notes .= qq|\n|.$locale->text('Message').qq|:|;
+        $int_notes .=
+            qq|[email]\n|
+          . $locale->text('Date')
+          . qq|: $now\n|
+          . $locale->text('To')
+          . qq|: $email\n${cc}${bcc}|
+          . $locale->text('Subject')
+          . qq|: $subject\n|;
+        $int_notes .= qq|\n| . $locale->text('Message') . qq|:|;
         $int_notes .= ($message) ? $message : $locale->text('sent');
         warn($int_notes);
-        warn($form->{intnotes});
-        warn($form->{id});
+        warn( $form->{intnotes} );
+        warn( $form->{id} );
         $form->{intnotes} = $int_notes;
-        $form->save_intnotes($c->slconfig, 'ar');
-        if ($form->{emailed} !~ /$type/) {
-        $form->{emailed} .= " $type";
-        $form->{emailed} =~ s/^ //;
-        $form->{"$type\_emailed"} = 1;
-        # save status
-        $form->update_status($c->slconfig);
-    }
-        
-        if ($status && $status->{status} == 200) {
-            $c->render(json => { success => 1, message => $status->{message} });
-        } else {
+        $form->save_intnotes( $c->slconfig, 'ar' );
+
+        if ( $form->{emailed} !~ /$type/ ) {
+            $form->{emailed} .= " $type";
+            $form->{emailed} =~ s/^ //;
+            $form->{"$type\_emailed"} = 1;
+
+            # save status
+            $form->update_status( $c->slconfig );
+        }
+
+        if ( $status && $status->{status} == 200 ) {
+            $c->render(
+                json => { success => 1, message => $status->{message} } );
+        }
+        else {
             my $error_msg = $status ? $status->{error} : "Failed to send email";
-            $c->render(json => { success => 0, message => $error_msg }, status => 500);
+            $c->render(
+                json   => { success => 0, message => $error_msg },
+                status => 500
+            );
         }
     }
 );
