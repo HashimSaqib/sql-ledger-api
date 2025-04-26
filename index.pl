@@ -204,7 +204,7 @@ get '/logo/:client/' => sub {
 ###############################
 
 my $neoledger_perms =
-'["dashboard", "customer", "customer.transaction", "customer.invoice", "customer.creditinvoice", "customer.addcustomer", "customer.transactions", "customer.search", "customer.history"
+'["dashboard", "customer", "customer.transaction", "customer.invoice", "customer.consolidate", "customer.creditinvoice", "customer.addcustomer", "customer.transactions", "customer.search", "customer.history"
 , "vendor", "vendor.transaction", "vendor.invoice", "vendor.debitinvoice", "vendor.addvendor", "vendor.transactions", "vendor.search", "vendor.history", "cash", "cash.recon", "gl", "gl.add", "gl.transactions"
 , "items", "items.part", "items.service", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income", "system", "system.currencies", "system.projects"
 , "system.departments", "system.defaults", "system.user.roles", "system.user.employees", "system.chart", "system.chart.list", "system.chart.add", "system.chart.gifi", "system.taxes", "customer.return", "vendor.add", "vendor.return", "customer.invoice.return", "customer.add", "system.templates", "system.audit"]';
@@ -1976,9 +1976,9 @@ helper check_perms => sub {
     $form->{api_url}      = $base_url;
     $form->{frontend_url} = $front_end;
     $form->{client}       = $c->param('client');
-    $form->{closedto}     = $defaults->{closedto}   || '';
-    $form->{revtrans}     = $defaults->{revtrans}   || 0;
-    $form->{audittrail}   = $defaults->{audittrail} || 0;
+    $form->{closedto}     = format_date( $defaults->{closedto} ) || '';
+    $form->{revtrans}     = $defaults->{revtrans}                || 0;
+    $form->{audittrail}   = $defaults->{audittrail}              || 0;
     return $form if $admin;
 
     # Fetch all roles for the given dataset
@@ -1990,8 +1990,6 @@ helper check_perms => sub {
          AND da.dataset_id = ?",
         $profile->{profile_id}, $dataset->{id}
     )->hash;
-
-    warn( Dumper $role );
 
     # Combine allowed permissions into a hash for faster lookup
     my %allowed;
@@ -3038,6 +3036,16 @@ $api->post(
     }
 );
 
+sub format_date {
+    my ($date) = @_;
+
+    if ( $date && $date =~ /^(\d{4})(\d{2})(\d{2})$/ ) {
+        return "$1-$2-$3";
+    }
+
+    return $date;    # return original if not matched
+}
+
 $api->get(
     '/system/audit' => sub {
         my $c      = shift;
@@ -3049,12 +3057,7 @@ $api->get(
         $form->{audittrail} = $defaults->{audittrail} || 0;
 
        # Format closedto as yyyy-mm-dd if it exists and is in the 8-digit format
-        my $formatted_closedto = $form->{closedto};
-        if (   $formatted_closedto
-            && $formatted_closedto =~ /^(\d{4})(\d{2})(\d{2})$/ )
-        {
-            $formatted_closedto = "$1-$2-$3";
-        }
+        my $formatted_closedto = format_date( $form->{closedto} );
 
         $c->render(
             json => {
@@ -5520,6 +5523,107 @@ $api->delete(
             IR->delete_invoice( $c->slconfig, $form );
         }
         $c->render( status => 204, data => '' );
+    }
+);
+
+$api->get(
+    '/invoice/consolidate' => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+
+        return unless my $form = $c->check_perms("customer.consolidate");
+        $form->{sort} ||= "transdate";
+        IS->consolidate( $c->slconfig, $form );
+        if ( $form->{closedto} && $form->{closedto} ne '' ) {
+
+            # Loop through all currencies
+            foreach my $curr ( keys %{ $form->{all_transactions} } ) {
+
+                # Loop through all account numbers
+                foreach
+                  my $accno ( keys %{ $form->{all_transactions}->{$curr} } )
+                {
+                    # Loop through all customers
+                    foreach my $customer (
+                        keys %{ $form->{all_transactions}->{$curr}->{$accno} } )
+                    {
+                        # Filter out transactions with dates <= closedto
+                        my @filtered_transactions =
+                          grep { $_->{transdate} gt $form->{closedto} }
+                          @{ $form->{all_transactions}->{$curr}->{$accno}
+                              ->{$customer} };
+
+                        # Replace with filtered list
+                        $form->{all_transactions}->{$curr}->{$accno}
+                          ->{$customer} = \@filtered_transactions;
+
+                        # Remove empty customer entries
+                        if ( !@filtered_transactions ) {
+                            delete $form->{all_transactions}->{$curr}->{$accno}
+                              ->{$customer};
+                        }
+                    }
+
+                    # Remove empty account number entries
+                    if ( !keys %{ $form->{all_transactions}->{$curr}->{$accno} }
+                      )
+                    {
+                        delete $form->{all_transactions}->{$curr}->{$accno};
+                    }
+                }
+
+                # Remove empty currency entries
+                if ( !keys %{ $form->{all_transactions}->{$curr} } ) {
+                    delete $form->{all_transactions}->{$curr};
+                }
+            }
+        }
+
+        $c->render( json => $form->{all_transactions} );
+    }
+);
+$api->post(
+    '/invoice/consolidate' => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+        my $json   = $c->req->json;
+
+        my $form = $c->check_perms("customer.consolidate");
+        return $c->render(
+            json   => { error => "Permission denied" },
+            status => 403
+        ) unless $form;
+
+        # Ensure 'ids' is a space-separated string
+        if ( ref $json->{ids} eq 'ARRAY' ) {
+            $form->{ids} = join( ' ', @{ $json->{ids} } );
+
+            # Set ndx_<id> values for each ID
+            foreach my $id ( @{ $json->{ids} } ) {
+                $form->{"ndx_$id"} = 1;    # Mark the ID as selected
+            }
+        }
+        else {
+            return $c->render(
+                json   => { error => "Invalid input: 'ids' must be an array" },
+                status => 400
+            );
+        }
+
+        warn Dumper($form);
+
+        my $result = IS->consolidate_invoices( $c->slconfig, $form );
+
+        # Render the result
+        if ($result) {
+            $c->render( json => { success => 1 } );
+        }
+        else {
+            $c->render(
+                json   => { error => "Failed to consolidate invoices" },
+                status => 500
+            );
+        }
     }
 );
 
@@ -8250,7 +8354,6 @@ $api->delete(
         }
     }
 );
-
 $api->get(
     '/files/:module/:file' => sub {
         my $c      = shift;
