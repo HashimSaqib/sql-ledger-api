@@ -5,11 +5,11 @@ BEGIN {
 }
 
 use Mojolicious::Lite;
+use Minion;
 use XML::Hash::XS;
 use Data::Dumper;
 use Mojo::Util qw(unquote);
-use Mojo::JSON qw(encode_json);
-use JSON       qw (decode_json);
+use Mojo::JSON qw(encode_json decode_json);
 use Mojo::File;
 use Encode qw(decode encode);
 use MIME::Base64;
@@ -128,6 +128,9 @@ helper central_dbs => sub {
     return $dbs;
 };
 
+plugin Minion => { Pg =>
+      "postgresql://$postgres_user:$postgres_password\@localhost/centraldb" };
+
 helper validate_date => sub {
     my ( $c, $date ) = @_;
     unless ( $date =~ /^\d{4}-\d{2}-\d{2}$/ ) {
@@ -141,6 +144,7 @@ helper validate_date => sub {
     }
     return 1;    # return true if the date is valid
 };
+plugin 'Minion::Admin' => { return_to => '/minion' };
 
 # Enable CORS for all routes
 app->hook(
@@ -207,7 +211,7 @@ my $neoledger_perms =
 '["dashboard", "customer", "customer.transaction", "customer.invoice", "customer.consolidate", "customer.creditinvoice", "customer.addcustomer", "customer.transactions", "customer.search", "customer.history"
 , "vendor", "vendor.transaction", "vendor.invoice", "vendor.debitinvoice", "vendor.addvendor", "vendor.transactions", "vendor.search", "vendor.history", "cash", "cash.recon", "gl", "gl.add", "gl.transactions"
 , "items", "items.part", "items.service", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income", "system", "system.currencies", "system.projects"
-, "system.departments", "system.defaults", "system.user.roles", "system.user.employees", "system.chart", "system.chart.list", "system.chart.add", "system.chart.gifi", "system.taxes", "customer.return", "vendor.add", "vendor.return", "customer.invoice.return", "customer.add", "system.templates", "system.audit"]';
+, "system.departments", "system.defaults", "system.user.roles", "system.user.employees", "system.chart", "system.chart.list", "system.chart.add", "system.chart.gifi", "system.taxes", "customer.return", "vendor.add", "vendor.return", "customer.invoice.return", "customer.add", "system.templates", "system.audit", "system.batch"]';
 
 helper send_email_central => sub {
     use Email::Sender::Transport::SMTP;
@@ -4032,7 +4036,7 @@ $api->get(
 
 helper get_defaults => sub {
     my $c        = shift;
-    my $client   = $c->param('client');
+    my $client   = shift // $c->param('client');
     my $dbs      = $c->dbs($client);
     my $defaults = $dbs->query("SELECT * FROM defaults")->hashes;
 
@@ -4253,7 +4257,7 @@ $api->get(
         my $vendors            = $c->get_vc('vendor');
         my $projects           = $c->get_projects;
         my $gifi               = $c->get_gifi;
-        my $defaults           = $c->get_defaults;
+        my $defaults           = $c->get_defaults($client);
         my $formatted_closedto = $defaults->{closedto};
 
         if (   $formatted_closedto
@@ -7581,6 +7585,9 @@ sub build_invoice {
         $arap = "ap";
     }
 
+    my $config = $c->slconfig;
+    $config->{dbconnect} = "dbi:Pg:dbname=$client";
+
     if ( $invoice_type eq 'AR' ) {
         IS->retrieve_invoice( $c->slconfig, $form );
     }
@@ -8421,9 +8428,12 @@ $api->post(
             my $attachment_path;
             my $attachment_content;
 
+            # Generate a unique random string for filenames
+            my $random_str = sprintf( "%s_%s", time(), int( rand(1000000) ) );
+
             # Generate appropriate file based on attachment type
             if ( $attachment eq 'tex' ) {
-                $form->{OUT}    = ">tmp/invoice.pdf";
+                $form->{OUT}    = ">tmp/invoice_${id}_${random_str}.pdf";
                 $form->{format} = "pdf";
                 $form->{media}  = "screen";
                 $form->{copies} = 1;
@@ -8432,7 +8442,7 @@ $api->post(
                 my $xelatex = $defaults->{xelatex};
                 $form->parse_template( $c->slconfig, $userspath, $dvipdf,
                     $xelatex );
-                $attachment_path = "tmp/invoice.pdf";
+                $attachment_path = "tmp/invoice_${id}_${random_str}.pdf";
 
                 # Add the file path to attachments
                 push @attachments, $attachment_path;
@@ -8445,7 +8455,7 @@ $api->post(
                 );
             }
             elsif ( $attachment eq 'html' ) {
-                $form->{OUT} = ">tmp/invoice.html";
+                $form->{OUT} = ">tmp/invoice_${id}_${random_str}.html";
                 $form->parse_template( $c->slconfig, $userspath );
 
                 # Strip the '>' character from the output file path
@@ -8466,7 +8476,7 @@ $api->post(
                 }
 
                 # Write the PDF to a file
-                my $pdf_path = "tmp/invoice_html.pdf";
+                my $pdf_path = "tmp/invoice_${id}_${random_str}_html.pdf";
                 open my $pdf_fh, '>', $pdf_path
                   or die "Cannot write to $pdf_path: $!";
                 binmode $pdf_fh;
@@ -8540,6 +8550,605 @@ $api->post(
             $c->render(
                 json   => { success => 0, message => $error_msg },
                 status => 500
+            );
+        }
+    }
+);
+app->minion->add_task(
+    bulk_email => sub {
+        my ( $job, $args ) = @_;
+
+        my $client = $args->{client};
+        my $c      = $job->app;
+
+        my $dbs = $c->dbs($client);
+
+        my $emails     = $args->{emails};
+        my $vc         = $args->{vc};
+        my $attachment = $args->{attachment} || '';
+        my $inline     = $args->{inline}     || 0;
+        my $message    = $args->{message}    || '';
+        my $jobtype    = $args->{jobtype}    || 'bulk_email';
+        my $adminemail = $args->{adminemail};
+        my $form       = $args->{form};
+        my $config     = $args->{config};
+
+        # Initialize results tracking
+        my $results = {
+            total   => scalar @$emails,
+            success => 0,
+            failed  => 0,
+            errors  => [],
+            jobtype => $jobtype,
+            client  => $client
+        };
+
+        # Store initial progress in job notes
+        $job->note( client           => $client );
+        $job->note( total_emails     => scalar @$emails );
+        $job->note( emails_processed => 0 );
+        $job->note( progress_percent => 0 );
+        $job->note( jobtype          => $jobtype );
+
+        # Process each email in the batch
+        my $processed = 0;
+        foreach my $item (@$emails) {
+            my $id        = $item->{id}        || next;
+            my $type      = $item->{type}      || next;
+            my $email     = $item->{email}     || next;
+            my $name      = $item->{name}      || next;
+            my $invnumber = $item->{invnumber} || next;
+            my $cc        = $item->{cc}        || '';
+            my $bcc       = $item->{bcc}       || '';
+
+            # Create a form object for this email
+            my $form = new Form;
+            eval {
+                # Check permissions
+
+                $form->{vc} = $vc;
+                $form->{id} = $id;
+
+                # Build invoice data
+                build_invoice( $c, $client, $form, $dbs );
+
+                # Set up email content and attachments
+                my @attachments = ();
+
+                my $random_str =
+                  sprintf( "%s_%s", time(), int( rand(1000000) ) );
+
+                # Process attachment if requested
+                if ($attachment) {
+                    $form->{lastpage}          = 0;
+                    $form->{sumcarriedforward} = 0;
+                    $form->{templates}         = "templates/$client";
+                    $form->{IN}                = "$type.$attachment";
+
+                    my $userspath = "tmp";
+                    my $defaults  = $job->app->get_defaults($client);
+                    my $attachment_path;
+
+                    # Generate a unique random string for filenames
+
+                    # Generate appropriate file based on attachment type
+                    if ( $attachment eq 'tex' ) {
+                        $form->{OUT} = ">tmp/invoice_${id}_${random_str}.pdf";
+                        $form->{format} = "pdf";
+                        $form->{media}  = "screen";
+                        $form->{copies} = 1;
+
+                        my $dvipdf  = "";
+                        my $xelatex = $defaults->{xelatex};
+                        $form->parse_template( $config, $userspath,
+                            $dvipdf, $xelatex );
+                        $attachment_path =
+                          "tmp/invoice_${id}_${random_str}.pdf";
+
+                        # Add the file path to attachments
+                        push @attachments, $attachment_path;
+                    }
+                    elsif ( $attachment eq 'html' ) {
+                        $form->{OUT} = ">tmp/invoice_${id}_${random_str}.html";
+                        $form->parse_template( $config, $userspath );
+
+                        # Strip the '>' character from the output file path
+                        ( my $file_path = $form->{OUT} ) =~ s/^>//;
+
+                        # Read the HTML file content
+                        open my $fh, '<', $file_path
+                          or die "Cannot open $file_path: $!";
+                        { local $/; $form->{html_content} = <$fh> }
+                        close $fh;
+
+                        # Convert HTML to PDF
+                        my $pdf = html_to_pdf( $form->{html_content} );
+                        die "Failed to generate PDF" unless $pdf;
+
+                        # Write the PDF to a file
+                        my $pdf_path =
+                          "tmp/invoice_${id}_${random_str}_html.pdf";
+                        open my $pdf_fh, '>', $pdf_path
+                          or die "Cannot write to $pdf_path: $!";
+                        binmode $pdf_fh;
+                        print $pdf_fh $pdf;
+                        close $pdf_fh;
+
+                        # Add the file path to attachments
+                        push @attachments, $pdf_path;
+                    }
+                }
+
+                # Set up the email content
+                my $subject = "Invoice $form->{invnumber}";
+
+                # Add CC and BCC if provided
+                my $to = $email;
+                $to .= ",$cc"  if $cc;
+                $to .= ",$bcc" if $bcc;
+
+                my $now    = scalar localtime;
+                my $locale = Locale->new;
+
+                # Send email with or without attachments
+                my $status = $c->send_email_central( $to, $subject, $message,
+                    \@attachments );
+
+                # Update internal notes
+                $cc  = $locale->text('Cc') . qq|: $cc\n|   if $cc;
+                $bcc = $locale->text('Bcc') . qq|: $bcc\n| if $bcc;
+                my $int_notes = qq|$form->{intnotes}\n|;
+                $int_notes .=
+                    qq|[email]\n|
+                  . qq|Type: $type\n|
+                  . $locale->text('Date')
+                  . qq|: $now\n|
+                  . $locale->text('To')
+                  . qq|: $email\n${cc}${bcc}|
+                  . $locale->text('Subject')
+                  . qq|: $subject\n|;
+                $int_notes .= qq|\n| . $locale->text('Message') . qq|:|;
+                $int_notes .= ($message) ? $message : $locale->text('sent');
+
+                $form->{intnotes} = $int_notes;
+                $form->save_intnotes( $config, 'ar' );
+
+                # Handle reminder processing
+                if ( $type =~ /^reminder(\d+)$/ ) {
+                    my $level = $1;
+
+                    # Ensure the level doesn't exceed 3
+                    $level = 3 if $level > 3;
+
+                    # Delete existing reminder status records
+                    my $delete_query = qq|
+                        DELETE FROM status
+                        WHERE trans_id = ?
+                        AND formname LIKE 'reminder_%'
+                    |;
+                    $dbs->query( $delete_query, $id );
+
+                    # Insert new status record with the appropriate level
+                    if ( $level > 0 ) {
+                        $level++;
+                        $level = 3 if $level > 3;
+                        my $insert_query = qq|
+                            INSERT INTO status (trans_id, formname)
+                            VALUES (?, ?)
+                        |;
+                        $dbs->query( $insert_query, $id, "reminder$level" );
+                    }
+                }
+
+                # Update emailed status
+                if ( $form->{emailed} !~ /$type/ ) {
+                    $form->{emailed} .= " $type";
+                    $form->{emailed} =~ s/^ //;
+                    $form->{"$type\_emailed"} = 1;
+
+                    # save status
+                    $form->update_status($config);
+                }
+
+                # Clean up temporary files
+                if ($attachment) {
+                    if ( $attachment eq 'tex' ) {
+                        unlink "tmp/invoice_${id}_${random_str}.pdf"
+                          if -e "tmp/invoice_${id}_${random_str}.pdf";
+                    }
+                    elsif ( $attachment eq 'html' ) {
+                        unlink "tmp/invoice_${id}_${random_str}.html"
+                          if -e "tmp/invoice_${id}_${random_str}.html";
+                        unlink "tmp/invoice_${id}_${random_str}_html.pdf"
+                          if -e "tmp/invoice_${id}_${random_str}_html.pdf";
+                    }
+                }
+
+                # Track success
+                if ( $status && $status->{status} == 200 ) {
+                    $results->{success}++;
+                    push @{ $results->{successes} },
+                      {
+                        id        => $id,
+                        type      => $type,
+                        email     => $email,
+                        name      => $name,
+                        invnumber => $invnumber,
+                      };
+
+                    # Insert success record into job_status table
+                    $dbs->insert(
+                        'job_status',
+                        {
+                            job_id    => $job->id,
+                            trans_id  => $id,
+                            status    => 'success',
+                            type      => $type,
+                            email     => $email,
+                            name      => $name,
+                            reference => $invnumber
+                        }
+                    );
+                }
+                else {
+                    my $error_msg =
+                      $status ? $status->{error} : "Failed to send email";
+                    die $error_msg;
+                }
+            };
+
+            # Handle errors for this specific email
+            if ($@) {
+                my $error_message = "$@";
+                $results->{failed}++;
+                push @{ $results->{errors} },
+                  {
+                    id        => $id,
+                    type      => $type,
+                    email     => $email,
+                    name      => $name,
+                    invnumber => $invnumber,
+                    error     => $error_message
+                  };
+
+                # Insert error record into job_status table
+                $dbs->insert(
+                    'job_status',
+                    {
+                        job_id        => $job->id,
+                        trans_id      => $id,
+                        status        => 'error',
+                        type          => $type,
+                        email         => $email,
+                        name          => $name,
+                        reference     => $invnumber,
+                        error_message => $error_message
+                    }
+                );
+            }
+
+            # Update progress after each email is processed
+            $processed++;
+            my $progress_percent =
+              int( ( $processed / scalar(@$emails) ) * 100 );
+            $job->note( emails_processed => $processed );
+            $job->note( progress_percent => $progress_percent );
+            $job->note( success_count    => $results->{success} );
+            $job->note( failed_count     => $results->{failed} );
+        }
+
+        # Send completion email to admin
+        if ($adminemail) {
+            my $subject = "Bulk Email Job #" . $job->id . " Completed";
+            my $result_message =
+              "Bulk email job #" . $job->id . " completed.\n\n";
+            $result_message .= "Results:\n";
+            $result_message .= "- Total: $results->{total}\n";
+            $result_message .= "- Successful: $results->{success}\n";
+            $result_message .= "- Failed: $results->{failed}\n\n";
+
+            if ( $results->{failed} > 0 ) {
+                $result_message .= "Failed emails:\n";
+                foreach my $error ( @{ $results->{errors} } ) {
+                    $result_message .=
+"ID: $error->{id}, Type: $error->{type}, Email: $error->{email}, Name: $error->{name}, Invnumber: $error->{invnumber}\n";
+                    $result_message .= "Error: $error->{error}\n\n";
+                }
+            }
+
+            $c->send_email_central( $adminemail, $subject, $result_message,
+                [] );
+        }
+
+        # Update final progress status
+        $job->note( progress_percent => 100 );
+        $job->note( status           => 'completed' );
+
+        # Store the results in Minion's built-in results storage
+        $job->finish($results);
+    }
+);
+
+$api->post(
+    "/create_email_batch" => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+
+        # Extract JSON data from request
+        my $json = $c->req->json;
+
+        # Extract common parameters
+        my $vc = $json->{vc} || do {
+            $c->render(
+                json   => { success => 0, message => "Missing vc parameter" },
+                status => 400
+            );
+            return;
+        };
+
+        my $attachment = $json->{attachment} || '';
+        my $inline     = $json->{inline}     || 0;
+        my $message    = $json->{message}    || '';
+        my $jobtype    = $json->{jobtype}    || 'bulk_email';
+        my $adminemail = $json->{adminemail} || '';
+        $vc = $json->{vc} || '';
+        return unless my $form = $c->check_perms("$vc.transaction");
+        my $config = $c->slconfig;
+
+        # Extract email array
+        my $emails = $json->{emails} || do {
+            $c->render(
+                json   => { success => 0, message => "Missing emails array" },
+                status => 400
+            );
+            return;
+        };
+
+        # Validate emails array
+        unless ( ref $emails eq 'ARRAY' && @$emails > 0 ) {
+            $c->render(
+                json => {
+                    success => 0,
+                    message => "Invalid emails format or empty array"
+                },
+                status => 400
+            );
+            return;
+        }
+
+        # Queue the job with client association
+        my $job_id = $c->minion->enqueue(
+            bulk_email => [
+                {
+                    client     => $client,
+                    vc         => $vc,
+                    attachment => $attachment,
+                    inline     => $inline,
+                    message    => $message,
+                    emails     => $emails,
+                    jobtype    => $jobtype,
+                    adminemail => $adminemail,
+                    form       => $form,
+                    config     => $config
+                }
+            ] => {
+                priority => 1,
+                notes    => {
+                    client           => $client,
+                    total_emails     => scalar @$emails,
+                    emails_processed => 0,
+                    progress_percent => 0,
+                    jobtype          => $jobtype,
+                    status           => 'queued'
+                }
+            }
+        );
+
+        # Return job ID to client
+        $c->render(
+            json => {
+                success => 1,
+                message => "Bulk email job queued successfully",
+                job_id  => $job_id,
+                client  => $client
+            }
+        );
+    }
+);
+$api->get(
+    "/email_jobs" => sub {
+        my $c      = shift;
+        my $minion = $c->minion;
+        my $client = $c->param('client');
+
+        my $jobs = $minion->jobs();
+        my @job_data;
+
+        while ( my $info = $jobs->next ) {
+            warn( Dumper $info );
+            next
+              unless defined $info->{notes}
+              && defined $info->{notes}{client}
+              && $info->{notes}{client} eq $client;
+
+            my $notes = $info->{notes} // {};
+            my $args =
+              ( $info->{args} && @{ $info->{args} } ) ? $info->{args}[0] : {};
+
+            # Get success and failed counts directly from the database
+            my $dbs           = $c->dbs($client);
+            my $success_count = $dbs->query(
+"SELECT COUNT(*) FROM job_status WHERE job_id = ? AND status = 'success'",
+                $info->{id}
+            )->array->[0]
+              || 0;
+
+            my $failed_count = $dbs->query(
+"SELECT COUNT(*) FROM job_status WHERE job_id = ? AND status = 'error'",
+                $info->{id}
+            )->array->[0]
+              || 0;
+
+            push @job_data,
+              {
+                id               => $info->{id},
+                state            => $info->{state},
+                created          => $info->{created},
+                finished         => $info->{finished}          // '',
+                total_emails     => $notes->{total_emails}     // 0,
+                emails           => $args->{emails}            // [],
+                emails_processed => $notes->{emails_processed} // 0,
+                progress_percent => $notes->{progress_percent} // 0,
+                success_count    => $success_count,
+                failed_count     => $failed_count,
+                jobtype          => $notes->{jobtype}   // '',
+                status           => $notes->{status}    // $info->{state},
+                adminemail       => $args->{adminemail} // '',
+                attachment       => $args->{attachment} // ''
+              };
+        }
+
+        $c->render( json => { success => 1, jobs => \@job_data } );
+    }
+);
+$api->get(
+    "/email_job_status/:job_id" => sub {
+        my $c      = shift;
+        my $job_id = $c->param('job_id');
+        my $status =
+          $c->param('status');  # Optional: 'success', 'error', or undef for all
+        my $page     = $c->param('page')     || 1;
+        my $per_page = $c->param('per_page') || 50;
+        my $client   = $c->param('client');
+
+        my $dbs = $c->dbs($client);
+
+        # Build query based on parameters
+        my $query =
+          "SELECT *, reference AS invnumber FROM job_status WHERE job_id = ?";
+        my @params = ($job_id);
+
+        if ($status) {
+            $query .= " AND status = ?";
+            push @params, $status;
+        }
+
+        # Add order and pagination
+        $query .= " ORDER BY created_at DESC LIMIT ? OFFSET ?";
+        push @params, $per_page, ( $page - 1 ) * $per_page;
+
+        # Execute query using DBIx::Simple
+        my $results = $dbs->query( $query, @params )->hashes;
+
+        # Get total count for pagination
+        my $count_query  = "SELECT COUNT(*) FROM job_status WHERE job_id = ?";
+        my @count_params = ($job_id);
+
+        if ($status) {
+            $count_query .= " AND status = ?";
+            push @count_params, $status;
+        }
+
+        my $total = $dbs->query( $count_query, @count_params )->array->[0];
+
+        $c->render(
+            json => {
+                success  => 1,
+                total    => $total,
+                page     => $page,
+                per_page => $per_page,
+                items    => $results
+            }
+        );
+    }
+);
+
+$api->post(
+    "/manage_email_job" => sub {
+        my $c      = shift;
+        my $minion = $c->minion;
+        my $client = $c->param('client');
+        my $job_id = $c->param('job_id');
+        my $action = $c->param('action');
+
+        # Validate params
+        unless ( $job_id && $action ) {
+            return $c->render(
+                json => { success => 0, message => "Missing job_id or action" },
+                status => 400
+            );
+        }
+
+        # Get the job
+        my $job = $minion->job($job_id);
+        unless ($job) {
+            return $c->render(
+                json   => { success => 0, message => "Job not found" },
+                status => 404
+            );
+        }
+
+        # Verify job belongs to this client
+        my $job_info = $job->info;
+        unless ( defined $job_info->{notes}
+            && defined $job_info->{notes}{client}
+            && $job_info->{notes}{client} eq $client )
+        {
+            return $c->render(
+                json =>
+                  { success => 0, message => "Unauthorized access to job" },
+                status => 403
+            );
+        }
+
+        # Handle different actions
+        if ( $action eq 'cancel' ) {
+
+            # Cancel the job
+            if ( $job_info->{state} eq 'active' ) {
+                $job->fail( { error => "Cancelled by user" } );
+            }
+            else {
+                $job->remove;
+            }
+            return $c->render( json =>
+                  { success => 1, message => "Job cancelled successfully" } );
+        }
+        elsif ( $action eq 'restart' ) {
+
+            # Only restart inactive jobs
+            if ( $job_info->{state} eq 'active' ) {
+                return $c->render(
+                    json => {
+                        success => 0,
+                        message => "Cannot restart an active job"
+                    },
+                    status => 400
+                );
+            }
+
+            # Retry the job with same parameters
+            my $new_id = $job->retry;
+            return $c->render(
+                json => {
+                    success    => 1,
+                    message    => "Job restarted successfully",
+                    new_job_id => $new_id
+                }
+            );
+        }
+        elsif ( $action eq 'delete' ) {
+
+            # Remove the job from the queue
+            $job->remove;
+            return $c->render(
+                json => { success => 1, message => "Job deleted successfully" }
+            );
+        }
+        else {
+            return $c->render(
+                json => { success => 0, message => "Unknown action: $action" },
+                status => 400
             );
         }
     }

@@ -1,5 +1,6 @@
 
 ALTER TABLE ar ADD linetax INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE ap ADD linetax INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE acc_trans ADD tax_chart_id INTEGER;
 ALTER TABLE acc_trans ADD linetaxamount NUMERIC NOT NULL DEFAULT 0;
 
@@ -27,6 +28,20 @@ CREATE TABLE connections (
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     drive_id VARCHAR(255)              -- Google Drive ID
 );
+
+CREATE TABLE job_status (
+   id SERIAL PRIMARY KEY,
+   job_id TEXT NOT NULL,
+   trans_id TEXT NOT NULL,
+   status TEXT NOT NULL, -- 'success' or 'error'
+   type TEXT,
+   email TEXT,
+   name TEXT,
+   reference TEXT,
+   error_message TEXT,
+   created_at TIMESTAMP DEFAULT NOW()
+);
+
 
 CREATE INDEX idx_files_module ON files(module);
 CREATE INDEX idx_files_location ON files(location);

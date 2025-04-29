@@ -1626,7 +1626,7 @@ sub reminder {
               ad.address1, ad.address2, ad.city, ad.state, ad.zipcode, ad.country,
               c.contact,
               c.phone as $form->{vc}phone, c.fax as $form->{vc}fax,
-              c.$form->{vc}number, c.taxnumber as $form->{vc}taxnumber,
+              c.$form->{vc}number, c.taxnumber as $form->{vc}taxnumber, c.email,
               a.dcn, a.bank_id, a.description AS invdescription,
               a.invnumber, a.transdate, a.till, a.ordnumber, a.ponumber, a.notes,
               a.amount - a.paid AS due,
