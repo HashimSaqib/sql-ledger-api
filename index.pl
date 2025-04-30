@@ -8259,7 +8259,6 @@ $api->get(
         $transaction_data->{lastpage}          = 0;
         $transaction_data->{sumcarriedforward} = 0;
         $transaction_data->{templates}         = "templates/$client";
-        $transaction_data->{language_code}     = "en";
         $transaction_data->{IN}                = "$template.tex";
         $transaction_data->{OUT}               = ">tmp/transaction.pdf";
         $transaction_data->{format}            = "pdf";
