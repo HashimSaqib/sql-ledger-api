@@ -33,6 +33,7 @@ use SL::IC;
 use SL::PE;
 use SL::HR;
 use SL::FM;
+use SL::BP;
 use DateTime;
 use DateTime::Format::ISO8601;
 use Date::Parse;
@@ -208,8 +209,8 @@ get '/logo/:client/' => sub {
 ###############################
 
 my $neoledger_perms =
-'["dashboard", "customer", "customer.transaction", "customer.invoice", "customer.consolidate", "customer.creditinvoice", "customer.addcustomer", "customer.transactions", "customer.search", "customer.history"
-, "vendor", "vendor.transaction", "vendor.invoice", "vendor.debitinvoice", "vendor.addvendor", "vendor.transactions", "vendor.search", "vendor.history", "cash", "cash.recon", "gl", "gl.add", "gl.transactions"
+'["dashboard", "customer", "customer.transaction", "customer.invoice", "customer.consolidate", "customer.creditinvoice", "customer.addcustomer", "customer.transactions", "customer.search", "customer.history", "customer.batch",
+, "vendor", "vendor.transaction", "vendor.invoice", "vendor.debitinvoice", "vendor.addvendor", "vendor.transactions", "vendor.search", "vendor.history", "vendor.batch", "cash", "cash.recon", "gl", "gl.add", "gl.transactions"
 , "items", "items.part", "items.service", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income", "system", "system.currencies", "system.projects"
 , "system.departments", "system.defaults", "system.user.roles", "system.user.employees", "system.chart", "system.chart.list", "system.chart.add", "system.chart.gifi", "system.taxes", "customer.return", "vendor.add", "vendor.return", "customer.invoice.return", "customer.add", "system.templates", "system.audit", "system.batch"]';
 
@@ -4495,8 +4496,108 @@ $api->get(
 ####                       ####
 ###############################
 
-# Shared Routines for ARAP. AR Value is Customer & AP Value is Vendor
+$api->get(
+    '/arap/batch/:vc/:type' => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+        my $vc     = $c->param('vc');
+        my $type   = $c->param('type');
+        return unless my $form = $c->check_perms("$vc.batch");
 
+        my $dbs = $c->dbs($client);
+
+        # Get query parameters
+        my $params        = $c->req->params->to_hash;
+        my $open          = $params->{open}       // 1;
+        my $closed        = $params->{closed}     // 0;
+        my $onhold        = $params->{onhold}     // 0;
+        my $emailed       = $params->{emailed}    // 0;
+        my $notemailed    = $params->{notemailed} // 1;
+        my $transdatefrom = $params->{transdatefrom};
+        my $transdateto   = $params->{transdateto};
+        my $invnumber     = $params->{invnumber};
+        my $description   = $params->{description};
+        my $customer_id   = $params->{customer_id};
+
+        my $query = q{
+            SELECT 
+                a.id, vc.name,
+                vc.customernumber AS vcnumber,
+                a.invnumber, a.transdate,
+                a.ordnumber, a.quonumber, a.invoice,
+                'ar' AS tablename, '' AS spoolfile, a.description, a.amount,
+                'customer' AS vc,
+                ad.city, vc.email, 'customer' AS db,
+                vc.id AS vc_id,
+                a.shippingpoint, a.shipvia, a.waybill, a.terms,
+                a.duedate, a.notes, a.intnotes,
+                a.amount AS netamount, a.paid,
+                c.id as contact_id, c.firstname, c.lastname, c.salutation,
+                c.contacttitle, c.occupation, c.phone as contactphone,
+                c.fax as contactfax, c.email as contactemail,
+                s.emailed
+            FROM ar a
+            JOIN customer vc ON (a.customer_id = vc.id)
+            JOIN address ad ON (ad.trans_id = vc.id)
+            LEFT JOIN contact c ON vc.id = c.trans_id
+            LEFT JOIN status s ON s.trans_id = a.id AND s.formname = 'invoice'
+            WHERE a.invoice = '1'
+            AND a.amount > 0
+        };
+
+        # Add filters based on parameters
+        if ($onhold) {
+            $query .= " AND a.onhold = '1'";
+        }
+        else {
+            if ( $open && !$closed ) {
+                $query .= " AND a.amount != a.paid";
+            }
+            elsif ( $closed && !$open ) {
+                $query .= " AND a.amount = a.paid";
+            }
+        }
+
+        # Email status filters
+        if ( $emailed && !$notemailed ) {
+            $query .= " AND s.emailed = '1'";
+        }
+        elsif ( $notemailed && !$emailed ) {
+            $query .= " AND (s.emailed IS NULL OR s.emailed = '0')";
+        }
+
+        # Date range filters
+        if ($transdatefrom) {
+            $query .= " AND a.transdate >= '$transdatefrom'";
+        }
+        if ($transdateto) {
+            $query .= " AND a.transdate <= '$transdateto'";
+        }
+
+        # Invoice number filter
+        if ($invnumber) {
+            $invnumber = $dbs->quote("%$invnumber%");
+            $query .= " AND a.invnumber ILIKE $invnumber";
+        }
+
+        # Description filter
+        if ($description) {
+            $description = $dbs->quote("%$description%");
+            $query .= " AND a.description ILIKE $description";
+        }
+
+        # Customer ID filter
+        if ($customer_id) {
+            $query .= " AND a.customer_id = $customer_id";
+        }
+
+        $query .= " ORDER BY a.transdate DESC";
+
+        my $results = $dbs->query($query)->hashes;
+
+        $c->render( json => $results );
+    }
+);
 $api->get(
     '/arap/transactions/:vc' => sub {
         my $c      = shift;
@@ -8362,25 +8463,105 @@ $api->delete(
     }
 );
 $api->get(
-    '/files/:module/:file' => sub {
+    '/arap/batch/:vc/:type' => sub {
         my $c      = shift;
         my $client = $c->param('client');
-        my $module = $c->param('module');
-        my $file   = $c->param('file');
+        my $vc     = $c->param('vc');
+        my $type   = $c->param('type');
+        return unless my $form = $c->check_perms("$vc.batch");
 
-        my $dbs  = $c->dbs($client);
-        my $path = $dbs->query( "SELECT path FROM files WHERE id = ?", $file )
-          ->hash->{path};
+        my $dbs = $c->dbs($client);
 
-        $path = $c->app->home->rel_file($path);
+        # Get query parameters
+        my $params     = $c->req->params->to_hash;
+        my $open       = $params->{open}       // 1;  # Default to open invoices
+        my $closed     = $params->{closed}     // 0;
+        my $onhold     = $params->{onhold}     // 0;
+        my $emailed    = $params->{emailed}    // 0;
+        my $notemailed = $params->{notemailed} // 1;  # Default to not emailed
+        my $transdatefrom = $params->{transdatefrom};
+        my $transdateto   = $params->{transdateto};
+        my $invnumber     = $params->{invnumber};
+        my $description   = $params->{description};
+        my $customer_id   = $params->{customer_id};
 
-        # Check if the file exists, and serve it if it does
-        if ( -e $path ) {
-            return $c->reply->file($path);
+        my $query = q{
+            SELECT 
+                a.id, vc.name,
+                vc.customernumber AS vcnumber,
+                a.invnumber, a.transdate,
+                a.ordnumber, a.quonumber, a.invoice,
+                'ar' AS tablename, '' AS spoolfile, a.description, a.amount,
+                'customer' AS vc,
+                ad.city, vc.email, 'customer' AS db,
+                vc.id AS vc_id,
+                a.shippingpoint, a.shipvia, a.waybill, a.terms,
+                a.duedate, a.notes, a.intnotes,
+                a.amount AS netamount, a.paid,
+                c.id as contact_id, c.firstname, c.lastname, c.salutation,
+                c.contacttitle, c.occupation, c.phone as contactphone,
+                c.fax as contactfax, c.email as contactemail,
+                s.emailed
+            FROM ar a
+            JOIN customer vc ON (a.customer_id = vc.id)
+            JOIN address ad ON (ad.trans_id = vc.id)
+            LEFT JOIN contact c ON vc.id = c.trans_id
+            LEFT JOIN status s ON s.trans_id = a.id AND s.formname = 'invoice'
+            WHERE a.invoice = '1'
+            AND a.amount > 0
+        };
+
+        # Add filters based on parameters
+        if ($onhold) {
+            $query .= " AND a.onhold = '1'";
         }
         else {
-            return $c->reply->not_found;
+            if ( $open && !$closed ) {
+                $query .= " AND a.amount != a.paid";
+            }
+            elsif ( $closed && !$open ) {
+                $query .= " AND a.amount = a.paid";
+            }
         }
+
+        # Email status filters
+        if ( $emailed && !$notemailed ) {
+            $query .= " AND s.emailed = '1'";
+        }
+        elsif ( $notemailed && !$emailed ) {
+            $query .= " AND (s.emailed IS NULL OR s.emailed = '0')";
+        }
+
+        # Date range filters
+        if ($transdatefrom) {
+            $query .= " AND a.transdate >= '$transdatefrom'";
+        }
+        if ($transdateto) {
+            $query .= " AND a.transdate <= '$transdateto'";
+        }
+
+        # Invoice number filter
+        if ($invnumber) {
+            $invnumber = $dbs->quote("%$invnumber%");
+            $query .= " AND a.invnumber ILIKE $invnumber";
+        }
+
+        # Description filter
+        if ($description) {
+            $description = $dbs->quote("%$description%");
+            $query .= " AND a.description ILIKE $description";
+        }
+
+        # Customer ID filter
+        if ($customer_id) {
+            $query .= " AND a.customer_id = $customer_id";
+        }
+
+        $query .= " ORDER BY a.transdate DESC";
+
+        my $results = $dbs->query($query)->hashes;
+
+        $c->render( json => $results );
     }
 );
 
@@ -8698,16 +8879,12 @@ app->minion->add_task(
                 $cc  = $locale->text('Cc') . qq|: $cc\n|   if $cc;
                 $bcc = $locale->text('Bcc') . qq|: $bcc\n| if $bcc;
                 my $int_notes = qq|$form->{intnotes}\n|;
-                $int_notes .=
-                    qq|[email]\n|
-                  . qq|Type: $type\n|
-                  . $locale->text('Date')
-                  . qq|: $now\n|
-                  . $locale->text('To')
-                  . qq|: $email\n${cc}${bcc}|
-                  . $locale->text('Subject')
-                  . qq|: $subject\n|;
-                $int_notes .= qq|\n| . $locale->text('Message') . qq|:|;
+                $int_notes = qq|\n[email]\n|;
+                $int_notes .= qq|Type: $type\n|;
+                $int_notes .= $locale->text('Date') . qq|: $now\n|;
+                $int_notes .= $locale->text('To') . qq|: $email\n${cc}${bcc}|;
+                $int_notes .= $locale->text('Subject') . qq|: $subject\n|;
+                $int_notes .= $locale->text('Message') . qq|:|;
                 $int_notes .= ($message) ? $message : $locale->text('sent');
 
                 $form->{intnotes} = $int_notes;
