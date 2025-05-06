@@ -34,6 +34,7 @@ use SL::PE;
 use SL::HR;
 use SL::FM;
 use SL::BP;
+use SL::IM;
 use DateTime;
 use DateTime::Format::ISO8601;
 use Date::Parse;
@@ -49,6 +50,7 @@ use IO::Compress::Zip qw(zip $ZipError);
 use Archive::Zip      qw( :ERROR_CODES :CONSTANTS );
 use utf8;
 use open qw(:std :utf8);
+use Text::CSV;
 Dotenv->load;
 app->config( hypnotoad => { listen => ['http://*:3000'] } );
 my $base_url          = $ENV{BACKEND_URL};
@@ -2462,7 +2464,13 @@ $api->post(
 
         $data->{form} = $form;
         my $dbs = $c->dbs($client);
-        api_gl_transaction( $c, $dbs, $data );
+        my ( $status_code, $response_json ) =
+          api_gl_transaction( $c, $dbs, $data );
+
+        $c->render(
+            status => $status_code,
+            json   => $response_json,
+        );
     }
 );
 
@@ -2498,7 +2506,13 @@ $api->put(
                 );
             }
         }
-        api_gl_transaction( $c, $dbs, $data, $id );
+        my ( $status_code, $response_json ) =
+          api_gl_transaction( $c, $dbs, $data, $id );
+
+        $c->render(
+            status => $status_code,
+            json   => $response_json,
+        );
     }
 );
 
@@ -2543,36 +2557,29 @@ sub handle_multipart_request {
 }
 
 sub api_gl_transaction {
-    my ( $c, $dbs, $data, $id ) = @_;
+    my ( $c, $dbs, $data, $id, $dbh ) = @_;
 
     # Check if 'transdate' is present in the data
     unless ( exists $data->{transdate} ) {
-        return $c->render(
-            status => 400,
-            json   => { message => "The 'transdate' field is required.", }
-        );
+        return ( 400, { message => "The 'transdate' field is required." } );
     }
 
     my $transdate = $data->{transdate};
 
     # Validate 'transdate' format (ISO date format)
     unless ( $transdate =~ /^\d{4}-\d{2}-\d{2}$/ ) {
-        return $c->render(
-            status => 400,
-            json   => {
+        return (
+            400,
+            {
                 message =>
 "Invalid 'transdate' format. Expected ISO 8601 date format (YYYY-MM-DD)."
             }
-
         );
     }
 
     # Check if 'lines' is present and is an array reference
     unless ( exists $data->{lines} && ref $data->{lines} eq 'ARRAY' ) {
-        return $c->render(
-            status => 400,
-            json   => { message => "The 'lines' array is required." },
-        );
+        return ( 400, { message => "The 'lines' array is required." } );
     }
 
     # Find the default currency from the database
@@ -2587,10 +2594,7 @@ sub api_gl_transaction {
     my $result =
       $dbs->query( "SELECT rn, curr FROM curr WHERE curr = ?", $data->{curr} );
     unless ( $result->rows ) {
-        return $c->render(
-            status => 400,
-            json   => { message => "The specified currency does not exist." },
-        );
+        return ( 400, { message => "The specified currency does not exist." } );
     }
 
  # If the provided currency is not the default currency, check for exchange rate
@@ -2598,12 +2602,12 @@ sub api_gl_transaction {
     if ( $row->{curr} ne $default_currency
         && !exists $data->{exchangeRate} )
     {
-        return $c->render(
-            status => 400,
-            json   => {
+        return (
+            400,
+            {
                 message =>
 "A non-default currency has been used. Exchange rate is required."
-            },
+            }
         );
     }
 
@@ -2612,6 +2616,9 @@ sub api_gl_transaction {
 
     if ($id) {
         $form->{id} = $id;
+    }
+    else {
+        $form->{id} = '';
     }
 
     if ( !$data->{department} ) { $data->{department} = 0 }
@@ -2638,13 +2645,13 @@ sub api_gl_transaction {
           $dbs->query( "SELECT id from chart WHERE accno = ?", $line->{accno} );
 
         if ( !$acc_id ) {
-            return $c->render(
-                status => 400,
-                json   => {
+            return (
+                400,
+                {
                         message => "Account with the accno "
                       . $line->{accno}
-                      . " does not exist.",
-                },
+                      . " does not exist."
+                }
             );
         }
 
@@ -2664,12 +2671,12 @@ sub api_gl_transaction {
 
     # Check if total_debit equals total_credit
     unless ( $total_debit == $total_credit ) {
-        return $c->render(
-            status => 400,
-            json   => {
+        return (
+            400,
+            {
                 message =>
-"Total Debits ($total_debit) must equal Total Credits ($total_credit).",
-            },
+"Total Debits ($total_debit) must equal Total Credits ($total_credit)."
+            }
         );
     }
 
@@ -2677,7 +2684,13 @@ sub api_gl_transaction {
     $form->{rowcount} = $i - 1;
 
     # Call the function to add the transaction
-    $id = GL->post_transaction( $c->slconfig, $form );
+    if ($dbh) {
+        $id = GL->post_transaction( $c->slconfig, $form, $dbs );
+        $dbh->commit;
+    }
+    else {
+        $id = GL->post_transaction( $c->slconfig, $form );
+    }
 
     if ( $data->{files} && ref $data->{files} eq 'ARRAY' ) {
         $form->{files}  = $data->{files};
@@ -2726,14 +2739,92 @@ sub api_gl_transaction {
           };
     }
 
-    my $status_code =
-      $c->param('id') ? 200 : 201;    # 200 for update, 201 for create
+    my $status_code = $id ? 200 : 201;    # 200 for update, 201 for create
 
-    $c->render(
-        status => $status_code,
-        json   => $response_json,
-    );
+    return ( $status_code, $response_json );
 }
+$api->post(
+    '/import/:type' => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+        my $type   = $c->param('type');
+        return unless my $form = $c->check_perms("import.$type");
+
+        # Get request body as JSON
+        my $json = $c->req->json;
+
+        if ( $type eq 'gl' ) {
+
+            # Check if JSON payload is an array
+            unless ( ref $json eq 'ARRAY' ) {
+                $c->render(
+                    json => { error => "Expected JSON array of transactions" },
+                    status => 400
+                );
+                return;
+            }
+
+            my $dbs                 = $c->dbs($client);
+            my $success_count       = 0;
+            my $failed_count        = 0;
+            my @failed_transactions = ();
+            my @added_transactions  = ();
+
+            # Process each transaction in the array
+            foreach my $transaction (@$json) {
+
+                # Set the form object for api_gl_transaction
+                $transaction->{form} = $form;
+
+                my $dbh = $form->dbconnect_noauto( $c->slconfig );
+
+                # Call api_gl_transaction for each item in the array
+                my ( $status_code, $response_json ) =
+                  api_gl_transaction( $c, $dbs, $transaction, $dbh );
+
+                if ( $status_code >= 200 && $status_code < 300 ) {
+                    $success_count++;
+                    push @added_transactions, $response_json;
+                }
+                else {
+                    $failed_count++;
+                    push @failed_transactions,
+                      {
+                        transaction => $transaction,
+                        error => $response_json->{message} || "Unknown error"
+                      };
+                }
+            }
+
+            my $status_code = 200;
+            if ( $failed_count > 0 && $success_count > 0 ) {
+                $status_code = 207;    # Partial success
+            }
+            elsif ( $failed_count > 0 && $success_count == 0 ) {
+                $status_code = 400;    # Complete failure
+            }
+
+            $c->render(
+                json => {
+                    success => $success_count > 0 ? 1 : 0,
+                    added   => \@added_transactions,
+                    failed  => \@failed_transactions,
+                    counts  => {
+                        success => $success_count,
+                        failed  => $failed_count
+                    }
+                },
+                status => $status_code
+            );
+        }
+        else {
+            $c->render(
+                json   => { error => "Import type '$type' is not supported" },
+                status => 400
+            );
+        }
+    }
+);
 
 $api->delete(
     '/gl/transactions/:id' => sub {
@@ -4226,6 +4317,24 @@ helper lock_number => sub {
         return 0;
     }
 };
+helper get_items => sub {
+    my $c     = shift;
+    my $dbs   = shift;
+    my $parts = $dbs->query("SELECT * FROM parts")->hashes;
+
+    foreach my $part (@$parts) {
+        my $taxaccounts = $dbs->query( "
+            SELECT chart.accno 
+            FROM partstax 
+            JOIN chart ON partstax.chart_id = chart.id 
+            WHERE partstax.parts_id = ?",
+            $part->{id} )->arrays;
+
+        # Add tax accounts as an array of accnos
+        $part->{taxaccounts} = [ map { $_->[0] } @$taxaccounts ];
+    }
+    return $parts;
+};
 $api->get(
     '/create_links/:module' => sub {
         my $c      = shift;
@@ -4235,7 +4344,7 @@ $api->get(
 
         # List of valid modules
         my @valid_modules =
-          qw(customer vendor ic gl chart gl_report projects incomestatement employees reminder);
+          qw(customer vendor ic gl chart gl_report projects incomestatement employees reminder import);
 
         # Return empty JSON object if module not valid
         return $c->render( json => {} )
@@ -4256,6 +4365,7 @@ $api->get(
         my $projects           = $c->get_projects;
         my $gifi               = $c->get_gifi;
         my $defaults           = $c->get_defaults($client);
+        my $parts              = $c->get_items($dbs);
         my $formatted_closedto = $defaults->{closedto};
 
         if (   $formatted_closedto
@@ -4459,6 +4569,27 @@ $api->get(
                 linetax      => $line_tax,
                 departments  => $departments,
                 projects     => $projects,
+            };
+        }
+
+        #---------------
+        # Import
+        #---------------
+        elsif ( $module eq 'import' ) {
+            return unless $c->check_perms('import.gl');
+            my $role        = undef;
+            my $departments = $c->get_departments($role);
+
+            $response = {
+                currencies   => $currencies,
+                accounts     => $accounts,
+                tax_accounts => $tax_accounts,
+                customers    => $customers,
+                vendors      => $vendors,
+                departments  => $departments,
+                projects     => $projects,
+                closedto     => $formatted_closedto,
+                parts        => $parts,
             };
         }
 
@@ -4923,6 +5054,84 @@ $api->post(
         $c->render( json => {%$form} );
     }
 );
+
+$api->post(
+    '/import/invoice/:vc/' => sub {
+        my $c  = shift;
+        my $vc = $c->param('vc');
+        return unless my $form = $c->check_perms("$vc.invoice");
+        my $client = $c->param('client');
+
+        my $transactions = $c->req->json;
+        unless ( ref($transactions) eq 'ARRAY' ) {
+            return $c->render(
+                status => 400,
+                json   => { message => "Expected a JSON array of invoices" }
+            );
+        }
+
+        my @results;
+        foreach my $transaction (@$transactions) {
+            my $new_invoice_id = process_invoice( $c, $transaction );
+            push @results,
+              {
+                id      => $new_invoice_id,
+                success => defined($new_invoice_id),
+                error   => defined($new_invoice_id)
+                ? undef
+                : "Failed to process invoice"
+              };
+        }
+
+        $c->render( json => \@results );
+    }
+);
+
+$api->post(
+    '/import/arap/:vc/' => sub {
+        my $c  = shift;
+        my $vc = $c->param('vc');
+        return unless my $form = $c->check_perms("$vc.add");
+        my $client = $c->param('client');
+
+        my $transactions = $c->req->json;
+        unless ( ref($transactions) eq 'ARRAY' ) {
+            return $c->render(
+                status => 400,
+                json   => { message => "Expected a JSON array of transactions" }
+            );
+        }
+
+        my @results;
+        foreach my $transaction (@$transactions) {
+            $form           = new Form;
+            $form->{db}     = $vc;
+            $form->{client} = $client;
+
+            # Copy transaction data to form
+            for my $key ( keys %$transaction ) {
+                $form->{$key} = $transaction->{$key};
+            }
+
+            # Set vcnumber from transaction data
+            $form->{ $vc =~ /^vendor$/i ? 'vendornumber' : 'customernumber' } =
+              $transaction->{vcnumber};
+
+            # Save the transaction
+            CT->save( $c->slconfig, $form );
+
+            push @results,
+              {
+                id      => $form->{id},
+                success => !$form->{error},
+                error   => $form->{error}
+              };
+        }
+
+        $c->render( json => \@results );
+    }
+);
+
 $api->get(
     '/:vc/history/' => sub {
         my $c      = shift;
@@ -5446,12 +5655,159 @@ $api->get(
         $c->render( json => $json_data );
     }
 );
+
+sub process_invoice {
+    my ( $c, $data ) = @_;
+
+    my $client = $c->param('client');
+    my $id     = $c->param('id');
+    my $vc     = $c->param('vc');
+
+    # Determine if this should be AR or AP
+    my $invoice_type = ( $vc eq 'vendor' ) ? 'AP' : 'AR';
+
+    # Configure DB connection
+    my $dbs = $c->dbs($client);
+    $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+
+    # Initialize form
+    my $form = Form->new;
+
+    # Set the ID if provided; otherwise it will post as a new invoice
+    $form->{id} = $id if $id;
+
+    # Basic invoice details common to both AR and AP
+    $form->{invnumber}   = $data->{invNumber}   || '';
+    $form->{description} = $data->{description} || '';
+
+    $form->{type}         = $data->{type};
+    $form->{transdate}    = $data->{invDate};
+    $form->{duedate}      = $data->{dueDate};
+    $form->{currency}     = $data->{currency};
+    $form->{exchangerate} = $data->{exchangerate} || 1;
+    $form->{notes}        = $data->{notes}        || '';
+    $form->{intnotes}     = $data->{intnotes}     || '';
+    $form->{till}         = $data->{till}         || '';
+    $form->{department}   = $data->{department}   || '';
+
+    # Set up AR or AP account from JSON
+    # for AR, it's $form->{AR}, for AP, it's $form->{AP}.
+    if ( $invoice_type eq 'AR' ) {
+
+        # AR fields
+        $form->{AR}          = $data->{recordAccount};
+        $form->{customer_id} = $data->{customer_id};
+    }
+    else {
+        # AP fields
+        $form->{AP}        = $data->{recordAccount};
+        $form->{vendor_id} = $data->{selectedVendor}->{id};
+    }
+
+    # Additional invoice details
+    $form->{ordnumber}     = $data->{ordNumber}     || '';
+    $form->{ponumber}      = $data->{poNumber}      || '';
+    $form->{shippingpoint} = $data->{shippingPoint} || '';
+    $form->{shipvia}       = $data->{shipVia}       || '';
+    $form->{waybill}       = $data->{wayBill}       || '';
+
+    my $shipto;
+    foreach my $item (
+        qw(name address1 address2 city state zipcode country contact phone fax email)
+      )
+    {
+        $form->{"shipto$item"} = $data->{shipto}->{$item};
+    }
+
+    # Build line items
+    $form->{rowcount} = scalar @{ $data->{lines} || [] };
+    for my $i ( 1 .. $form->{rowcount} ) {
+        my $line = $data->{lines}[ $i - 1 ];
+        $form->{"id_$i"}               = $line->{number};
+        $form->{"description_$i"}      = $line->{description};
+        $form->{"qty_$i"}              = $line->{qty};
+        $form->{"sellprice_$i"}        = $line->{price};
+        $form->{"discount_$i"}         = $line->{discount}         || 0;
+        $form->{"unit_$i"}             = $line->{unit}             || '';
+        $form->{"lineitemdetail_$i"}   = $line->{lineitemdetail}   || 0;
+        $form->{"deliverydate_$i"}     = $line->{deliverydate}     || '';
+        $form->{"itemnotes_$i"}        = $line->{itemnotes}        || '';
+        $form->{"ordernumber_$i"}      = $line->{ordernumber}      || '';
+        $form->{"serialnumber_$i"}     = $line->{serialnumber}     || '';
+        $form->{"customerponumber_$i"} = $line->{customerponumber} || '';
+        $form->{"costvendor_$i"}       = $line->{costvendor}       || '';
+        $form->{"package_$i"}          = $line->{package}          || '';
+        $form->{"volume_$i"}           = $line->{volume}           || '';
+        $form->{"weight_$i"}           = $line->{weight}           || '';
+        $form->{"netweight_$i"}        = $line->{netweight}        || '';
+        $form->{"cost_$i"}             = $line->{cost}             || '';
+        $form->{"projectnumber_$i"}    = $line->{project}          || '';
+    }
+
+    # Build payments
+    $form->{paidaccounts} = 0;    # Start with zero processed payments
+    for my $payment ( @{ $data->{payments} || [] } ) {
+
+        # Only process positive amounts
+        next unless $payment->{amount} && $payment->{amount} > 0;
+        $form->{paidaccounts}++;
+        my $i = $form->{paidaccounts};
+
+        # Payment date, memo, etc.
+        $form->{"datepaid_$i"}     = $payment->{date}   || '';
+        $form->{"source_$i"}       = $payment->{source} || '';
+        $form->{"memo_$i"}         = $payment->{memo}   || '';
+        $form->{"paid_$i"}         = $payment->{amount};
+        $form->{"exchangerate_$i"} = $payment->{exchangerate} || 1;
+
+        # For AR invoices, the paid key is AR_paid_$i; for AP, it's AP_paid_$i
+        my $paid_key = $invoice_type . "_paid_$i";
+        $form->{$paid_key} = $payment->{account};
+    }
+
+    # Taxes
+    $form->{taxincluded} = 0;
+    if ( $data->{taxes} && ref( $data->{taxes} ) eq 'ARRAY' ) {
+        my @taxaccounts;
+        for my $tax ( @{ $data->{taxes} } ) {
+            push @taxaccounts, $tax->{accno};
+
+            # e.g. $form->{"$tax->{accno}_rate"} = $tax->{rate};
+            $form->{"$tax->{accno}_rate"} = $tax->{rate};
+        }
+        $form->{taxaccounts} = join( ' ', @taxaccounts );
+        $form->{taxincluded} = $data->{taxincluded};
+    }
+
+    # Other defaults
+    $form->{employee_id}   = undef;
+    $form->{language_code} = '';
+    $form->{precision}     = $data->{selectedCurrency}->{prec} || 2;
+
+    warn Dumper($form);
+
+    # Finally, post invoice to LedgerSMB
+    if ( $invoice_type eq 'AR' ) {
+        IS->post_invoice( $c->slconfig, $form );
+    }
+    else {
+        IR->post_invoice( $c->slconfig, $form );
+    }
+
+    if ( $data->{files} && ref $data->{files} eq 'ARRAY' ) {
+        $form->{files}  = $data->{files};
+        $form->{client} = $c->param('client');
+        FM->upload_files( $dbs, $c, $form, $vc );
+    }
+
+    return $form->{id};
+}
 $api->post(
     '/arap/invoice/:vc/:id' => { id => undef } => sub {
         my $c      = shift;
-        my $client = $c->param('client');
-        my $id     = $c->param('id');
         my $vc     = $c->param('vc');
+        my $id     = $c->param('id');
+        my $client = $c->param('client');
 
         my $data;
         my $content_type = $c->req->headers->content_type || '';
@@ -5463,149 +5819,10 @@ $api->post(
             $data = $c->req->json;
         }
 
-        warn Dumper($data);
-
-        # Determine if this should be AR or AP
-        my $invoice_type = ( $vc eq 'vendor' ) ? 'AP' : 'AR';
-
-        # Configure DB connection
-        my $dbs = $c->dbs($client);
-        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
-
-        # Initialize form
-        my $form = Form->new;
-
-        # Set the ID if provided; otherwise it will post as a new invoice
-        $form->{id} = $id if $id;
-
-        # Basic invoice details common to both AR and AP
-        $form->{invnumber}   = $data->{invNumber}   || '';
-        $form->{description} = $data->{description} || '';
-
-        $form->{type}         = $data->{type};
-        $form->{transdate}    = $data->{invDate};
-        $form->{duedate}      = $data->{dueDate};
-        $form->{currency}     = $data->{currency};
-        $form->{exchangerate} = $data->{exchangerate} || 1;
-        $form->{notes}        = $data->{notes}        || '';
-        $form->{intnotes}     = $data->{intnotes}     || '';
-        $form->{till}         = $data->{till}         || '';
-        $form->{department}   = $data->{department}   || '';
-
-        # Set up AR or AP account from JSON
-        # for AR, it's $form->{AR}, for AP, it's $form->{AP}.
-        if ( $invoice_type eq 'AR' ) {
-
-            # AR fields
-            $form->{AR}          = $data->{recordAccount};
-            $form->{customer_id} = $data->{customer_id};
-            $form->{customer}    = $data->{customer};
-        }
-        else {
-            # AP fields
-            $form->{AP}        = $data->{recordAccount};
-            $form->{vendor_id} = $data->{selectedVendor}->{id};
-            $form->{vendor}    = $data->{selectedVendor}->{name};
-        }
-
-        # Additional invoice details
-        $form->{ordnumber}     = $data->{ordNumber}     || '';
-        $form->{ponumber}      = $data->{poNumber}      || '';
-        $form->{shippingpoint} = $data->{shippingPoint} || '';
-        $form->{shipvia}       = $data->{shipVia}       || '';
-        $form->{waybill}       = $data->{wayBill}       || '';
-
-        my $shipto;
-        foreach my $item (
-            qw(name address1 address2 city state zipcode country contact phone fax email)
-          )
-        {
-            $form->{"shipto$item"} = $data->{shipto}->{$item};
-        }
-
-        # Build line items
-        $form->{rowcount} = scalar @{ $data->{lines} || [] };
-        for my $i ( 1 .. $form->{rowcount} ) {
-            my $line = $data->{lines}[ $i - 1 ];
-            $form->{"id_$i"}               = $line->{number};
-            $form->{"description_$i"}      = $line->{description};
-            $form->{"qty_$i"}              = $line->{qty};
-            $form->{"sellprice_$i"}        = $line->{price};
-            $form->{"discount_$i"}         = $line->{discount}         || 0;
-            $form->{"unit_$i"}             = $line->{unit}             || '';
-            $form->{"lineitemdetail_$i"}   = $line->{lineitemdetail}   || 0;
-            $form->{"deliverydate_$i"}     = $line->{deliverydate}     || '';
-            $form->{"itemnotes_$i"}        = $line->{itemnotes}        || '';
-            $form->{"ordernumber_$i"}      = $line->{ordernumber}      || '';
-            $form->{"serialnumber_$i"}     = $line->{serialnumber}     || '';
-            $form->{"customerponumber_$i"} = $line->{customerponumber} || '';
-            $form->{"costvendor_$i"}       = $line->{costvendor}       || '';
-            $form->{"package_$i"}          = $line->{package}          || '';
-            $form->{"volume_$i"}           = $line->{volume}           || '';
-            $form->{"weight_$i"}           = $line->{weight}           || '';
-            $form->{"netweight_$i"}        = $line->{netweight}        || '';
-            $form->{"cost_$i"}             = $line->{cost}             || '';
-            $form->{"projectnumber_$i"}    = $line->{project}          || '';
-        }
-
-        # Build payments
-        $form->{paidaccounts} = 0;    # Start with zero processed payments
-        for my $payment ( @{ $data->{payments} || [] } ) {
-
-            # Only process positive amounts
-            next unless $payment->{amount} && $payment->{amount} > 0;
-            $form->{paidaccounts}++;
-            my $i = $form->{paidaccounts};
-
-            # Payment date, memo, etc.
-            $form->{"datepaid_$i"}     = $payment->{date}   || '';
-            $form->{"source_$i"}       = $payment->{source} || '';
-            $form->{"memo_$i"}         = $payment->{memo}   || '';
-            $form->{"paid_$i"}         = $payment->{amount};
-            $form->{"exchangerate_$i"} = $payment->{exchangerate} || 1;
-
-          # For AR invoices, the paid key is AR_paid_$i; for AP, it's AP_paid_$i
-            my $paid_key = $invoice_type . "_paid_$i";
-            $form->{$paid_key} = $payment->{account};
-        }
-
-        # Taxes
-        $form->{taxincluded} = 0;
-        if ( $data->{taxes} && ref( $data->{taxes} ) eq 'ARRAY' ) {
-            my @taxaccounts;
-            for my $tax ( @{ $data->{taxes} } ) {
-                push @taxaccounts, $tax->{accno};
-
-                # e.g. $form->{"$tax->{accno}_rate"} = $tax->{rate};
-                $form->{"$tax->{accno}_rate"} = $tax->{rate};
-            }
-            $form->{taxaccounts} = join( ' ', @taxaccounts );
-            $form->{taxincluded} = $data->{taxincluded};
-        }
-
-        # Other defaults
-        $form->{employee_id}   = undef;
-        $form->{language_code} = '';
-        $form->{precision}     = $data->{selectedCurrency}->{prec} || 2;
-
-        warn Dumper($form);
-
-        # Finally, post invoice to LedgerSMB
-        if ( $invoice_type eq 'AR' ) {
-            IS->post_invoice( $c->slconfig, $form );
-        }
-        else {
-            IR->post_invoice( $c->slconfig, $form );
-        }
-
-        if ( $data->{files} && ref $data->{files} eq 'ARRAY' ) {
-            $form->{files}  = $data->{files};
-            $form->{client} = $c->param('client');
-            FM->upload_files( $dbs, $c, $form, $vc );
-        }
+        my $new_invoice_id = process_invoice( $c, $data );
 
         # Return the newly posted or updated invoice ID
-        $c->render( json => { id => $form->{id} } );
+        $c->render( json => { id => $new_invoice_id } );
     }
 );
 
