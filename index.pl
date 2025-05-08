@@ -6336,12 +6336,9 @@ qq|<tr valign="top"><th align="left" colspan="2">INCOME / (LOSS)</th>|;
                 $form->{decimalplaces},
                 ''
             );
-            $total_income_html .=
-              qq|<td align="right">$inc<hr noshade size="2"></td>|;
-            $total_expense_html .=
-              qq|<td align="right">$exp<hr noshade size="2"></td>|;
-            $total_profit_html .=
-              qq|<td align="right">$profit<hr noshade size="2"></td>|;
+            $total_income_html  .= qq|<td align="right">$inc</td>|;
+            $total_expense_html .= qq|<td align="right">$exp</td>|;
+            $total_profit_html  .= qq|<td align="right">$profit</td>|;
         }
         $total_income_html  .= "</tr>\n";
         $total_expense_html .= "</tr>\n";
@@ -6522,12 +6519,10 @@ qq|<tr valign="top"><td> </td><th align="left">TOTAL LIABILITIES</th>|;
                 $net_totals{total_equity}{$period},
                 $form->{decimalplaces}, ''
             );
-            $total_assets_html .=
-              qq|<td align="right">$asset_total<hr noshade size="2"></td>|;
+            $total_assets_html .= qq|<td align="right">$asset_total</td>|;
             $total_liabilities_html .=
-              qq|<td align="right">$liability_total<hr noshade size="2"></td>|;
-            $total_equity_html .=
-              qq|<td align="right">$equity_total<hr noshade size="2"></td>|;
+              qq|<td align="right">$liability_total</td>|;
+            $total_equity_html .= qq|<td align="right">$equity_total</td>|;
         }
         $total_assets_html      .= "</tr>\n";
         $total_liabilities_html .= "</tr>\n";
