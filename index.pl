@@ -5088,6 +5088,38 @@ $api->post(
 );
 
 $api->post(
+    '/import/transaction/:vc/' => sub {
+        my $c  = shift;
+        my $vc = $c->param('vc');
+        return unless my $form = $c->check_perms("$vc.transaction");
+        my $client = $c->param('client');
+
+        my $transactions = $c->req->json;
+        unless ( ref($transactions) eq 'ARRAY' ) {
+            return $c->render(
+                status => 400,
+                json   => { message => "Expected a JSON array of transactions" }
+            );
+        }
+
+        my @results;
+        foreach my $transaction (@$transactions) {
+            my $new_transaction_id = process_transaction( $c, $transaction );
+            push @results,
+              {
+                id      => $new_transaction_id,
+                success => defined($new_transaction_id),
+                error   => defined($new_transaction_id)
+                ? undef
+                : "Failed to process transaction"
+              };
+        }
+
+        $c->render( json => \@results );
+    }
+);
+
+$api->post(
     '/import/arap/:vc/' => sub {
         my $c  = shift;
         my $vc = $c->param('vc');
