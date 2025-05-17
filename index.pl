@@ -4618,6 +4618,43 @@ $api->get(
     }
 );
 
+$api->get(
+    '/next_number/:module' => sub {
+        my $c      = shift;
+        my $module = $c->param('module');
+        my $client = $c->param('client');
+        my $form   = new Form;
+        my $number;
+        if ( $module eq 'gl' ) {
+            return unless $form = $c->check_perms('gl.add,gl.import');
+            $number = $form->update_defaults( $c->slconfig, 'glnumber' );
+        }
+        elsif ( $module eq 'ar' ) {
+            return
+              unless $form = $c->check_perms(
+'customer.transaction,customer.creditinvoicecustomer.import,customer.invoice'
+              );
+            $number = $form->update_defaults( $c->slconfig, 'sinumber' );
+        }
+        elsif ( $module eq 'ap' ) {
+            return
+              unless $form = $c->check_perms(
+'vendor.transaction,vendor.debitinvoice,vendor.import,vendor.invoice'
+              );
+            $number = $form->update_defaults( $c->slconfig, 'vinumber' );
+        }
+        elsif ( $module eq 'customer' ) {
+            return
+              unless $form = $c->check_perms('customer.add,customer.import');
+            $number = $form->update_defaults( $c->slconfig, 'customernumber' );
+        }
+        elsif ( $module eq 'vendor' ) {
+            return unless $form = $c->check_perms('vendor.add,vendor.import');
+            $number = $form->update_defaults( $c->slconfig, 'vendornumber' );
+        }
+        $c->render( json => { number => $number } );
+    }
+);
 ###############################
 ####                       ####
 ####         ARAP          ####
