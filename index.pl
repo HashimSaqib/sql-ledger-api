@@ -4612,24 +4612,56 @@ $api->get(
         $c->render( json => $response );
     }
 );
-
 $api->get(
     '/last_transactions/:module' => sub {
         my $c      = shift;
         my $module = $c->param('module');
         my $client = $c->param('client');
         my $dbs    = $c->dbs($client);
-        my $vc     = $c->param('vc');
+
+        my $sql;
         if ( $module eq 'gl' ) {
-            return unless $c->check_perms('gl.transactions');
+            return unless $c->check_perms('gl.transaction');
+            $sql = qq{
+                SELECT
+        gl.*,
+        d.description  AS department,
+        COALESCE(a.amount, 0) AS amount
+        FROM gl
+        LEFT JOIN (
+        SELECT
+            trans_id,
+            SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END) AS amount
+        FROM acc_trans
+        GROUP BY trans_id
+        ) AS a
+        ON a.trans_id = gl.id
+        LEFT JOIN department AS d
+        ON d.id = gl.department_id
+        ORDER BY gl.transdate DESC, gl.id DESC
+        LIMIT 5;
         }
-        elsif ( $module eq 'ar' ) {
-            return unless $c->check_perms('customer.transactions');
         }
-        elsif ( $module eq 'ap' ) {
-            return unless $c->check_perms('vendor.transactions');
+        elsif ( $module eq 'ar' || $module eq 'ap' ) {
+            my $db    = $module;
+            my $vc    = $module eq 'ar' ? 'customer'    : 'vendor';
+            my $vc_id = $module eq 'ar' ? 'customer_id' : 'vendor_id';
+            if ( $module eq 'ar' ) {
+                return unless $c->check_perms('customer.transactions');
+            }
+            else {
+                return unless $c->check_perms('vendor.transactions');
+            }
+            $sql = qq{
+                SELECT db.*, vc.name FROM $db db
+                LEFT JOIN $vc vc on db.$vc_id = vc.id
+                ORDER BY db.transdate DESC, db.id DESC
+                LIMIT 5;
+                }
         }
 
+        my $transactions = $dbs->query($sql)->hashes;
+        $c->render( json => $transactions );
     }
 );
 
