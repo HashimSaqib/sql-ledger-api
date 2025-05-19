@@ -58,7 +58,7 @@ my $front_end         = $ENV{FRONT_END_URL};
 my $postgres_user     = $ENV{POSTGRES_USER};
 my $postgres_password = $ENV{POSTGRES_PASSWORD};
 
-#$front_end = "http://localhost:9000";
+$front_end = "http://localhost:9000";
 
 my %myconfig = (
     dateformat   => 'yyyy/mm/dd',
@@ -4376,6 +4376,18 @@ $api->get(
 
         my $line_tax = $defaults->{linetax} ? 1 : 0;
 
+        my $connection = $dbs->query("SELECT * FROM connections")->hash;
+
+        if ($connection) {
+            $connection = {
+                type  => $connection->{type},
+                error => $connection->{error},
+            };
+        }
+        else {
+            $connection = { type => 'local', };
+        }
+
         my $response;
 
         #----------------
@@ -4410,6 +4422,7 @@ $api->get(
                 locknumber   => $lock,
                 revtrans     => $defaults->{revtrans},
                 closedto     => $formatted_closedto,
+                connection   => $connection,
             };
         }
 
@@ -4435,6 +4448,7 @@ $api->get(
                 locknumber   => $lock,
                 revtrans     => $defaults->{revtrans},
                 closedto     => $formatted_closedto,
+                connection   => $connection,
             };
         }
 
@@ -4509,6 +4523,7 @@ $api->get(
                 locknumber   => $lock,
                 revtrans     => $defaults->{revtrans},
                 closedto     => $formatted_closedto,
+                connection   => $connection,
             };
         }
 
