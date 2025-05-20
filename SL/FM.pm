@@ -226,8 +226,8 @@ qq/{"path": "$dbx_path", "mode": "add", "autorename": true, "mute": false}/,
 
 sub process_google_drive {
     my ( $dbs, $c, $data, $module, $connection ) = @_;
-    my $client_id        = $ENV{GOOGLE_CLIENT_ID}     || '';
-    my $client_secret    = $ENV{GOOGLE_CLIENT_SECRET} || '';
+    my $client_id        = $ENV{GOOGLE_CLIENT_ID} || '';
+    my $client_secret    = $ENV{GOOGLE_SECRET}    || '';
     my $storage_location = 'google_drive';
     my $ua               = Mojo::UserAgent->new;
     my $upload_url =
@@ -581,173 +581,6 @@ sub get_files_for_transactions {
     return $transactions;
 }
 
-sub delete_files {
-    my ( $self, $dbs, $c, $data ) = @_;
-
-    my $reference_id = $data->{id};
-    unless ($reference_id) {
-        $c->app->log->error("delete_files: Missing reference id.");
-        return { error => "Missing reference id." };
-    }
-
-    # Retrieve all files associated with the reference_id
-    my @files =
-      $dbs->query( "SELECT * FROM files WHERE reference_id = ?", $reference_id )
-      ->hashes;
-    unless (@files) {
-        $c->app->log->info(
-            "delete_files: No file records found for reference id $reference_id"
-        );
-        return {
-            success => 0,
-            error   => "No files found for reference id: $reference_id"
-        };
-    }
-
-    my @deleted_files;
-    my $ua = Mojo::UserAgent->new;
-
-  FILE: foreach my $file (@files) {
-        my $location = $file->{location} || '';
-        my $path     = $file->{path}     || '';
-
-        if ( $location eq 'local' ) {
-            if ( -e $path ) {
-                unless ( unlink $path ) {
-                    $c->app->log->error(
-                        "Failed to delete local file $path: $!");
-                    next FILE;
-                }
-                $c->app->log->info("Deleted local file: $path");
-            }
-            else {
-                $c->app->log->warn(
-                    "Local file $path does not exist, skipping unlink.");
-            }
-            push @deleted_files,
-              { name => $file->{name}, path => $path, location => 'local' };
-        }
-        elsif ( $location eq 'dropbox' ) {
-            my $delete_url = 'https://api.dropboxapi.com/2/files/delete_v2';
-            my $connection = $dbs->query(
-"SELECT * FROM connections WHERE status = 'active' AND type = 'dropbox' LIMIT 1"
-            )->hash;
-            unless ( $connection && $connection->{access_token} ) {
-                $c->app->log->error(
-                    "No active Dropbox connection found for deletion.");
-                next FILE;
-            }
-
-            # Check token before deletion
-            my $access_token = _check_and_refresh_token(
-                $dbs, $c, $connection,
-                $ENV{DROPBOX_KEY} || '',
-                $ENV{DROPBOX_SECRET} || '', 'dropbox'
-            );
-            my $headers = {
-                'Authorization' => "Bearer $access_token",
-                'Content-Type'  => 'application/json',
-            };
-            my $post_data = { path => $path };
-            my $tx =
-              $ua->post( $delete_url => $headers => encode_json($post_data) );
-            my $res = $tx->result;
-            if ( $res->is_success ) {
-                $c->app->log->info("Deleted Dropbox file: $path");
-                push @deleted_files,
-                  {
-                    name     => $file->{name},
-                    path     => $path,
-                    location => 'dropbox'
-                  };
-            }
-            else {
-                $c->app->log->error(
-                    "Dropbox deletion failed for $path: " . $res->message );
-                next FILE;
-            }
-        }
-        elsif ( $location eq 'google_drive' ) {
-            my $file_id;
-            if ( $file->{link} && $file->{link} =~ /\/d\/([^\/]+)\// ) {
-                $file_id = $1;
-            }
-            elsif ( $path && $path =~ /\/([^\/]+)$/ ) {
-                $file_id = $1;
-            }
-            unless ($file_id) {
-                $c->app->log->error(
-"Could not determine Google Drive file ID for: $file->{name}"
-                );
-                next FILE;
-            }
-            my $connection = $dbs->query(
-"SELECT * FROM connections WHERE status = 'active' AND type = 'google_drive' LIMIT 1"
-            )->hash;
-            unless ( $connection && $connection->{access_token} ) {
-                $c->app->log->error(
-                    "No active Google Drive connection found for deletion.");
-                next FILE;
-            }
-            my $access_token = _check_and_refresh_token(
-                $dbs, $c, $connection,
-                $ENV{GOOGLE_CLIENT_ID}     || '',
-                $ENV{GOOGLE_CLIENT_SECRET} || '',
-                'google_drive'
-            );
-            my $delete_url =
-              "https://www.googleapis.com/drive/v3/files/$file_id";
-
-            # Add parameters for shared drives if necessary
-            if ( $connection->{drive_id} && $connection->{drive_id} ne 'root' )
-            {
-                $delete_url .=
-                  "?supportsAllDrives=true&includeItemsFromAllDrives=true";
-            }
-
-            my $tx = $ua->delete(
-                $delete_url => { 'Authorization' => "Bearer $access_token" } );
-            my $res = $tx->result;
-            if ( $res->is_success ) {
-                $c->app->log->info("Deleted Google Drive file: $file_id");
-                push @deleted_files,
-                  {
-                    name     => $file->{name},
-                    path     => $path,
-                    location => 'google_drive'
-                  };
-            }
-            else {
-                $c->app->log->error(
-                    "Google Drive deletion failed for $file_id: "
-                      . $res->message );
-                next FILE;
-            }
-        }
-        else {
-            $c->app->log->warn(
-                "Unknown storage location '$location' for file: $file->{name}");
-            next FILE;
-        }
-
-     # Remove the file record from the database after deleting the physical file
-        my $sth = $dbs->query( "DELETE FROM files WHERE id = ?", $file->{id} );
-        unless ( $sth && $sth->rows > 0 ) {
-            $c->app->log->error(
-"Failed to delete file record from database for file: $file->{name}"
-            );
-        }
-    }
-
-    return {
-        success => 1,
-        details => {
-            deleted_count => scalar @deleted_files,
-            deleted_files => \@deleted_files,
-        }
-    };
-}
-
 sub delete_file {
     my ( $self, $dbs, $c, $data ) = @_;
 
@@ -849,7 +682,7 @@ sub delete_file {
         my $connection = $dbs->query(
 "SELECT * FROM connections WHERE status = 'active' AND type = 'google_drive' LIMIT 1"
         )->hash;
-        unless ( $connection && $connection->{access_token} ) {
+        unless ($connection) {
             $c->app->log->error(
                 "No active Google Drive connection found for deletion.");
             return {
@@ -859,8 +692,8 @@ sub delete_file {
         }
         my $access_token = _check_and_refresh_token(
             $dbs, $c, $connection,
-            $ENV{GOOGLE_CLIENT_ID}     || '',
-            $ENV{GOOGLE_CLIENT_SECRET} || '',
+            $ENV{GOOGLE_CLIENT_ID} || '',
+            $ENV{GOOGLE_SECRET}    || '',
             'google_drive'
         );
         my $delete_url = "https://www.googleapis.com/drive/v3/files/$file_id";
@@ -939,8 +772,8 @@ sub get_drives {
     # Check and refresh token if needed
     my $access_token = _check_and_refresh_token(
         $dbs, $c, $connection,
-        $ENV{GOOGLE_CLIENT_ID}     || '',
-        $ENV{GOOGLE_CLIENT_SECRET} || '',
+        $ENV{GOOGLE_CLIENT_ID} || '',
+        $ENV{GOOGLE_SECRET}    || '',
         'google_drive'
     );
 
@@ -977,7 +810,6 @@ sub get_drives {
         }
     }
     else {
-        warn( Dumper $res);
         my $status_code   = $res->code;
         my $error_message = $res->message || "Unknown Error";
         $c->app->log->error(
@@ -987,8 +819,8 @@ sub get_drives {
         if ( $status_code == 401 ) {
             $access_token = _refresh_token(
                 $dbs, $c, $connection,
-                $ENV{GOOGLE_CLIENT_ID}     || '',
-                $ENV{GOOGLE_CLIENT_SECRET} || '',
+                $ENV{GOOGLE_CLIENT_ID} || '',
+                $ENV{GOOGLE_SECRET}    || '',
                 'google_drive'
             );
 
@@ -1156,7 +988,7 @@ sub _check_and_refresh_token {
     if ( $connection->{token_expires} ) {
         my $expiry = _parse_token_expires( $connection->{token_expires}, $c );
 
-        if ( $expiry - time() < 300 ) {    # less than 5 minutes remaining
+        if ( $expiry - time() < 300 || !$connection->{access_token} ) {
             my $new_access_token =
               _refresh_token( $dbs, $c, $connection, $client_id,
                 $client_secret, $platform );
@@ -1230,7 +1062,6 @@ sub _ensure_google_drive_folders {
                 }
             }
             else {
-                warn( Dumper $res);
                 $c->app->log->error(
                     "Google Drive folder query failed: $error_message");
                 return undef;

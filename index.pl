@@ -8699,8 +8699,6 @@ $api->post(
                 type          => 'google_drive',
             },
             drive => {
-
-                # Alias for google_drive support
                 url           => 'https://oauth2.googleapis.com/token',
                 client_id     => $ENV{GOOGLE_CLIENT_ID},
                 client_secret => $ENV{GOOGLE_SECRET},
@@ -8728,7 +8726,8 @@ $api->post(
             }
         )->result;
         if ( $res->is_success ) {
-            my $token_data   = $res->json;
+            my $token_data = $res->json;
+            warn( Dumper $token_data );
             my $access_token = $token_data->{access_token};
             my $refresh_token =
               defined $token_data->{refresh_token}
