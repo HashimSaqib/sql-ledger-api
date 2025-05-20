@@ -4323,6 +4323,7 @@ helper get_items => sub {
     my $parts = $dbs->query("SELECT * FROM parts")->hashes;
 
     foreach my $part (@$parts) {
+        $part->{label} = $part->{partnumber} . '--' . $part->{description};
         my $taxaccounts = $dbs->query( "
             SELECT chart.accno 
             FROM partstax 
@@ -4647,22 +4648,23 @@ $api->get(
             my $db    = $module;
             my $vc    = $module eq 'ar' ? 'customer'    : 'vendor';
             my $vc_id = $module eq 'ar' ? 'customer_id' : 'vendor_id';
-            $invoice = $invoice ? 'true' : 'false';
+            if ( !$invoice ) {
+                $invoice = 'true';
+            }
             if ( $module eq 'ar' ) {
                 return unless $c->check_perms('customer.transactions');
             }
-            else {
+            elsif ( $module eq 'ap' ) {
                 return unless $c->check_perms('vendor.transactions');
             }
             $sql = qq{
                 SELECT db.*, vc.name FROM $db db
                 LEFT JOIN $vc vc on db.$vc_id = vc.id
                 WHERE db.invoice = $invoice
-                ORDER BY db.transdate DESC, db.id DESC
+                ORDER BY db.id DESC
                 LIMIT 5;
                 }
         }
-
         my $transactions = $dbs->query($sql)->hashes;
         $c->render( json => $transactions );
     }
