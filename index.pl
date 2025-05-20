@@ -4614,10 +4614,11 @@ $api->get(
 );
 $api->get(
     '/last_transactions/:module' => sub {
-        my $c      = shift;
-        my $module = $c->param('module');
-        my $client = $c->param('client');
-        my $dbs    = $c->dbs($client);
+        my $c       = shift;
+        my $module  = $c->param('module');
+        my $client  = $c->param('client');
+        my $invoice = $c->param('invoice');
+        my $dbs     = $c->dbs($client);
 
         my $sql;
         if ( $module eq 'gl' ) {
@@ -4639,13 +4640,14 @@ $api->get(
         LEFT JOIN department AS d
         ON d.id = gl.department_id
         ORDER BY gl.transdate DESC, gl.id DESC
-        LIMIT 5;
+        LIMIT 5; 
         }
         }
         elsif ( $module eq 'ar' || $module eq 'ap' ) {
             my $db    = $module;
             my $vc    = $module eq 'ar' ? 'customer'    : 'vendor';
             my $vc_id = $module eq 'ar' ? 'customer_id' : 'vendor_id';
+            $invoice = $invoice ? 'true' : 'false';
             if ( $module eq 'ar' ) {
                 return unless $c->check_perms('customer.transactions');
             }
@@ -4655,6 +4657,7 @@ $api->get(
             $sql = qq{
                 SELECT db.*, vc.name FROM $db db
                 LEFT JOIN $vc vc on db.$vc_id = vc.id
+                WHERE db.invoice = $invoice
                 ORDER BY db.transdate DESC, db.id DESC
                 LIMIT 5;
                 }
