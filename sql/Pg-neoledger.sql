@@ -4,6 +4,9 @@ ALTER TABLE ap ADD linetax INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE acc_trans ADD tax_chart_id INTEGER;
 ALTER TABLE acc_trans ADD linetaxamount NUMERIC NOT NULL DEFAULT 0;
 
+ALTER TABLE chart ADD parent_id INTEGER;
+ALTER TABLE tax ADD id SERIAL PRIMARY KEY;
+ 
 CREATE TABLE files (
     id SERIAL PRIMARY KEY,
     module VARCHAR(50) NOT NULL,          -- ar, ap, gl
