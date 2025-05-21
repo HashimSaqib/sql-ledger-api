@@ -749,6 +749,38 @@ $api->get(
     }
 );
 
+#! TO BE DELETED BEFORE MAIN RELEASE
+sub create_temp_columns {
+    my ( $c, $datasets ) = @_;
+
+    foreach my $dataset (@$datasets) {
+        my $db_name = $dataset->{db_name};
+        my $db      = $c->dbs($db_name);     # DBIx::Simple handle
+
+        # Check and add `parent_id` to `chart` if missing
+        eval {
+            my $res = $db->query(
+                "SELECT 1 FROM information_schema.columns 
+                 WHERE table_name = 'chart' AND column_name = 'parent_id'"
+            );
+            unless ( $res->hash ) {
+                $db->query("ALTER TABLE chart ADD parent_id INTEGER");
+            }
+        };
+
+        # Check and add `id` to `tax` if missing
+        eval {
+            my $res = $db->query(
+                "SELECT 1 FROM information_schema.columns 
+                 WHERE table_name = 'tax' AND column_name = 'id'"
+            );
+            unless ( $res->hash ) {
+                $db->query("ALTER TABLE tax ADD id SERIAL PRIMARY KEY");
+            }
+        };
+    }
+}
+
 $central->get(
     '/db_list' => sub {
         my $c       = shift;
@@ -762,6 +794,8 @@ $central->get(
                ON d.id = da.dataset_id AND da.profile_id = ?",
             $profile->{profile_id}
         )->hashes;
+
+        create_temp_columns( $c, $datasets );
 
         foreach my $dataset (@$datasets) {
             my $db_name   = $dataset->{db_name};

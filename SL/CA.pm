@@ -54,9 +54,10 @@ sub all_accounts {
 
   $query = qq|SELECT c.id, c.accno, c.description, c.charttype, c.gifi_accno,
               c.category, c.link, c.contra, c.closed,
-	      l.description AS translation
+	      l.description AS translation, p.accno AS parent
               FROM chart c
 	      LEFT JOIN translation l ON (l.trans_id = c.id AND l.language_code = '$myconfig->{countrycode}')
+	      LEFT JOIN chart p ON (p.id = c.parent_id)
 	      ORDER BY c.accno|;
   $sth = $dbh->prepare($query);
   $sth->execute || $form->dberror($query);
