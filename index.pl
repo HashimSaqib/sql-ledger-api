@@ -756,28 +756,9 @@ sub create_temp_columns {
     foreach my $dataset (@$datasets) {
         my $db_name = $dataset->{db_name};
         my $db      = $c->dbs($db_name);     # DBIx::Simple handle
+        $db->query("ALTER TABLE chart ADD parent_id INTEGER");
+        $db->query("ALTER TABLE tax ADD id SERIAL PRIMARY KEY");
 
-        # Check and add `parent_id` to `chart` if missing
-        eval {
-            my $res = $db->query(
-                "SELECT 1 FROM information_schema.columns 
-                 WHERE table_name = 'chart' AND column_name = 'parent_id'"
-            );
-            unless ( $res->hash ) {
-                $db->query("ALTER TABLE chart ADD parent_id INTEGER");
-            }
-        };
-
-        # Check and add `id` to `tax` if missing
-        eval {
-            my $res = $db->query(
-                "SELECT 1 FROM information_schema.columns 
-                 WHERE table_name = 'tax' AND column_name = 'id'"
-            );
-            unless ( $res->hash ) {
-                $db->query("ALTER TABLE tax ADD id SERIAL PRIMARY KEY");
-            }
-        };
     }
 }
 
