@@ -25,10 +25,10 @@ sub get_account {
 
   $form->{id} *= 1;
   
-  my $query = qq|SELECT accno, description, charttype, gifi_accno,
-                 category, link, contra, closed
-                 FROM chart
-	         WHERE id = $form->{id}|;
+  my $query = qq|SELECT c.*, p.accno as parent
+                 FROM chart c
+                 LEFT JOIN chart p ON (c.parent_id = p.id)
+	         WHERE c.id = $form->{id}|;
   my $sth = $dbh->prepare($query);
   $sth->execute || $form->dberror($query);
 
@@ -100,6 +100,13 @@ sub save_account {
   
   $form->{contra} *= 1;
   $form->{closed} *= 1;
+  $form->{allow_gl} *= 1;
+
+  if ($form->{parent}) {
+    $query = qq|SELECT id FROM chart WHERE accno = '$form->{parent}'|;
+    ($form->{parent_id}) = $dbh->selectrow_array($query);
+  }
+  $form->{parent_id} = 0 unless $form->{parent_id};
   
   # if we have an id then replace the old record
   if ($form->{id} *= 1) {
@@ -111,18 +118,20 @@ sub save_account {
 		category = '$form->{category}',
 		link = '$form->{link}',
 		contra = '$form->{contra}',
-                closed = '$form->{closed}'
+                closed = '$form->{closed}',
+                parent_id = '$form->{parent_id}',
+                allow_gl = '$form->{allow_gl}'
 		WHERE id = $form->{id}|;
   } else {
     $query = qq|INSERT INTO chart 
                 (accno, description, charttype, gifi_accno, category, link,
-		contra, closed)
+		contra, closed, parent_id, allow_gl)
                 VALUES ('$form->{accno}',|
 		.$dbh->quote($form->{description}).qq|,
 		'$form->{charttype}', |
 		.$dbh->quote($form->{gifi_accno}).qq|,
 		'$form->{category}', '$form->{link}', '$form->{contra}',
-                '$form->{closed}')|;
+                '$form->{closed}', '$form->{parent_id}', '$form->{allow_gl}')|;
   }
   $dbh->do($query) || $form->dberror($query);
 
