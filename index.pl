@@ -6752,9 +6752,7 @@ $api->get(
         $form->{periods} = $periods;
 
         RP->balance_sheet_periods( $c->slconfig, $form, $locale );
-
         warn Dumper $form;
-
         if ( $form->{usetemplate} eq 'Y' ) {
             my %spacer = (
                 H => '',
@@ -6824,7 +6822,6 @@ $api->get(
             return;
         }
 
-        warn Dumper $form;
         $c->render( json => {%$form} );
     }
 );

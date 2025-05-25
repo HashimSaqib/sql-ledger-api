@@ -491,20 +491,19 @@ sub balance_sheet {
 
 sub add_accounts {
   my ($form, $c, $year, $period, $category) = @_;
-
-  for my $var (keys %{$c}) {
+  for my $var (sort { $a cmp $b } keys %{$c}) {
     next unless $form->round_amount($c->{$var}{amount}, $form->{decimalplaces});
 
     $form->{accounts}{$var}{description} = $c->{$var}{description};
     $form->{accounts}{$var}{charttype} = $c->{$var}{charttype};
+    $form->{accounts}{$var}{level} = $c->{$var}{level};
+    $form->{accounts}{$var}{parent_accno} = $c->{$var}{parent_accno}; 
 
     for my $key (keys %{ $c->{$var} }) {
       $form->{$category}{$var}{$year}{$period}{$key} = $c->{$var}{$key};
     }
   }
-
 }
-
 
 sub get_accounts {
   my ($form, $dbh, $fromdate, $todate, $category, $excludeyearend) = @_;
@@ -526,49 +525,110 @@ sub get_accounts {
   my $yearendwhere = "1 = 1";
   my $item;
  
-  # get headings
-  $query = qq|SELECT c.accno, c.description, c.category,
+  # get headings with parent hierarchy
+  $query = qq|SELECT c.accno, c.description, c.category, c.id, c.parent_id,
               l.description AS translation
-	      FROM chart c
-	      LEFT JOIN translation l ON (l.trans_id = c.id AND l.language_code = '$form->{language_code}')
-	      WHERE c.charttype = 'H'
-	      AND c.category = '$category'
-	      ORDER by c.accno|;
+              FROM chart c
+              LEFT JOIN translation l ON (l.trans_id = c.id AND l.language_code = '$form->{language_code}')
+              WHERE c.charttype = 'H'
+              AND c.category = '$category'
+              ORDER by c.accno|;
 
   if ($form->{accounttype} eq 'gifi')
   {
-    $query = qq|SELECT g.accno, g.description, c.category,
+    $query = qq|SELECT g.accno, g.description, c.category, c.id, c.parent_id,
                 '' AS translation
-		FROM gifi g
-		JOIN chart c ON (c.gifi_accno = g.accno)
-		WHERE c.charttype = 'H'
-		AND c.category = '$category'
+                FROM gifi g
+                JOIN chart c ON (c.gifi_accno = g.accno)
+                WHERE c.charttype = 'H'
+                AND c.category = '$category'
                 UNION
-                SELECT c.accno, c.description, c.category,
+                SELECT c.accno, c.description, c.category, c.id, c.parent_id,
                 l.description AS translation
                 FROM chart c
                 LEFT JOIN translation l ON (l.trans_id = c.id AND l.language_code = '$form->{language_code}')
                 WHERE c.charttype = 'H'
                 AND c.category = '$category'
-		ORDER BY 1|;
+                ORDER BY 1|;
   }
 
   $sth = $dbh->prepare($query);
   $sth->execute || $form->dberror($query);
   
   my @headingaccounts = ();
+  my %chart_by_id = ();     # Store chart details by id
+  my %chart_by_accno = ();  # Store chart details by accno
+  
   while ($ref = $sth->fetchrow_hashref(NAME_lc))
   {
-    $ref->{description} = $ref->{translation} if $ref->{translation};
-    
-    $c{$ref->{accno}}{description} = $ref->{description};
-    $c{$ref->{accno}}{charttype} = "H";
-    $c{$ref->{accno}}{accno} = $ref->{accno};
+      $ref->{description} = $ref->{translation} if $ref->{translation};
+      
+      # Get parent account number for headings
+      my $parent_accno = $chart_by_id{$ref->{parent_id}} if $ref->{parent_id};
+      
+      $c{$ref->{accno}}{description} = $ref->{description};
+      $c{$ref->{accno}}{charttype} = "H";
+      $c{$ref->{accno}}{accno} = $ref->{accno};
+      $c{$ref->{accno}}{id} = $ref->{id};
+      $c{$ref->{accno}}{parent_id} = $ref->{parent_id};
+      $c{$ref->{accno}}{parent_accno} = $parent_accno;  
+      # Build hierarchy mappings
+      $chart_by_id{$ref->{id}} = $ref->{accno};
+      $chart_by_accno{$ref->{accno}} = $ref;
 
-    push @headingaccounts, $ref->{accno};
+      push @headingaccounts, $ref->{accno};
   }
 
   $sth->finish;
+
+  # Get ALL chart accounts (including non-headings) with their parent relationships
+  my %all_charts_by_accno = ();
+  my $all_charts_query = qq|SELECT accno, id, parent_id FROM chart WHERE category = '$category'|;
+  my $all_sth = $dbh->prepare($all_charts_query);
+  $all_sth->execute || $form->dberror($all_charts_query);
+  
+  while (my $chart_ref = $all_sth->fetchrow_hashref(NAME_lc)) {
+    $all_charts_by_accno{$chart_ref->{accno}} = $chart_ref;
+  }
+  $all_sth->finish;
+
+  # Function to get all parent accounts for a given account
+  my $get_parent_chain = sub {
+    my ($accno) = @_;
+    my @parents = ();
+    my $current = $all_charts_by_accno{$accno};
+    my %seen = (); # Prevent infinite loops
+    
+    while ($current && $current->{parent_id} && !$seen{$current->{id}}) {
+      $seen{$current->{id}} = 1;
+      my $parent_accno = $chart_by_id{$current->{parent_id}};
+      if ($parent_accno && $parent_accno ne $accno) {
+        push @parents, $parent_accno;
+        $current = $all_charts_by_accno{$parent_accno};
+      } else {
+        last;
+      }
+    }
+    
+    return @parents;
+  };
+
+  # Function to find the appropriate parent for an account
+  my $find_account_parent = sub {
+    my ($accno) = @_;
+    
+    # First try to find a direct parent relationship through parent_id
+    my $account_data = $all_charts_by_accno{$accno};
+    
+    if ($account_data && $account_data->{parent_id}) {
+      my $parent_accno = $chart_by_id{$account_data->{parent_id}};
+      return $parent_accno if $parent_accno;
+    }
+    
+    # Fallback to the old method if no parent_id relationship exists
+    my @accno_sorted = grep { $_ le "$accno" } @headingaccounts;
+    return pop @accno_sorted;
+  };
 
   if ($form->{method} eq 'cash' && !$todate) {
     $todate = $form->current_date($myconfig);
@@ -592,22 +652,22 @@ sub get_accounts {
   if ($excludeyearend) {
     $ywhere = " AND ac.trans_id NOT IN
                (SELECT trans_id FROM yearend)";
-	       
+           
    if ($todate) {
       $ywhere = " AND ac.trans_id NOT IN
-		 (SELECT trans_id FROM yearend
-		  WHERE transdate <= '$todate')";
+         (SELECT trans_id FROM yearend
+          WHERE transdate <= '$todate')";
     }
        
     if ($fromdate) {
       $ywhere = " AND ac.trans_id NOT IN
-		 (SELECT trans_id FROM yearend
-		  WHERE transdate >= '$fromdate')";
+         (SELECT trans_id FROM yearend
+          WHERE transdate >= '$fromdate')";
       if ($todate) {
-	$ywhere = " AND ac.trans_id NOT IN
-		   (SELECT trans_id FROM yearend
-		    WHERE transdate >= '$fromdate'
-		    AND transdate <= '$todate')";
+    $ywhere = " AND ac.trans_id NOT IN
+           (SELECT trans_id FROM yearend
+            WHERE transdate >= '$fromdate'
+            AND transdate <= '$todate')";
       }
     }
   }
@@ -615,211 +675,210 @@ sub get_accounts {
   if ($department_id) {
     $dpt_join = qq|
                JOIN department t ON (a.department_id = t.id)
-		  |;
+          |;
     $dpt_where = qq|
                AND t.id = $department_id
-	           |;
+               |;
   }
 
   if ($project_id) {
     $project = qq|
                  AND ac.project_id = $project_id
-		 |;
+         |;
   }
-
 
   if ($form->{accounttype} eq 'gifi') {
     
     if ($form->{method} eq 'cash') {
 
-	$query = qq|
-	
-	         SELECT g.accno, sum(ac.amount) AS amount,
-		 g.description, c.category
-		 FROM acc_trans ac
-	         JOIN chart c ON (c.id = ac.chart_id)
-	         JOIN ar a ON (a.id = ac.trans_id)
-	         JOIN gifi g ON (g.accno = c.gifi_accno)
-	         $dpt_join
-		 WHERE $where
-		 AND a.approved = '1'
-		 AND c.category = '$category'
-		 $ywhere
-		 $dpt_where
-		 AND ac.trans_id IN
-		   (
-		     SELECT trans_id
-		     FROM acc_trans ac
-		     JOIN chart c ON (ac.chart_id = c.id)
-		     WHERE c.link LIKE '%AR_paid%'
-		     AND ac.approved = '1'
-		     $subwhere
-		   )
-		 $project
-		 GROUP BY g.accno, g.description, c.category
-		 
+    $query = qq|
+    
+             SELECT g.accno, sum(ac.amount) AS amount,
+         g.description, c.category
+         FROM acc_trans ac
+             JOIN chart c ON (c.id = ac.chart_id)
+             JOIN ar a ON (a.id = ac.trans_id)
+             JOIN gifi g ON (g.accno = c.gifi_accno)
+             $dpt_join
+         WHERE $where
+         AND a.approved = '1'
+         AND c.category = '$category'
+         $ywhere
+         $dpt_where
+         AND ac.trans_id IN
+           (
+             SELECT trans_id
+             FROM acc_trans ac
+             JOIN chart c ON (ac.chart_id = c.id)
+             WHERE c.link LIKE '%AR_paid%'
+             AND ac.approved = '1'
+             $subwhere
+           )
+         $project
+         GROUP BY g.accno, g.description, c.category
+         
        UNION ALL
        
-		 SELECT '' AS accno, SUM(ac.amount) AS amount,
-		 '' AS description, c.category
-		 FROM acc_trans ac
-	         JOIN chart c ON (c.id = ac.chart_id)
-	         JOIN ar a ON (a.id = ac.trans_id)
-	         $dpt_join
-		 WHERE $where
-		 AND ac.approved = '1'
+         SELECT '' AS accno, SUM(ac.amount) AS amount,
+         '' AS description, c.category
+         FROM acc_trans ac
+             JOIN chart c ON (c.id = ac.chart_id)
+             JOIN ar a ON (a.id = ac.trans_id)
+             $dpt_join
+         WHERE $where
+         AND ac.approved = '1'
                  AND c.category = '$category'
-		 $ywhere
-		 $dpt_where
-		 AND c.gifi_accno = ''
-		 AND ac.trans_id IN
-		   (
-		     SELECT ac.trans_id
-		     FROM acc_trans ac
-		     JOIN chart c ON (ac.chart_id = c.id)
-		     WHERE c.link LIKE '%AR_paid%'
-		     AND ac.approved = '1'
-		     $subwhere
-		   )
-		 $project
-		 GROUP BY c.category
+         $ywhere
+         $dpt_where
+         AND c.gifi_accno = ''
+         AND ac.trans_id IN
+           (
+             SELECT ac.trans_id
+             FROM acc_trans ac
+             JOIN chart c ON (ac.chart_id = c.id)
+             WHERE c.link LIKE '%AR_paid%'
+             AND ac.approved = '1'
+             $subwhere
+           )
+         $project
+         GROUP BY c.category
 
        UNION ALL
 
-       	         SELECT g.accno, sum(ac.amount) AS amount,
-		 g.description, c.category
-		 FROM acc_trans ac
-	         JOIN chart c ON (c.id = ac.chart_id)
-	         JOIN ap a ON (a.id = ac.trans_id)
-	         JOIN gifi g ON (g.accno = c.gifi_accno)
-	         $dpt_join
-		 WHERE $where
-		 AND a.approved = '1'
+                 SELECT g.accno, sum(ac.amount) AS amount,
+         g.description, c.category
+         FROM acc_trans ac
+             JOIN chart c ON (c.id = ac.chart_id)
+             JOIN ap a ON (a.id = ac.trans_id)
+             JOIN gifi g ON (g.accno = c.gifi_accno)
+             $dpt_join
+         WHERE $where
+         AND a.approved = '1'
                  AND c.category = '$category'
-		 $ywhere
-		 $dpt_where
-		 AND ac.trans_id IN
-		   (
-		     SELECT ac.trans_id
-		     FROM acc_trans ac
-		     JOIN chart c ON (ac.chart_id = c.id)
-		     WHERE c.link LIKE '%AP_paid%'
-		     AND ac.approved = '1'
-		     $subwhere
-		   )
-		 $project
-		 GROUP BY g.accno, g.description, c.category
-		 
+         $ywhere
+         $dpt_where
+         AND ac.trans_id IN
+           (
+             SELECT ac.trans_id
+             FROM acc_trans ac
+             JOIN chart c ON (ac.chart_id = c.id)
+             WHERE c.link LIKE '%AP_paid%'
+             AND ac.approved = '1'
+             $subwhere
+           )
+         $project
+         GROUP BY g.accno, g.description, c.category
+         
        UNION ALL
        
-		 SELECT '' AS accno, SUM(ac.amount) AS amount,
-		 '' AS description, c.category
-		 FROM acc_trans ac
-	         JOIN chart c ON (c.id = ac.chart_id)
-	         JOIN ap a ON (a.id = ac.trans_id)
-	         $dpt_join
-		 WHERE $where
-		 AND a.approved = '1'
+         SELECT '' AS accno, SUM(ac.amount) AS amount,
+         '' AS description, c.category
+         FROM acc_trans ac
+             JOIN chart c ON (c.id = ac.chart_id)
+             JOIN ap a ON (a.id = ac.trans_id)
+             $dpt_join
+         WHERE $where
+         AND a.approved = '1'
                  AND c.category = '$category'
-		 $ywhere
-		 $dpt_where
-		 AND c.gifi_accno = ''
-		 AND ac.trans_id IN
-		   (
-		     SELECT ac.trans_id
-		     FROM acc_trans ac
-		     JOIN chart c ON (ac.chart_id = c.id)
-		     WHERE c.link LIKE '%AP_paid%'
-		     AND ac.approved = '1'
-		     $subwhere
-		   )
-		 $project
-		 GROUP BY c.category
+         $ywhere
+         $dpt_where
+         AND c.gifi_accno = ''
+         AND ac.trans_id IN
+           (
+             SELECT ac.trans_id
+             FROM acc_trans ac
+             JOIN chart c ON (ac.chart_id = c.id)
+             WHERE c.link LIKE '%AP_paid%'
+             AND ac.approved = '1'
+             $subwhere
+           )
+         $project
+         GROUP BY c.category
 
        UNION ALL
 
 -- add gl
-	
-	         SELECT g.accno, sum(ac.amount) AS amount,
-		 g.description, c.category
-		 FROM acc_trans ac
-	         JOIN chart c ON (c.id = ac.chart_id)
-	         JOIN gifi g ON (g.accno = c.gifi_accno)
-	         JOIN gl a ON (a.id = ac.trans_id)
-	         $dpt_join
-		 WHERE $where
-		 AND a.approved = '1'
+    
+             SELECT g.accno, sum(ac.amount) AS amount,
+         g.description, c.category
+         FROM acc_trans ac
+             JOIN chart c ON (c.id = ac.chart_id)
+             JOIN gifi g ON (g.accno = c.gifi_accno)
+             JOIN gl a ON (a.id = ac.trans_id)
+             $dpt_join
+         WHERE $where
+         AND a.approved = '1'
                  AND c.category = '$category'
-		 $ywhere
-		 $glwhere
-		 $dpt_where
-		 AND NOT (c.link = 'AR' OR c.link = 'AP')
-		 $project
-		 GROUP BY g.accno, g.description, c.category
-		 
+         $ywhere
+         $glwhere
+         $dpt_where
+         AND NOT (c.link = 'AR' OR c.link = 'AP')
+         $project
+         GROUP BY g.accno, g.description, c.category
+         
        UNION ALL
        
-		 SELECT '' AS accno, SUM(ac.amount) AS amount,
-		 '' AS description, c.category
-		 FROM acc_trans ac
-	         JOIN chart c ON (c.id = ac.chart_id)
-	         JOIN gl a ON (a.id = ac.trans_id)
-	         $dpt_join
-		 WHERE $where
-		 AND a.approved = '1'
+         SELECT '' AS accno, SUM(ac.amount) AS amount,
+         '' AS description, c.category
+         FROM acc_trans ac
+             JOIN chart c ON (c.id = ac.chart_id)
+             JOIN gl a ON (a.id = ac.trans_id)
+             $dpt_join
+         WHERE $where
+         AND a.approved = '1'
                  AND c.category = '$category'
-		 $ywhere
-		 $glwhere
-		 $dpt_where
-		 AND c.gifi_accno = ''
-		 AND NOT (c.link = 'AR' OR c.link = 'AP')
-		 $project
-		 GROUP BY c.category
-		 |;
+         $ywhere
+         $glwhere
+         $dpt_where
+         AND c.gifi_accno = ''
+         AND NOT (c.link = 'AR' OR c.link = 'AP')
+         $project
+         GROUP BY c.category
+         |;
 
     } else {
 
       if ($department_id) {
-	$dpt_join = qq|
-	      JOIN dpt_trans t ON (t.trans_id = ac.trans_id)
-	      |;
-	$dpt_where = qq|
+    $dpt_join = qq|
+          JOIN dpt_trans t ON (t.trans_id = ac.trans_id)
+          |;
+    $dpt_where = qq|
                AND t.department_id = $department_id
-	      |;
+          |;
       }
 
       $query = qq|
       
-	      SELECT g.accno, SUM(ac.amount) AS amount,
-	      g.description, c.category
-	      FROM acc_trans ac
-	      JOIN chart c ON (c.id = ac.chart_id)
-	      JOIN gifi g ON (c.gifi_accno = g.accno)
-	      $dpt_join
-	      WHERE $where
-	      AND ac.approved = '1'
+          SELECT g.accno, SUM(ac.amount) AS amount,
+          g.description, c.category
+          FROM acc_trans ac
+          JOIN chart c ON (c.id = ac.chart_id)
+          JOIN gifi g ON (c.gifi_accno = g.accno)
+          $dpt_join
+          WHERE $where
+          AND ac.approved = '1'
               AND c.category = '$category'
-	      $ywhere
-	      $dpt_where
-	      $project
-	      GROUP BY g.accno, g.description, c.category
-	      
-	   UNION ALL
-	   
-	      SELECT '' AS accno, SUM(ac.amount) AS amount,
-	      '' AS description, c.category
-	      FROM acc_trans ac
-	      JOIN chart c ON (c.id = ac.chart_id)
-	      $dpt_join
-	      WHERE $where
-	      AND ac.approved = '1'
+          $ywhere
+          $dpt_where
+          $project
+          GROUP BY g.accno, g.description, c.category
+          
+       UNION ALL
+       
+          SELECT '' AS accno, SUM(ac.amount) AS amount,
+          '' AS description, c.category
+          FROM acc_trans ac
+          JOIN chart c ON (c.id = ac.chart_id)
+          $dpt_join
+          WHERE $where
+          AND ac.approved = '1'
               AND c.category = '$category'
-	      $ywhere
-	      $dpt_where
-	      AND c.gifi_accno = ''
-	      $project
-	      GROUP BY c.category
-	      |;
+          $ywhere
+          $dpt_where
+          AND c.gifi_accno = ''
+          $project
+          GROUP BY c.category
+          |;
 
     }
     
@@ -828,111 +887,111 @@ sub get_accounts {
     if ($form->{method} eq 'cash') {
 
       $query = qq|
-	
-	         SELECT c.accno, sum(ac.amount) AS amount,
-		 c.description, c.category,
-		 l.description AS translation
-		 FROM acc_trans ac
-		 JOIN chart c ON (c.id = ac.chart_id)
-		 JOIN ar a ON (a.id = ac.trans_id)
-		 LEFT JOIN translation l ON (l.trans_id = c.id AND l.language_code = '$form->{language_code}')
-		 $dpt_join
-		 WHERE $where
-		 AND ac.approved = '1'
+    
+             SELECT c.accno, sum(ac.amount) AS amount,
+         c.description, c.category,
+         l.description AS translation
+         FROM acc_trans ac
+         JOIN chart c ON (c.id = ac.chart_id)
+         JOIN ar a ON (a.id = ac.trans_id)
+         LEFT JOIN translation l ON (l.trans_id = c.id AND l.language_code = '$form->{language_code}')
+         $dpt_join
+         WHERE $where
+         AND ac.approved = '1'
                  AND c.category = '$category'
-	         $ywhere
-		 $dpt_where
-		 AND ac.trans_id IN
-		   (
-		     SELECT ac.trans_id
-		     FROM acc_trans ac
-		     JOIN chart c ON (ac.chart_id = c.id)
-		     WHERE c.link LIKE '%AR_paid%'
-		     AND ac.approved = '1'
-		     $subwhere
-		   )
-		     
-		 $project
-		 GROUP BY c.accno, c.description, c.category, translation
-		 
-	UNION ALL
-	
-	         SELECT c.accno, sum(ac.amount) AS amount,
-		 c.description, c.category,
-		 l.description AS translation
-		 FROM acc_trans ac
-		 JOIN chart c ON (c.id = ac.chart_id)
-		 JOIN ap a ON (a.id = ac.trans_id)
-		 LEFT JOIN translation l ON (l.trans_id = c.id AND l.language_code = '$form->{language_code}')
-		 $dpt_join
-		 WHERE $where
-		 AND a.approved = '1'
+             $ywhere
+         $dpt_where
+         AND ac.trans_id IN
+           (
+             SELECT ac.trans_id
+             FROM acc_trans ac
+             JOIN chart c ON (ac.chart_id = c.id)
+             WHERE c.link LIKE '%AR_paid%'
+             AND ac.approved = '1'
+             $subwhere
+           )
+             
+         $project
+         GROUP BY c.accno, c.description, c.category, translation
+         
+    UNION ALL
+    
+             SELECT c.accno, sum(ac.amount) AS amount,
+         c.description, c.category,
+         l.description AS translation
+         FROM acc_trans ac
+         JOIN chart c ON (c.id = ac.chart_id)
+         JOIN ap a ON (a.id = ac.trans_id)
+         LEFT JOIN translation l ON (l.trans_id = c.id AND l.language_code = '$form->{language_code}')
+         $dpt_join
+         WHERE $where
+         AND a.approved = '1'
                  AND c.category = '$category'
-	         $ywhere
-		 $dpt_where
-		 AND ac.trans_id IN
-		   (
-		     SELECT ac.trans_id
-		     FROM acc_trans ac
-		     JOIN chart c ON (ac.chart_id = c.id)
-		     WHERE c.link LIKE '%AP_paid%'
-		     AND ac.approved = '1'
-		     $subwhere
-		   )
-		     
-		 $project
-		 GROUP BY c.accno, c.description, c.category, translation
-		 
+             $ywhere
+         $dpt_where
+         AND ac.trans_id IN
+           (
+             SELECT ac.trans_id
+             FROM acc_trans ac
+             JOIN chart c ON (ac.chart_id = c.id)
+             WHERE c.link LIKE '%AP_paid%'
+             AND ac.approved = '1'
+             $subwhere
+           )
+             
+         $project
+         GROUP BY c.accno, c.description, c.category, translation
+         
         UNION ALL
 
-		 SELECT c.accno, sum(ac.amount) AS amount,
-		 c.description, c.category,
-		 l.description AS translation
-		 FROM acc_trans ac
-		 JOIN chart c ON (c.id = ac.chart_id)
-		 JOIN gl a ON (a.id = ac.trans_id)
-		 LEFT JOIN translation l ON (l.trans_id = c.id AND l.language_code = '$form->{language_code}')
-		 $dpt_join
-		 WHERE $where
-		 AND a.approved = '1'
+         SELECT c.accno, sum(ac.amount) AS amount,
+         c.description, c.category,
+         l.description AS translation
+         FROM acc_trans ac
+         JOIN chart c ON (c.id = ac.chart_id)
+         JOIN gl a ON (a.id = ac.trans_id)
+         LEFT JOIN translation l ON (l.trans_id = c.id AND l.language_code = '$form->{language_code}')
+         $dpt_join
+         WHERE $where
+         AND a.approved = '1'
                  AND c.category = '$category'
-	         $ywhere
-		 $glwhere
-		 $dpt_where
-		 AND NOT (c.link = 'AR' OR c.link = 'AP')
-		 $project
-		 GROUP BY c.accno, c.description, c.category, translation
-		 |;
+             $ywhere
+         $glwhere
+         $dpt_where
+         AND NOT (c.link = 'AR' OR c.link = 'AP')
+         $project
+         GROUP BY c.accno, c.description, c.category, translation
+         |;
 
     } else {
      
       if ($department_id) {
-	$dpt_join = qq|
-	      JOIN dpt_trans t ON (t.trans_id = ac.trans_id)
-	      |;
-	$dpt_where = qq|
+    $dpt_join = qq|
+          JOIN dpt_trans t ON (t.trans_id = ac.trans_id)
+          |;
+    $dpt_where = qq|
                AND t.department_id = $department_id
-	      |;
+          |;
       }
 
-	
+    
       $query = qq|
       
-		 SELECT c.accno, sum(ac.amount) AS amount,
-		 c.description, c.category,
-		 l.description AS translation
-		 FROM acc_trans ac
-		 JOIN chart c ON (c.id = ac.chart_id)
-		 LEFT JOIN translation l ON (l.trans_id = c.id AND l.language_code = '$form->{language_code}')
-		 $dpt_join
-		 WHERE $where
-		 AND ac.approved = '1'
+         SELECT c.accno, sum(ac.amount) AS amount,
+         c.description, c.category,
+         l.description AS translation
+         FROM acc_trans ac
+         JOIN chart c ON (c.id = ac.chart_id)
+         LEFT JOIN translation l ON (l.trans_id = c.id AND l.language_code = '$form->{language_code}')
+         $dpt_join
+         WHERE $where
+         AND ac.approved = '1'
                  AND c.category = '$category'
-	         $ywhere
-		 $dpt_where
-		 $project
-		 GROUP BY c.accno, c.description, c.category, translation
-		 |;
+             $ywhere
+         $dpt_where
+         $project
+         GROUP BY c.accno, c.description, c.category, translation
+         |;
 
     }
   }
@@ -947,30 +1006,41 @@ sub get_accounts {
   $form->{exchangerate} ||= 1;
 
   while ($ref = $sth->fetchrow_hashref(NAME_lc)) {
+      $ref->{amount} /= $form->{exchangerate};
 
-    # get last heading account
-    @accno = grep { $_ le "$ref->{accno}" } @headingaccounts;
-    $accno = pop @accno;
+      # Get the parent account number
+      my @parent_chain = $get_parent_chain->($ref->{accno});
+      my $parent_accno;
+      
+      if (@parent_chain) {
+          $parent_accno = $parent_chain[0];  # Direct parent
+      } else {
+          # Fallback to old method
+          $parent_accno = $find_account_parent->($ref->{accno});
+      }
 
-    $ref->{amount} /= $form->{exchangerate};
+      # Roll up to parent hierarchy
+      if (@parent_chain) {
+          for my $parent (@parent_chain) {
+              $c{$parent}{amount} += $ref->{amount};
+          }
+      } elsif ($parent_accno && ($parent_accno ne $ref->{accno})) {
+          $c{$parent_accno}{amount} += $ref->{amount};
+      }
+      
+      $ref->{description} = $ref->{translation} if $ref->{translation};
 
-    if ($accno && ($accno ne $ref->{accno}) ) {
-      $c{$accno}{amount} += $ref->{amount};
-    }
-    
-    $ref->{description} = $ref->{translation} if $ref->{translation};
-
-    $c{$ref->{accno}}{accno} = $ref->{accno};
-    $c{$ref->{accno}}{description} = $ref->{description};
-    $c{$ref->{accno}}{charttype} = "A";
-
-    $c{$ref->{accno}}{amount} += $ref->{amount};
+      $c{$ref->{accno}}{accno} = $ref->{accno};
+      $c{$ref->{accno}}{description} = $ref->{description};
+      $c{$ref->{accno}}{charttype} = "A";
+      $c{$ref->{accno}}{parent_accno} = $parent_accno;    
+      $c{$ref->{accno}}{amount} += $ref->{amount};
   }
   $sth->finish;
 
   %c;
-
 }
+
 
 
 
