@@ -9110,6 +9110,377 @@ $api->post(
     }
 );
 app->minion->add_task(
+    bulk_pdf_generation => sub {
+        my ( $job, $args ) = @_;
+
+        my $client = $args->{client};
+        my $c      = $job->app;
+
+        my $dbs = $c->dbs($client);
+
+        my $emails = $args->{emails};
+        my $vc     = $args->{vc};
+        my $attachment =
+          $args->{attachment} || 'tex';    # Default to tex if not specified
+        my $jobtype    = $args->{jobtype} || 'bulk_pdf';
+        my $adminemail = $args->{adminemail};
+        my $form       = $args->{form};
+        my $config     = $args->{config};
+
+        # Initialize results tracking
+        my $results = {
+            total     => scalar @$emails,
+            success   => 0,
+            failed    => 0,
+            errors    => [],
+            pdf_files => [],
+            jobtype   => $jobtype,
+            client    => $client
+        };
+
+        # Store initial progress in job notes
+        $job->note( client           => $client );
+        $job->note( total_emails     => scalar @$emails );
+        $job->note( emails_processed => 0 );
+        $job->note( progress_percent => 0 );
+        $job->note( jobtype          => $jobtype );
+
+        # Create a unique batch identifier for this job
+        my $batch_id  = sprintf( "batch_%s_%s", $job->id, time() );
+        my @pdf_files = ();
+
+        # Process each email in the batch
+        my $processed = 0;
+        foreach my $item (@$emails) {
+            my $id        = $item->{id}        || next;
+            my $type      = $item->{type}      || next;
+            my $email     = $item->{email}     || next;
+            my $name      = $item->{name}      || next;
+            my $invnumber = $item->{invnumber} || next;
+
+            # Create a form object for this PDF
+            my $form = new Form;
+            eval {
+                $form->{vc} = $vc;
+                $form->{id} = $id;
+
+                # Build invoice data
+                build_invoice( $c, $client, $form, $dbs );
+
+                # Generate a unique filename for this PDF
+                my $random_str =
+                  sprintf( "%s_%s_%s", $batch_id, $id, int( rand(1000000) ) );
+                my $pdf_filename;
+
+                # Set up PDF generation parameters
+                $form->{lastpage}          = 0;
+                $form->{sumcarriedforward} = 0;
+                $form->{templates}         = "templates/$client";
+                $form->{IN}                = "$type.$attachment";
+
+                my $userspath = "tmp";
+                my $defaults  = $job->app->get_defaults($client);
+
+                # Generate PDF based on attachment type
+                if ( $attachment eq 'tex' ) {
+                    $pdf_filename   = "tmp/invoice_${random_str}.pdf";
+                    $form->{OUT}    = ">$pdf_filename";
+                    $form->{format} = "pdf";
+                    $form->{media}  = "screen";
+                    $form->{copies} = 1;
+
+                    my $dvipdf  = "";
+                    my $xelatex = $defaults->{xelatex};
+                    $form->parse_template( $config, $userspath, $dvipdf,
+                        $xelatex );
+                }
+                elsif ( $attachment eq 'html' ) {
+                    my $html_file = "tmp/invoice_${random_str}.html";
+                    $form->{OUT} = ">$html_file";
+                    $form->parse_template( $config, $userspath );
+
+                    # Strip the '>' character from the output file path
+                    ( my $file_path = $form->{OUT} ) =~ s/^>//;
+
+                    # Read the HTML file content
+                    open my $fh, '<', $file_path
+                      or die "Cannot open $file_path: $!";
+                    { local $/; $form->{html_content} = <$fh> }
+                    close $fh;
+
+                    # Convert HTML to PDF
+                    my $pdf = html_to_pdf( $form->{html_content} );
+                    die "Failed to generate PDF" unless $pdf;
+
+                    # Write the PDF to a file
+                    $pdf_filename = "tmp/invoice_${random_str}.pdf";
+                    open my $pdf_fh, '>', $pdf_filename
+                      or die "Cannot write to $pdf_filename: $!";
+                    binmode $pdf_fh;
+                    print $pdf_fh $pdf;
+                    close $pdf_fh;
+
+                    # Clean up temporary HTML file
+                    unlink $html_file if -e $html_file;
+                }
+
+                # Verify PDF was created successfully
+                if ( -e $pdf_filename && -s $pdf_filename > 0 ) {
+
+                    # Create a meaningful filename for the ZIP
+                    my $display_name = sprintf(
+                        "invoice_%s_%s.pdf",
+                        $form->{invnumber} || $id,
+                        $name ? $name =~ s/[^a-zA-Z0-9_-]/_/gr : "customer"
+                    );
+
+                    push @pdf_files,
+                      {
+                        file_path    => $pdf_filename,
+                        display_name => $display_name,
+                        invoice_id   => $id,
+                        invoice_num  => $form->{invnumber},
+                        customer     => $name
+                      };
+
+                    $results->{success}++;
+                    push @{ $results->{successes} },
+                      {
+                        id        => $id,
+                        type      => $type,
+                        name      => $name,
+                        invnumber => $form->{invnumber},
+                        pdf_file  => $display_name
+                      };
+
+                    # Insert success record into job_status table
+                    $dbs->insert(
+                        'job_status',
+                        {
+                            job_id    => $job->id,
+                            trans_id  => $id,
+                            status    => 'success',
+                            type      => $type,
+                            name      => $name,
+                            reference => $form->{invnumber}
+                        }
+                    );
+                }
+                else {
+                    die "PDF file was not created or is empty";
+                }
+            };
+
+            # Handle errors for this specific PDF
+            if ($@) {
+                my $error_message = "$@";
+                $results->{failed}++;
+                push @{ $results->{errors} },
+                  {
+                    id        => $id,
+                    type      => $type,
+                    email     => $email,
+                    name      => $name,
+                    invnumber => $invnumber,
+                    error     => $error_message
+                  };
+
+                # Insert error record into job_status table
+                $dbs->insert(
+                    'job_status',
+                    {
+                        job_id        => $job->id,
+                        trans_id      => $id,
+                        status        => 'error',
+                        type          => $type,
+                        name          => $name,
+                        reference     => $invnumber,
+                        error_message => $error_message
+                    }
+                );
+            }
+
+            # Update progress after each PDF is processed
+            $processed++;
+            my $progress_percent =
+              int( ( $processed / scalar(@$emails) ) * 100 );
+            $job->note( emails_processed => $processed );
+            $job->note( progress_percent => $progress_percent );
+            $job->note( success_count    => $results->{success} );
+            $job->note( failed_count     => $results->{failed} );
+        }
+
+        # Create ZIP file if we have any successful PDFs
+        my $zip_file_path;
+        if ( @pdf_files > 0 ) {
+            require Archive::Zip;
+            my $zip = Archive::Zip->new();
+
+            $zip_file_path = "tmp/invoices_${batch_id}.zip";
+
+            foreach my $pdf_info (@pdf_files) {
+                my $member = $zip->addFile( $pdf_info->{file_path},
+                    $pdf_info->{display_name} );
+                unless ($member) {
+                    warn "Failed to add $pdf_info->{file_path} to ZIP";
+                }
+            }
+
+            # Write the ZIP file
+            unless (
+                $zip->writeToFileNamed($zip_file_path) == Archive::Zip::AZ_OK )
+            {
+                die "Failed to create ZIP file: $zip_file_path";
+            }
+
+            $results->{zip_file} = $zip_file_path;
+            $job->note( zip_created => 1 );
+            $job->note( zip_file    => $zip_file_path );
+        }
+
+        # Send completion email to admin with ZIP attachment
+        if ( $adminemail && $zip_file_path && -e $zip_file_path ) {
+            my $subject = "Bulk PDF Generation Job #" . $job->id . " Completed";
+            my $result_message =
+              "Bulk PDF generation job #" . $job->id . " completed.\n\n";
+            $result_message .= "Results:\n";
+            $result_message .= "- Total: $results->{total}\n";
+            $result_message .= "- Successful: $results->{success}\n";
+            $result_message .= "- Failed: $results->{failed}\n\n";
+
+            if ( $results->{success} > 0 ) {
+                $result_message .=
+                  "Generated PDFs are attached in the ZIP file.\n\n";
+            }
+
+            if ( $results->{failed} > 0 ) {
+                $result_message .= "Failed PDFs:\n";
+                foreach my $error ( @{ $results->{errors} } ) {
+                    $result_message .=
+"ID: $error->{id}, Type: $error->{type}, Email: $error->{email}, Name: $error->{name}, Invnumber: $error->{invnumber}\n";
+                    $result_message .= "Error: $error->{error}\n\n";
+                }
+            }
+
+            # Send email with ZIP attachment
+            $c->send_email_central( $adminemail, $subject, $result_message,
+                [$zip_file_path] );
+
+            # Clean up ZIP file immediately after sending email
+            unlink $zip_file_path if -e $zip_file_path;
+        }
+
+        # Clean up temporary PDF files
+        foreach my $pdf_info (@pdf_files) {
+            unlink $pdf_info->{file_path} if -e $pdf_info->{file_path};
+        }
+
+        # Update final progress status
+        $job->note( progress_percent => 100 );
+        $job->note( status           => 'completed' );
+
+        # Store the results in Minion's built-in results storage
+        $job->finish($results);
+    }
+);
+$api->post(
+    "/create_pdf_batch" => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+
+        # Extract JSON data from request
+        my $json = $c->req->json;
+
+        # Extract common parameters
+        my $vc = $json->{vc} || do {
+            $c->render(
+                json   => { success => 0, message => "Missing vc parameter" },
+                status => 400
+            );
+            return;
+        };
+
+        my $attachment = $json->{attachment} || 'tex';        # Default to tex
+        my $jobtype    = $json->{jobtype}    || 'bulk_pdf';
+        my $adminemail = $json->{adminemail} || '';
+
+        # Check permissions
+        return unless my $form = $c->check_perms("$vc.transaction");
+        my $config = $c->slconfig;
+
+        # Extract email array (we still use this structure for consistency)
+        my $emails = $json->{emails} || do {
+            $c->render(
+                json   => { success => 0, message => "Missing emails array" },
+                status => 400
+            );
+            return;
+        };
+
+        # Validate emails array
+        unless ( ref $emails eq 'ARRAY' && @$emails > 0 ) {
+            $c->render(
+                json => {
+                    success => 0,
+                    message => "Invalid emails format or empty array"
+                },
+                status => 400
+            );
+            return;
+        }
+
+        # Validate attachment type
+        unless ( $attachment eq 'tex' || $attachment eq 'html' ) {
+            $c->render(
+                json => {
+                    success => 0,
+                    message =>
+                      "Invalid attachment type. Must be 'tex' or 'html'"
+                },
+                status => 400
+            );
+            return;
+        }
+
+        # Queue the PDF generation job
+        my $job_id = $c->minion->enqueue(
+            bulk_pdf_generation => [
+                {
+                    client     => $client,
+                    vc         => $vc,
+                    attachment => $attachment,
+                    emails     => $emails,
+                    jobtype    => $jobtype,
+                    adminemail => $adminemail,
+                    form       => $form,
+                    config     => $config
+                }
+            ] => {
+                priority => 1,
+                notes    => {
+                    client           => $client,
+                    total_emails     => scalar @$emails,
+                    emails_processed => 0,
+                    progress_percent => 0,
+                    jobtype          => $jobtype,
+                    status           => 'queued'
+                }
+            }
+        );
+
+        # Return job ID to client
+        $c->render(
+            json => {
+                success => 1,
+                message => "Bulk PDF generation job queued successfully",
+                job_id  => $job_id,
+                client  => $client
+            }
+        );
+    }
+);
+
+app->minion->add_task(
     bulk_email => sub {
         my ( $job, $args ) = @_;
 
