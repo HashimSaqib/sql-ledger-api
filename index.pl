@@ -2436,7 +2436,7 @@ $api->get(
                   $line->{amount} < 0
                   ? -$line->{amount}
                   : 0;    # Assuming amount < 0 is credit
-                $new_line{linetaxamount} = $line->{linetaxamount};
+                $new_line{linetaxamount} = $line->{linetaxamount} * 1;
 
                 $new_line{accno} = $line->{accno};
                 $new_line{taxAccount} =
