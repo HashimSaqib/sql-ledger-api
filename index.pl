@@ -211,8 +211,10 @@ get '/logo/:client/' => sub {
 ###############################
 
 my $neoledger_perms =
-'["dashboard", "customer", "customer.transaction", "customer.invoice", "customer.consolidate", "customer.creditinvoice", "customer.addcustomer", "customer.transactions", "customer.search", "customer.history", "customer.batch", "vendor", "vendor.transaction", "vendor.invoice", "vendor.debitinvoice", "vendor.addvendor", "vendor.transactions", "vendor.search", "vendor.history", "vendor.batch", "cash", "cash.recon", "gl", "gl.add", "gl.transactions", "items", "items.part", "items.service", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income", "system", "system.currencies", "system.projects", "system.departments", "system.defaults", "system.user.roles", "system.user.employees", "system.chart", "system.chart.list", "system.chart.add", "system.chart.gifi", "system.taxes", "customer.return", "vendor.add", "vendor.return", "customer.invoice.return", "customer.add", "system.templates", "system.audit", "system.batch"]';
+'["dashboard", "cash", "cash.recon", "gl", "gl.add", "gl.transactions", "items", "items.part", "items.service", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income", "system", "system.currencies", "system.projects", "system.departments", "system.defaults", "system.chart", "system.chart.list", "system.chart.add", "system.chart.gifi", "system.taxes",  "system.templates", "system.audit", "system.batch", "import", "import.gl", "import.customer", "import.ar_invoice", "import.ar.transactions", "import.vendor", "import.ap_invoice", "import.ap.transactions", "reports.balance", "customer", "customer.transaction", "customer.invoice", "customer.transaction.return", "customer.invoice.return", "customer.add", "customer.batch", "customer.reminder", "customer.consolidate", "customer.transactions", "customer.search", "customer.history", "vendor", "vendor.transaction", "vendor.invoice", "vendor.transaction.return", "vendor.invoice.return", "vendor.add", "vendor.transactions", "vendor.search", "vendor.history"]';
 
+my $reports_only =
+'["dashboard", "gl", "gl.transactions", "items", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income",  "reports.balance", "customer", "customer.transactions", "customer.search", "customer.history", "vendor", "vendor.search", "vendor.history", "vendor.transactions"]';
 helper send_email_central => sub {
     use Email::Sender::Transport::SMTP;
     use Email::Stuffer;
@@ -1157,7 +1159,7 @@ $central->post(
 
         my $role = $central_dbs->query(
             "INSERT INTO role (dataset_id, name, acs) VALUES (?, ?, ?)",
-            $dataset_id, 'main', $neoledger_perms );
+            $dataset_id, 'Admin', $neoledger_perms );
         my $role_id =
           $central_dbs->last_insert_id( undef, undef, 'role', 'id' );
 
@@ -1166,6 +1168,10 @@ $central->post(
             $profile->{profile_id},
             $dataset_id, $role_id
         );
+
+        my $reports_only_role = $central_dbs->query(
+            "INSERT INTO role (dataset_id, name, acs) VALUES (?, ?, ?)",
+            $dataset_id, 'Reports Only', $reports_only );
 
         $c->render( json => { message => "Dataset created successfully" } );
     }
@@ -8940,14 +8946,13 @@ $api->get(
 );
 $api->post(
     '/invoice_status' => sub {
-        my $c        = shift;
+        my $c = shift;
         return unless my $form = $c->check_perms("customer.batch");
         my $json     = $c->req->json // {};
         my $invoices = $json->{invoices} || {};
-        
 
         while ( my ( $inv_id, $state ) = each %{$invoices} ) {
-            $form = new Form;
+            $form             = new Form;
             $form->{id}       = $inv_id;
             $form->{formname} = 'invoice';
             $form->{queued}   = '';
