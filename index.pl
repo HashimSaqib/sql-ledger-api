@@ -8938,6 +8938,31 @@ $api->get(
         $c->render( json => $results );
     }
 );
+$api->post(
+    '/invoice_status' => sub {
+        my $c        = shift;
+        return unless my $form = $c->check_perms("customer.batch");
+        my $json     = $c->req->json // {};
+        my $invoices = $json->{invoices} || {};
+        
+
+        while ( my ( $inv_id, $state ) = each %{$invoices} ) {
+            $form = new Form;
+            $form->{id}       = $inv_id;
+            $form->{formname} = 'invoice';
+            $form->{queued}   = '';
+            $form->{printed}  = '';
+            $form->{emailed} =
+              $state eq 'sent'
+              ? 'invoice'
+              : '';
+
+            $form->update_status( $c->slconfig );
+        }
+
+        $c->render( json => { success => 1 } );
+    }
+);
 
 $api->post(
     "/send_email" => sub {
