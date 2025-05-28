@@ -2596,6 +2596,34 @@ sub handle_multipart_request {
     return $data;
 }
 
+sub calc_line_tax {
+    my ( $dbs, $date, $amount, $accno ) = @_;
+
+    # Fetch the chart.id for this accno
+    my ($chart_id) =
+      $dbs->query( "SELECT id FROM chart WHERE accno = ?", $accno )->list;
+
+    return 0 unless defined $chart_id;
+
+    # Now find the rate effective at or before $date.
+    # We treat NULL validto as “still valid” and sort NULL as the latest.
+    my ($rate) = $dbs->query(
+        q{
+          SELECT rate
+            FROM tax    
+           WHERE chart_id = ?
+             AND (validto IS NULL OR validto >= ?)
+        ORDER BY
+             COALESCE(validto, '9999-12-31') ASC
+           LIMIT 1
+        }, $chart_id, $date
+    )->list;
+
+    $rate ||= 0;
+
+    return $amount * $rate;
+}
+
 sub api_gl_transaction {
     my ( $c, $dbs, $data, $id, $dbh ) = @_;
 
@@ -2706,7 +2734,13 @@ sub api_gl_transaction {
         $form->{"source_$i"}        = $line->{source};
         $form->{"projectnumber_$i"} = $line->{project};
 
-        $i++;    # Increment the counter after processing the regular line
+        if ( $line->{taxAccount} && !$line->{linetaxamount} ) {
+            my $amount = $line->{debit} || $line->{credit};
+            my $tax_amount =
+              calc_line_tax( $dbs, $transdate, $amount, $line->{taxAccount} );
+            $form->{"linetaxamount_$i"} = $tax_amount;
+        }
+        $i++;
     }
 
     # Check if total_debit equals total_credit
@@ -5534,6 +5568,9 @@ sub process_transaction {
     $form->{ordnumber} = $data->{ordNumber} || '';
     $form->{ponumber}  = $data->{poNumber}  || '';
 
+    # Hash to collect line taxes for building tax array
+    my %line_taxes = ();
+
     # Line items
     $form->{rowcount} = scalar @{ $data->{lines} };
     for my $i ( 1 .. $form->{rowcount} ) {
@@ -5545,6 +5582,17 @@ sub process_transaction {
         $form->{"linetaxamount_$i"} = $line->{taxAmount};
         $form->{ $form->{vc} eq 'vendor' ? "AP_amount_$i" : "AR_amount_$i" } =
           $line->{account};
+
+        if ( $line->{taxAccount} && !$line->{linetaxamount} ) {
+            my $tax_amount = calc_line_tax( $dbs, $form->{transdate}, $amount,
+                $line->{taxAccount} );
+            $form->{"linetaxamount_$i"} = $tax_amount;
+        }
+
+        # Collect line taxes for building tax array
+        if ( $line->{taxAccount} && $form->{"linetaxamount_$i"} ) {
+            $line_taxes{ $line->{taxAccount} } += $form->{"linetaxamount_$i"};
+        }
 
         # Project number if exists
         if ( $line->{project} ) {
@@ -5576,9 +5624,11 @@ sub process_transaction {
         }
     }
 
-    # Taxes
+    # Taxes - build from line taxes if not provided
     my @taxaccounts;
     if ( $data->{taxes} && ref( $data->{taxes} ) eq 'ARRAY' ) {
+
+        # Use provided tax array
         for my $tax ( @{ $data->{taxes} } ) {
             push @taxaccounts, $tax->{accno};
             $form->{"tax_$tax->{accno}"} = $tax->{amount};
@@ -5588,6 +5638,19 @@ sub process_transaction {
             my $rate = $tax->{rate};
             $form->{"${accno}_rate"}    = $rate;
             $form->{"calctax_${accno}"} = 1;
+        }
+        $form->{taxaccounts} = join( ' ', @taxaccounts );
+        $form->{taxincluded} = $data->{taxincluded} ? 1 : 0;
+    }
+    elsif (%line_taxes) {
+
+        # Build tax array from line taxes
+        for my $tax_account ( keys %line_taxes ) {
+            push @taxaccounts, $tax_account;
+            $form->{"tax_$tax_account"} = $line_taxes{$tax_account};
+
+            $form->{"${tax_account}_rate"}    = $rate;
+            $form->{"calctax_${tax_account}"} = 1;
         }
         $form->{taxaccounts} = join( ' ', @taxaccounts );
         $form->{taxincluded} = $data->{taxincluded} ? 1 : 0;
@@ -5605,7 +5668,6 @@ sub process_transaction {
 
     return $form->{id};
 }
-
 $api->post(
     '/arap/transaction/:vc/:id' => { id => undef } => sub {
         my $c      = shift;
