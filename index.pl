@@ -1027,6 +1027,7 @@ $central->get(
         );
     }
 );
+
 $central->post(
     'create_dataset' => sub {
         my $c         = shift;
@@ -1100,45 +1101,6 @@ $central->post(
         my $chart_file = "${sql_dir}${chart}-chart.sql";
         run_sql_file( $dataset, $chart_file );
 
-        # Check if any row in chart table has parent_id value
-        my $dataset_dbh = DBI->connect( "dbi:Pg:dbname=$dataset;host=localhost",
-            $postgres_user, $postgres_password, { AutoCommit => 1 } )
-          or die "Failed to connect to dataset '$dataset': $DBI::errstr";
-
-        my $sth = $dataset_dbh->prepare("SELECT COUNT(*) FROM chart WHERE parent_id IS NOT NULL");
-        $sth->execute();
-        my ($parent_id_count) = $sth->fetchrow_array();
-        $sth->finish();
-
-        # If no rows have parent_id values, run the parent mapping SQL
-        if ($parent_id_count == 0) {
-            my $parent_mapping_sql = q{
-                -- Create a CTE to get each 'A' row and the most recent preceding 'H' row
-                WITH parent_mapping AS (
-                  SELECT
-                    a.id AS child_id,
-                    h.id AS parent_id
-                  FROM
-                    chart a
-                  JOIN LATERAL (
-                    SELECT id
-                    FROM chart h
-                    WHERE h.charttype = 'H' AND h.id < a.id
-                    ORDER BY h.id DESC
-                    LIMIT 1
-                  ) h ON true
-                  WHERE a.charttype = 'A'
-                )
-                -- Update the parent_id in chart
-                UPDATE chart
-                SET parent_id = parent_mapping.parent_id
-                FROM parent_mapping
-                WHERE chart.id = parent_mapping.child_id;
-            };
-            
-            $dataset_dbh->do($parent_mapping_sql);
-        }
-
         # Check if the gifi file exists before running it
         my $gifi_file;
         if ( $chart =~ /^RMA/ ) {
@@ -1154,15 +1116,12 @@ $central->post(
             warn "The gifi file '$gifi_file' does not exist!";
         }
 
-        # Disconnect from dataset database before switching to postgres database
-        $dataset_dbh->disconnect;
-
         # Grant privileges on the database itself
         $dbh->do("GRANT ALL PRIVILEGES ON DATABASE $dataset TO $postgres_user");
         $dbh->disconnect;
 
      # Connect directly to the dataset database to grant schema-level privileges
-        $dataset_dbh = DBI->connect( "dbi:Pg:dbname=$dataset;host=localhost",
+        my $dataset_dbh = DBI->connect( "dbi:Pg:dbname=$dataset;host=localhost",
             $postgres_user, $postgres_password, { AutoCommit => 1 } )
           or die "Failed to connect to dataset '$dataset': $DBI::errstr";
 
@@ -2597,39 +2556,16 @@ $api->put(
     }
 );
 
-# Function to handle multipart form data
 sub handle_multipart_request {
     my ($c) = @_;
 
-    my $params = $c->req->params->to_hash;
-    my $data   = {};
-
-    # Copy all parameters to data hash (except files)
-    foreach my $key ( keys %$params ) {
-        next if $key eq 'files';    # Skip file field, handle separately
-
-        # Decode UTF-8 data first before comparing
-        my $param_value = $params->{$key};
-        if ( defined $param_value ) {
-            $param_value = decode( 'UTF-8', $param_value, Encode::FB_DEFAULT );
-        }
-
-        if ( defined $param_value && $param_value ne '' ) {
-            $data->{$key} = $param_value;
-        }
+    # Get JSON from regular form parameter
+    my $data = {};
+    if ( my $json_data = $c->param('data') ) {
+        $data = decode_json($json_data);
     }
 
-    # Parse JSON fields
-    for my $field (qw(lines payments taxes shipto)) {
-        if ( defined $params->{$field} && $params->{$field} ne '' ) {
-
-            my $json_text =
-              decode( 'UTF-8', $params->{$field}, Encode::FB_CROAK );
-            $data->{$field} = decode_json($json_text);
-        }
-    }
-
-    # Handle file uploads if present
+    # Collect file uploads
     if ( $c->param('files') ) {
         $data->{files} = $c->req->every_upload('files');
     }
@@ -5609,9 +5545,6 @@ sub process_transaction {
     $form->{ordnumber} = $data->{ordNumber} || '';
     $form->{ponumber}  = $data->{poNumber}  || '';
 
-    # Hash to collect line taxes for building tax array
-    my %line_taxes = ();
-
     # Line items
     $form->{rowcount} = scalar @{ $data->{lines} };
     for my $i ( 1 .. $form->{rowcount} ) {
@@ -5628,11 +5561,6 @@ sub process_transaction {
             my $tax_amount = calc_line_tax( $dbs, $form->{transdate}, $amount,
                 $line->{taxAccount} );
             $form->{"linetaxamount_$i"} = $tax_amount;
-        }
-
-        # Collect line taxes for building tax array
-        if ( $line->{taxAccount} && $form->{"linetaxamount_$i"} ) {
-            $line_taxes{ $line->{taxAccount} } += $form->{"linetaxamount_$i"};
         }
 
         # Project number if exists
@@ -5665,11 +5593,9 @@ sub process_transaction {
         }
     }
 
-    # Taxes - build from line taxes if not provided
+    # Taxes
     my @taxaccounts;
     if ( $data->{taxes} && ref( $data->{taxes} ) eq 'ARRAY' ) {
-
-        # Use provided tax array
         for my $tax ( @{ $data->{taxes} } ) {
             push @taxaccounts, $tax->{accno};
             $form->{"tax_$tax->{accno}"} = $tax->{amount};
@@ -5679,18 +5605,6 @@ sub process_transaction {
             my $rate = $tax->{rate};
             $form->{"${accno}_rate"}    = $rate;
             $form->{"calctax_${accno}"} = 1;
-        }
-        $form->{taxaccounts} = join( ' ', @taxaccounts );
-        $form->{taxincluded} = $data->{taxincluded} ? 1 : 0;
-    }
-    elsif (%line_taxes) {
-
-        # Build tax array from line taxes
-        for my $tax_account ( keys %line_taxes ) {
-            push @taxaccounts, $tax_account;
-            $form->{"tax_$tax_account"} = $line_taxes{$tax_account};
-
-            $form->{"calctax_${tax_account}"} = 1;
         }
         $form->{taxaccounts} = join( ' ', @taxaccounts );
         $form->{taxincluded} = $data->{taxincluded} ? 1 : 0;
@@ -5708,6 +5622,7 @@ sub process_transaction {
 
     return $form->{id};
 }
+
 $api->post(
     '/arap/transaction/:vc/:id' => { id => undef } => sub {
         my $c      = shift;
