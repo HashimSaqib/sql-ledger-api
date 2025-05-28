@@ -1101,6 +1101,46 @@ $central->post(
         my $chart_file = "${sql_dir}${chart}-chart.sql";
         run_sql_file( $dataset, $chart_file );
 
+             # Check if any row in chart table has parent_id value
+        my $dataset_dbh = DBI->connect( "dbi:Pg:dbname=$dataset;host=localhost",
+            $postgres_user, $postgres_password, { AutoCommit => 1 } )
+          or die "Failed to connect to dataset '$dataset': $DBI::errstr";
+
+        my $sth = $dataset_dbh->prepare("SELECT COUNT(*) FROM chart WHERE parent_id IS NOT NULL");
+        $sth->execute();
+        my ($parent_id_count) = $sth->fetchrow_array();
+        $sth->finish();
+
+        # If no rows have parent_id values, run the parent mapping SQL
+        if ($parent_id_count == 0) {
+            my $parent_mapping_sql = q{
+                -- Create a CTE to get each 'A' row and the most recent preceding 'H' row
+                WITH parent_mapping AS (
+                  SELECT
+                    a.id AS child_id,
+                    h.id AS parent_id
+                  FROM
+                    chart a
+                  JOIN LATERAL (
+                    SELECT id
+                    FROM chart h
+                    WHERE h.charttype = 'H' AND h.id < a.id
+                    ORDER BY h.id DESC
+                    LIMIT 1
+                  ) h ON true
+                  WHERE a.charttype = 'A'
+                )
+                -- Update the parent_id in chart
+                UPDATE chart
+                SET parent_id = parent_mapping.parent_id
+                FROM parent_mapping
+                WHERE chart.id = parent_mapping.child_id;
+            };
+            
+            $dataset_dbh->do($parent_mapping_sql);
+        }
+
+
         # Check if the gifi file exists before running it
         my $gifi_file;
         if ( $chart =~ /^RMA/ ) {
@@ -2555,23 +2595,46 @@ $api->put(
         );
     }
 );
-
+# Function to handle multipart form data
 sub handle_multipart_request {
     my ($c) = @_;
 
-    # Get JSON from regular form parameter
-    my $data = {};
-    if ( my $json_data = $c->param('data') ) {
-        $data = decode_json($json_data);
+    my $params = $c->req->params->to_hash;
+    my $data   = {};
+
+    # Copy all parameters to data hash (except files)
+    foreach my $key ( keys %$params ) {
+        next if $key eq 'files';    # Skip file field, handle separately
+
+        # Decode UTF-8 data first before comparing
+        my $param_value = $params->{$key};
+        if ( defined $param_value ) {
+            $param_value = decode( 'UTF-8', $param_value, Encode::FB_DEFAULT );
+        }
+
+        if ( defined $param_value && $param_value ne '' ) {
+            $data->{$key} = $param_value;
+        }
     }
 
-    # Collect file uploads
+    # Parse JSON fields
+    for my $field (qw(lines payments taxes shipto)) {
+        if ( defined $params->{$field} && $params->{$field} ne '' ) {
+
+            my $json_text =
+              decode( 'UTF-8', $params->{$field}, Encode::FB_CROAK );
+            $data->{$field} = decode_json($json_text);
+        }
+    }
+
+    # Handle file uploads if present
     if ( $c->param('files') ) {
         $data->{files} = $c->req->every_upload('files');
     }
 
     return $data;
 }
+
 
 sub calc_line_tax {
     my ( $dbs, $date, $amount, $accno ) = @_;
