@@ -5649,7 +5649,6 @@ sub process_transaction {
             push @taxaccounts, $tax_account;
             $form->{"tax_$tax_account"} = $line_taxes{$tax_account};
 
-            $form->{"${tax_account}_rate"}    = $rate;
             $form->{"calctax_${tax_account}"} = 1;
         }
         $form->{taxaccounts} = join( ' ', @taxaccounts );
