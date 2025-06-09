@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            font-size: 11px;
+            line-height: 1.3;
+            margin: 0;
+            padding: 15px;
+            color: #000;
+        }
+        
+        .header {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        
+        .logo img {
+            max-width: 200px;
+            max-height: 80px;
+            margin-bottom: 10px;
+        }
+        
+        .company-name {
+            font-size: 14px;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+        
+        .company-address {
+            font-size: 12px;
+            margin-bottom: 10px;
+        }
+        
+        .report-title {
+            font-size: 16px;
+            font-weight: bold;
+            margin: 15px 0 5px 0;
+        }
+        
+        .currency-line {
+            font-size: 12px;
+            margin-bottom: 15px;
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 0;
+        }
+        
+        .main-table {
+            border: none;
+        }
+        
+        .main-table th,
+        .main-table td {
+            border: none;
+            padding: 2px 5px;
+            vertical-align: top;
+        }
+        
+        .period-header {
+            font-weight: bold;
+            text-align: right;
+            font-size: 11px;
+            padding: 5px;
+            border-bottom: 1px solid #000;
+        }
+        
+        .section-header {
+            font-weight: bold;
+            font-size: 12px;
+            padding: 8px 0 4px 0;
+            border-bottom: 1px solid #000;
+            text-transform: uppercase;
+        }
+        
+        .account-row {
+            padding: 1px 0;
+        }
+        
+        .account-label {
+            text-align: left;
+            padding-left: 0px;
+            font-size: 10px;
+        }
+        
+        .account-amount {
+            text-align: right;
+            font-size: 10px;
+            min-width: 80px;
+            padding-left: 10px;
+        }
+        
+        .header-account {
+            font-weight: bold;
+            font-size: 11px;
+            margin: 3px 0 2px 0;
+        }
+        
+        .detail-account {
+            font-weight: normal;
+            margin: 1px 0;
+        }
+        
+        .total-row {
+            font-weight: bold;
+            font-size: 11px;
+            border-top: 1px solid #000;
+            padding-top: 3px;
+            margin-top: 3px;
+        }
+        
+        .section-total {
+            font-weight: bold;
+            font-size: 11px;
+            margin-top: 5px;
+            padding-top: 2px;
+            border-top: 1px solid #000;
+        }
+        
+        .indent-1 { padding-left: 20px; }
+        .indent-2 { padding-left: 40px; }
+        .indent-3 { padding-left: 60px; }
+        .indent-4 { padding-left: 80px; }
+        .indent-5 { padding-left: 100px; }
+        
+        .spacer-row {
+            height: 8px;
+        }
+        
+        .grand-total {
+            font-weight: bold;
+            font-size: 12px;
+            border-top: 2px solid #000;
+            border-bottom: 1px solid #000;
+            padding: 4px 0;
+        }
+        
+        .number {
+            font-family: monospace;
+            white-space: nowrap;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="logo">
+            % if ($logo) {
+            <img src="<%= $logo %>">
+            % }
+        </div>
+        <div class="company-name"><%= $company || '' %></div>
+        <div class="company-address"><%= $address || '' %></div>
+    </div>
+    
+    
+    <div class="report-title center">Balance Sheet</div>
+    <div class="currency-line center">Currency: <%= $currency %></div>
+    
+    % if ($department) {
+    <div>Department: <%= $department %></div>
+    % }
+    
+    % if ($projectnumber) {
+    <div>Project Number: <%= $projectnumber %></div>
+    % }
+    
+    <table class="main-table">
+        <thead>
+            <tr>
+                <th style="text-align: left; font-weight: bold; padding: 5px 0;">ASSETS</th>
+                % for my $period (@$periods) {
+                <th class="period-header"><%= $period->{label} %></th>
+                % }
+            </tr>
+        </thead>
+        <tbody>
+            <%
+                sub render_accounts_improved {
+                    my ($data, $hierarchy, $periods, $level, $section_name) = @_;
+                    $level ||= 0;
+                    my $output = '';
+                    
+                    for my $accno (sort { $a <=> $b } keys %$hierarchy) {
+                        my $account = $data->{$accno};
+                        next unless $account;
+                        
+                        my $indent_class = $level > 0 ? "indent-$level" : "";
+                        my $is_header = $account->{charttype} eq 'H';
+                        my $row_class = $is_header ? 'header-account' : 'detail-account';
+                        
+                        # Apply indentation to both headers and details based on their level
+                        # Headers get indentation based on their level
+                        # Details get one extra level of indentation under their parent header
+                        my $final_indent_class;
+                        if ($is_header) {
+                            $final_indent_class = $level > 0 ? "indent-$level" : "";
+                        } else {
+                            $final_indent_class = "indent-" . ($level + 1);
+                        }
+                        
+                        $output .= '<tr class="account-row">';
+                        $output .= qq{<td class="account-label $row_class $final_indent_class">};
+                        $output .= $account->{label};
+                        $output .= '</td>';
+                        
+                        for my $period (@$periods) {
+                            my $amount = '';
+                            # Only show amounts for detail accounts (charttype 'A'), not headers
+                            if (!$is_header && $account->{amounts}{$period->{label}}) {
+                                $amount = $account->{amounts}{$period->{label}};
+                            }
+                            $output .= qq{<td class="account-amount number">$amount</td>};
+                        }
+                        $output .= '</tr>';
+                        
+                        # Render children if any
+                        if (keys %{$account->{children}}) {
+                            my %child_hierarchy = map { $_ => 1 } keys %{$account->{children}};
+                            $output .= render_accounts_improved($data, \%child_hierarchy, $periods, $level + 1, $section_name);
+                        }
+                        
+                        # Add total row for header accounts that have children
+                        if ($is_header && keys %{$account->{children}}) {
+                            $output .= '<tr class="section-total">';
+                            $output .= qq{<td class="account-label $final_indent_class"><strong>TOTAL } . uc($account->{label}) . '</strong></td>';
+                            
+                            for my $period (@$periods) {
+                                my $amount = $account->{amounts}{$period->{label}} || '';
+                                $output .= qq{<td class="account-amount number"><strong>$amount</strong></td>};
+                            }
+                            $output .= '</tr>';
+                            
+                            # Add spacer row
+                            $output .= '<tr class="spacer-row"><td colspan="100%"></td></tr>';
+                        }
+                    }
+                    return $output;
+                }
+            %>
+            
+            <%== render_accounts_improved($assets_data, $assets_hierarchy, $periods, 0, 'ASSETS') %>
+            
+            <tr class="grand-total">
+                <td class="account-label"><strong>TOTAL ASSETS</strong></td>
+                % for my $period (@$periods) {
+                <td class="account-amount number"><strong><%= $net_totals->{assets}{$period->{label}} %></strong></td>
+                % }
+            </tr>
+            
+            <tr class="spacer-row"><td colspan="100%">&nbsp;</td></tr>
+            
+            <!-- Liabilities & Equity Section -->
+            <tr>
+                <th style="text-align: left; font-weight: bold; padding: 15px 0 5px 0; border-bottom: 1px solid #000;">LIABILITIES & EQUITY</th>
+                % for my $period (@$periods) {
+                <th class="period-header"></th>
+                % }
+            </tr>
+            
+            <!-- Current Liabilities Subsection -->
+            <tr>
+                <td class="section-header">CURRENT LIABILITIES</td>
+                % for my $period (@$periods) {
+                <td></td>
+                % }
+            </tr>
+            
+            <%== render_accounts_improved($liabilities_data, $liabilities_hierarchy, $periods, 0, 'LIABILITIES') %>
+            
+            <tr class="section-total">
+                <td class="account-label"><strong>TOTAL CURRENT LIABILITIES</strong></td>
+                % for my $period (@$periods) {
+                <td class="account-amount number"><strong><%= $net_totals->{liabilities}{$period->{label}} %></strong></td>
+                % }
+            </tr>
+            
+            <tr class="spacer-row"><td colspan="100%"></td></tr>
+            
+            <!-- Equity Subsection -->
+            <tr>
+                <td class="section-header">EQUITY</td>
+                % for my $period (@$periods) {
+                <td></td>
+                % }
+            </tr>
+            
+            <%== render_accounts_improved($equity_data, $equity_hierarchy, $periods, 0, 'EQUITY') %>
+            
+            <!-- Current Earnings Row -->
+            <tr class="account-row">
+                <td class="account-label detail-account">Current Earnings</td>
+                % for my $period (@$periods) {
+                <td class="account-amount number"><%= $current_earnings->{$period->{label}} %></td>
+                % }
+            </tr>
+            
+            <tr class="section-total">
+                <td class="account-label"><strong>TOTAL EQUITY</strong></td>
+                % for my $period (@$periods) {
+                <td class="account-amount number"><strong><%= $net_totals->{total_equity}{$period->{label}} %></strong></td>
+                % }
+            </tr>
+            
+            <tr class="spacer-row"><td colspan="100%"></td></tr>
+            
+            <tr class="grand-total">
+                <td class="account-label"><strong>TOTAL LIABILITIES &amp; EQUITY</strong></td>
+                % for my $period (@$periods) {
+                <td class="account-amount number"><strong><%= $net_totals->{total_liabilities_equity}{$period->{label}} %></strong></td>
+                % }
+            </tr>
+        </tbody>
+    </table>
+</body>
+</html>
