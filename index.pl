@@ -1101,18 +1101,19 @@ $central->post(
         my $chart_file = "${sql_dir}${chart}-chart.sql";
         run_sql_file( $dataset, $chart_file );
 
-             # Check if any row in chart table has parent_id value
+        # Check if any row in chart table has parent_id value
         my $dataset_dbh = DBI->connect( "dbi:Pg:dbname=$dataset;host=localhost",
             $postgres_user, $postgres_password, { AutoCommit => 1 } )
           or die "Failed to connect to dataset '$dataset': $DBI::errstr";
 
-        my $sth = $dataset_dbh->prepare("SELECT COUNT(*) FROM chart WHERE parent_id IS NOT NULL");
+        my $sth = $dataset_dbh->prepare(
+            "SELECT COUNT(*) FROM chart WHERE parent_id IS NOT NULL");
         $sth->execute();
         my ($parent_id_count) = $sth->fetchrow_array();
         $sth->finish();
 
         # If no rows have parent_id values, run the parent mapping SQL
-        if ($parent_id_count == 0) {
+        if ( $parent_id_count == 0 ) {
             my $parent_mapping_sql = q{
                 -- Create a CTE to get each 'A' row and the most recent preceding 'H' row
                 WITH parent_mapping AS (
@@ -1136,10 +1137,9 @@ $central->post(
                 FROM parent_mapping
                 WHERE chart.id = parent_mapping.child_id;
             };
-            
+
             $dataset_dbh->do($parent_mapping_sql);
         }
-
 
         # Check if the gifi file exists before running it
         my $gifi_file;
@@ -2595,6 +2595,7 @@ $api->put(
         );
     }
 );
+
 # Function to handle multipart form data
 sub handle_multipart_request {
     my ($c) = @_;
@@ -2634,7 +2635,6 @@ sub handle_multipart_request {
 
     return $data;
 }
-
 
 sub calc_line_tax {
     my ( $dbs, $date, $amount, $accno ) = @_;
@@ -6439,19 +6439,27 @@ $api->get(
 sub html_to_pdf {
     my ($html_content) = @_;
 
-    # Check if PDF::WebKit is available
+    # Check if required modules are available
     eval {
         require PDF::WebKit;
+        require File::Temp;
         PDF::WebKit->import();
         1;
     } or do {
-        warn "PDF::WebKit module not found.";
+        warn "PDF::WebKit or File::Temp module not found: $@";
         return 0;
     };
 
+    # Write HTML to temporary file (this approach worked in debug)
+    my ( $fh, $filename ) =
+      File::Temp::tempfile( SUFFIX => '.html', UNLINK => 1 );
+    print $fh $html_content;
+    close $fh;
+
     my $kit;
     eval {
-        $kit = PDF::WebKit->new( \$html_content, page_size => 'Letter' );
+        # Use the minimal approach that worked in debug
+        $kit = PDF::WebKit->new($filename);
         1;
     } or do {
         warn "Failed to initialize PDF::WebKit: $@";
@@ -6467,8 +6475,42 @@ sub html_to_pdf {
         return 0;
     };
 
-    # Check if $pdf was generated successfully
-    return defined $pdf ? $pdf : 0;
+    # Check if PDF was generated successfully with reasonable size
+    if ( defined $pdf && length($pdf) > 1000 ) {
+        return $pdf;
+    }
+    else {
+        warn "Generated PDF appears to be empty or too small: "
+          . ( defined $pdf ? length($pdf) . " bytes" : "undefined" );
+        return 0;
+    }
+}
+
+sub get_image_base64 {
+    my ($logo_path) = @_;
+
+    # Read the logo file
+    open my $fh, '<:raw', $logo_path or return '';
+    my $logo_data = do { local $/; <$fh> };
+    close $fh;
+
+    # Convert to base64
+    use MIME::Base64;
+    my $base64 = encode_base64( $logo_data, '' );
+
+    # Determine MIME type based on file extension
+    my $mime_type = 'image/png';    # default
+    if ( $logo_path =~ /\.jpe?g$/i ) {
+        $mime_type = 'image/jpeg';
+    }
+    elsif ( $logo_path =~ /\.gif$/i ) {
+        $mime_type = 'image/gif';
+    }
+    elsif ( $logo_path =~ /\.svg$/i ) {
+        $mime_type = 'image/svg+xml';
+    }
+
+    return "data:$mime_type;base64,$base64";
 }
 
 #----------------------------------------------------------------
@@ -6476,7 +6518,6 @@ sub html_to_pdf {
 #
 # Now accepts required objects/variables as parameters.
 #----------------------------------------------------------------
-
 sub build_report {
     my ( $form, $locale, $account_map, $myconfig, $timeperiod, $report_type ) =
       @_;
@@ -6484,16 +6525,9 @@ sub build_report {
     # Extract period labels from the defined periods
     my @periods = map { $_->{label} } @{ $form->{periods} };
 
-    # Build header row for period columns
-    my $period_headers_html = "";
-    foreach my $p ( @{ $form->{periods} } ) {
-        $period_headers_html .= qq|<th>$p->{label}</th>|;
-    }
-    $form->{period_headers_html} = $period_headers_html;
-
     if ( $report_type eq 'income_statement' ) {
 
-        # --- INCOME STATEMENT  ---
+        # --- INCOME STATEMENT ---
         my ( %income_data,  %expense_data );
         my ( %total_income, %total_expense );
         my $data_key = '';
@@ -6503,306 +6537,345 @@ sub build_report {
                 next unless exists $form->{$data_key}{$accno}{$period};
                 my ($cat) = keys %{ $form->{$data_key}{$accno}{$period} };
                 next unless $cat =~ /^(I|E)$/;
+
                 my $data        = $form->{$data_key}{$accno}{$period}{$cat};
                 my $charttype   = $data->{charttype};
                 my $description = $data->{description};
                 my $amount      = $data->{amount};
                 my $ml          = $account_map->{$cat}{ml} // 1;
+
                 my $formatted_amount = $form->format_amount(
                     $myconfig,
                     $amount * $ml,
                     $form->{decimalplaces}, ''
                 );
-                my $label = "";
 
+                my $label = "";
                 if ( $charttype eq "A" ) {
                     $label =
                       $form->{l_accno} ? "$accno - $description" : $description;
                 }
                 elsif ( $charttype eq "H" ) {
-                    $label =
-                        $form->{br}
-                      . $form->{bold}
-                      . $description
-                      . $form->{endbold};
+                    $label = $description;
                 }
+
                 if ( $cat eq 'I' ) {
                     $income_data{$accno}{label} ||= $label;
+                    $income_data{$accno}{charttype} = $charttype;
                     $income_data{$accno}{amounts}{$period} = $formatted_amount;
                     $total_income{$period} +=
                       ( $charttype eq "H" ? 0 : $amount * $ml );
                 }
                 elsif ( $cat eq 'E' ) {
                     $expense_data{$accno}{label} ||= $label;
+                    $expense_data{$accno}{charttype} = $charttype;
                     $expense_data{$accno}{amounts}{$period} = $formatted_amount;
                     $total_expense{$period} +=
                       ( $charttype eq "H" ? 0 : $amount * $ml );
                 }
             }
         }
-        my $income_rows_html = "";
-        foreach my $accno ( sort { $a <=> $b } keys %income_data ) {
-            my $row =
-              qq|<tr><td width="4"></td><td>$income_data{$accno}{label}</td>|;
-            foreach my $period (@periods) {
-                my $amt =
-                  exists $income_data{$accno}{amounts}{$period}
-                  ? $income_data{$accno}{amounts}{$period}
-                  : "";
-                $row .= qq|<td align="right">$amt</td>|;
-            }
-            $row              .= "</tr>\n";
-            $income_rows_html .= $row;
-        }
-        my $expense_rows_html = "";
-        foreach my $accno ( sort { $a <=> $b } keys %expense_data ) {
-            my $row =
-              qq|<tr><td width="4"></td><td>$expense_data{$accno}{label}</td>|;
-            foreach my $period (@periods) {
-                my $amt =
-                  exists $expense_data{$accno}{amounts}{$period}
-                  ? $expense_data{$accno}{amounts}{$period}
-                  : "";
-                $row .= qq|<td align="right">$amt</td>|;
-            }
-            $row               .= "</tr>\n";
-            $expense_rows_html .= $row;
-        }
-        my $total_income_html =
-          qq|<tr valign="top"><td> </td><th align="left">TOTAL INCOME</th>|;
-        my $total_expense_html =
-          qq|<tr valign="top"><td> </td><th align="left">TOTAL EXPENSES</th>|;
-        my $total_profit_html =
-qq|<tr valign="top"><th align="left" colspan="2">INCOME / (LOSS)</th>|;
+
+        # Format totals
+        my %formatted_totals;
         foreach my $period (@periods) {
-            my $inc = $form->format_amount(
+            $formatted_totals{income}{$period} = $form->format_amount(
                 $myconfig,
                 $total_income{$period} || 0,
                 $form->{decimalplaces}, ''
             );
-            my $exp = $form->format_amount(
+            $formatted_totals{expense}{$period} = $form->format_amount(
                 $myconfig,
                 $total_expense{$period} || 0,
                 $form->{decimalplaces}, ''
             );
-            my $profit = $form->format_amount(
+            $formatted_totals{profit}{$period} = $form->format_amount(
                 $myconfig,
                 ( $total_income{$period}    || 0 ) -
                   ( $total_expense{$period} || 0 ),
                 $form->{decimalplaces},
                 ''
             );
-            $total_income_html  .= qq|<td align="right">$inc</td>|;
-            $total_expense_html .= qq|<td align="right">$exp</td>|;
-            $total_profit_html  .= qq|<td align="right">$profit</td>|;
         }
-        $total_income_html  .= "</tr>\n";
-        $total_expense_html .= "</tr>\n";
-        $total_profit_html  .= "</tr>\n";
-        $form->{income_rows}        = $income_rows_html;
-        $form->{expense_rows}       = $expense_rows_html;
-        $form->{total_income_html}  = $total_income_html;
-        $form->{total_expense_html} = $total_expense_html;
-        $form->{total_profit_html}  = $total_profit_html;
-        $form->{period}             = join( " / ", @periods );
-        $form->{_periods}           = \@periods;
 
-        # --- END INCOME STATEMENT CODE ---
+        # Store data for template
+        $form->{income_data}      = \%income_data;
+        $form->{expense_data}     = \%expense_data;
+        $form->{formatted_totals} = \%formatted_totals;
+        $form->{period}           = join( " / ", @periods );
+        $form->{_periods}         = \@periods;
 
     }
-    elsif ( $report_type eq 'balance_sheet' ) {
 
-        my ( %balance_data, %category_totals );
-        my $data_key = '';
-
-        # First, collect all data and calculate raw category totals
-        foreach my $accno ( sort { $a <=> $b } keys %{ $form->{$data_key} } ) {
-            foreach my $period (@periods) {
-                next unless exists $form->{$data_key}{$accno}{$period};
-                my @cats = keys %{ $form->{$data_key}{$accno}{$period} };
-                next unless @cats == 1;
-                my $cat = $cats[0];
-                next unless $cat =~ /^(A|L|Q)$/;
-                my $data      = $form->{$data_key}{$accno}{$period}{$cat};
-                my $charttype = $data->{charttype};
-                next if $charttype eq "H";
-
-                my $description = $data->{description};
-                my $amount      = $data->{amount};
-
-                # Flip the sign for Assets right after reading
-                if ( $cat eq 'A' ) {
-                    $amount = -$amount;
-                }
-
-                # Determine the multiplier for summation based on category
-                # This ensures A=L+E balancing works correctly later
-                my $ml;
-                if ( $cat eq 'A' ) {
-
-                    # Assets contribute positively after sign flip
-                    $ml = 1;
-                }
-                elsif ( $cat eq 'L' || $cat eq 'Q' ) {
-
-                  # Liabilities & Equity contribute negatively
-                  # Force -1 for this calculation, ignore account_map->{ml} here
-                    $ml = -1;
-                }
-                else {
-                    # Should not happen, but default
-                    $ml = 1;
-                }
-
-                # Calculate the value contributing to the category total sum
-                my $signed_amount = $amount * $ml;
-
-              # Format the amount for display. Use the sign-corrected $amount.
-              # format_amount should handle negative display (e.g., parentheses)
-                my $formatted_amount = $form->format_amount(
-                    $myconfig,
-                    $amount,    # Display the corrected amount
-                    $form->{decimalplaces}, ''
-                );
-
-                my $label = "";
-                if ( $charttype eq "A" ) {
-                    $label =
-                      $form->{l_accno} ? "$accno - $description" : $description;
-                }
-                else {
-                    $label = $description;
-                }
-
-                $balance_data{$cat}{$accno}{label} ||= $label;
-                $balance_data{$cat}{$accno}{amounts}{$period} =
-                  $formatted_amount;
-
-                # Add the correctly signed amount to totals
-                $category_totals{$cat}{$period} += $signed_amount;
-            }
-        }
-
-        # --- Build HTML rows  ---
-        my ( $assets_rows_html, $liabilities_rows_html, $equity_rows_html ) =
-          ( "", "", "" );
-        for my $cat (qw(A L Q)) {
-            next unless exists $balance_data{$cat};
-            foreach
-              my $accno ( sort { $a <=> $b } keys %{ $balance_data{$cat} } )
-            {
-                my $row =
-qq|<tr><td width="4"></td><td>$balance_data{$cat}{$accno}{label}</td>|;
-                foreach my $period (@periods) {
-                    my $amt =
-                      exists $balance_data{$cat}{$accno}{amounts}{$period}
-                      ? $balance_data{$cat}{$accno}{amounts}{$period}
-                      : "";
-                    $row .= qq|<td align="right">$amt</td>|;
-                }
-                $row .= "</tr>\n";
-                if    ( $cat eq 'A' ) { $assets_rows_html      .= $row; }
-                elsif ( $cat eq 'L' ) { $liabilities_rows_html .= $row; }
-                elsif ( $cat eq 'Q' ) { $equity_rows_html      .= $row; }
-            }
-        }
-
-        # --- End Build HTML rows ---
-
-        # --- Calculate final totals  ---
-        my %net_totals;
-        my $current_earnings_html =
-qq|<tr valign="top"><td width="4"></td><th align="left">Current Earnings</th>|;
-
-        foreach my $period (@periods) {
-
-          # Get the raw summed totals for each category for this period
-          # With the ml fix, these should now be: Assets(+), Liabs(-), Equity(-)
-            my $raw_assets   = $category_totals{'A'}{$period} || 0;
-            my $raw_liabs    = $category_totals{'L'}{$period} || 0;
-            my $raw_equity_q = $category_totals{'Q'}{$period} || 0;
-
-            # --- Core Calculation Logic ---
-            my $total_assets      = $raw_assets;       # Should be positive
-            my $total_liabilities = -$raw_liabs;       # Should now be positive
-            my $recorded_equity   = -$raw_equity_q;    # Should now be positive
-
-            # Equity = Assets - Liabilities
-            my $calculated_total_equity = $total_assets - $total_liabilities;
-
-            # Current Earnings = Calculated Total Equity - Recorded Equity
-            my $current_earnings = $calculated_total_equity - $recorded_equity;
-
-            # --- End Core Calculation Logic ---
-
-            $net_totals{assets}{$period}           = $total_assets;
-            $net_totals{liabilities}{$period}      = $total_liabilities;
-            $net_totals{recorded_equity}{$period}  = $recorded_equity;
-            $net_totals{total_equity}{$period}     = $calculated_total_equity;
-            $net_totals{current_earnings}{$period} = $current_earnings;
-
-            my $current_earnings_formatted =
-              $form->format_amount( $myconfig, $current_earnings,
-                $form->{decimalplaces}, '' );
-            $current_earnings_html .=
-              qq|<td align="right">$current_earnings_formatted</td>|;
-        }
-        $current_earnings_html .= "</tr>\n";
-        $equity_rows_html .=
-          $current_earnings_html;    # Add CE row to equity section
-                                     # --- End Calculate final totals ---
-
-        # --- Build totals rows (Relies on corrected net_totals) ---
-        my $total_assets_html =
-          qq|<tr valign="top"><td> </td><th align="left">TOTAL ASSETS</th>|;
-        my $total_liabilities_html =
-qq|<tr valign="top"><td> </td><th align="left">TOTAL LIABILITIES</th>|;
-        my $total_equity_html =
-          qq|<tr valign="top"><td> </td><th align="left">TOTAL EQUITY</th>|;
-        foreach my $period (@periods) {
-            my $asset_total = $form->format_amount(
-                $myconfig,
-                $net_totals{assets}{$period},
-                $form->{decimalplaces}, ''
-            );
-            my $liability_total = $form->format_amount(
-                $myconfig,
-                $net_totals{liabilities}{$period},
-                $form->{decimalplaces}, ''
-            );
-            my $equity_total = $form->format_amount(
-                $myconfig,
-                $net_totals{total_equity}{$period},
-                $form->{decimalplaces}, ''
-            );
-            $total_assets_html .= qq|<td align="right">$asset_total</td>|;
-            $total_liabilities_html .=
-              qq|<td align="right">$liability_total</td>|;
-            $total_equity_html .= qq|<td align="right">$equity_total</td>|;
-        }
-        $total_assets_html      .= "</tr>\n";
-        $total_liabilities_html .= "</tr>\n";
-        $total_equity_html      .= "</tr>\n";
-
-        # --- End Build totals rows ---
-
-        # Assign results to the form hash
-        $form->{assets_rows}            = $assets_rows_html;
-        $form->{liabilities_rows}       = $liabilities_rows_html;
-        $form->{equity_rows}            = $equity_rows_html;
-        $form->{total_assets_html}      = $total_assets_html;
-        $form->{total_liabilities_html} = $total_liabilities_html;
-        $form->{total_equity_html}      = $total_equity_html;
-        $form->{period}                 = join( " / ", @periods );
-        $form->{_periods}               = \@periods;
-
-    }
     else {
         warn "Unknown report type: $report_type";
     }
 
     $form->{timeperiod} = $timeperiod;
     return 1;    # Indicate success
+}
+
+sub build_balance_sheet {
+    my ( $form, $locale, $myconfig, $timeperiod, $report_type ) = @_;
+
+    # Extract period labels from the defined periods
+    my @periods = map { $_->{label} } @{ $form->{periods} };
+    my ( %balance_data, %category_totals, %hierarchy );
+    my $data_key = '';
+
+    # First, collect all data and calculate raw category totals
+    foreach my $accno ( sort { $a <=> $b } keys %{ $form->{$data_key} } ) {
+        foreach my $period (@periods) {
+            next unless exists $form->{$data_key}{$accno}{$period};
+            my @cats = keys %{ $form->{$data_key}{$accno}{$period} };
+            next unless @cats == 1;
+            my $cat = $cats[0];
+            next unless $cat =~ /^(A|L|Q)$/;
+
+            my $data      = $form->{$data_key}{$accno}{$period}{$cat};
+            my $charttype = $data->{charttype};
+
+            # Skip non-heading accounts if heading_only is true
+            if ( $form->{heading_only} && $charttype ne 'H' ) {
+                next;
+            }
+
+            my $description  = $data->{description};
+            my $amount       = $data->{amount};
+            my $parent_accno = $data->{parent_accno};
+
+            # Flip the sign for Assets right after reading
+            if ( $cat eq 'A' ) {
+                $amount = -$amount;
+            }
+
+            # Determine the multiplier for summation based on category
+            my $ml;
+            if ( $cat eq 'A' ) {
+                $ml = 1;    # Assets contribute positively after sign flip
+            }
+            elsif ( $cat eq 'L' || $cat eq 'Q' ) {
+                $ml = -1;    # Liabilities & Equity contribute negatively
+            }
+
+            # Calculate the value contributing to the category total sum
+            my $signed_amount = $amount * $ml;
+
+            # Format the amount for display
+            my $formatted_amount = $form->format_amount( $myconfig, $amount,
+                $form->{decimalplaces}, '' );
+
+            my $label = "";
+            if ( $charttype eq "A" ) {
+                $label =
+                  $form->{l_accno} ? "$accno - $description" : $description;
+            }
+            else {
+                $label = $description;
+            }
+
+            # Store account data
+            if ( !exists $balance_data{$cat}{$accno} ) {
+                $balance_data{$cat}{$accno} = {
+                    label        => $label,
+                    charttype    => $charttype,
+                    parent_accno => $parent_accno,
+                    amounts      => {},
+                    children     => {},
+                    level        => 0                # Will be calculated later
+                };
+            }
+
+            $balance_data{$cat}{$accno}{amounts}{$period} = $formatted_amount;
+            next if $charttype eq 'H';  # skip headings to avoid double counting
+                # Add the correctly signed amount to totals
+            $category_totals{$cat}{$period} += $signed_amount;
+        }
+    }
+
+    # Build hierarchical structure for each category
+    foreach my $cat (qw(A L Q)) {
+        next unless exists $balance_data{$cat};
+
+        # Find root accounts (accounts with no parent or parent not in our data)
+        my @root_accounts = ();
+        foreach my $accno ( sort { $a <=> $b } keys %{ $balance_data{$cat} } ) {
+            my $parent = $balance_data{$cat}{$accno}{parent_accno};
+            if ( !$parent || !exists $balance_data{$cat}{$parent} ) {
+                push @root_accounts, $accno;
+            }
+        }
+
+        # Build parent-child relationships
+        foreach my $accno ( keys %{ $balance_data{$cat} } ) {
+            my $parent = $balance_data{$cat}{$accno}{parent_accno};
+            if ( $parent && exists $balance_data{$cat}{$parent} ) {
+                $balance_data{$cat}{$parent}{children}{$accno} = 1;
+            }
+        }
+
+        # Calculate levels and store hierarchy
+        $hierarchy{$cat} = {};
+        foreach my $root_accno (@root_accounts) {
+            $hierarchy{$cat}{$root_accno} = 1;
+            _calculate_levels( $balance_data{$cat}, $root_accno, 0 );
+        }
+    }
+
+    # If heading_only is true, find max level headings and convert them to 'A'
+    if ( $form->{heading_only} ) {
+        foreach my $cat (qw(A L Q)) {
+            next unless exists $balance_data{$cat};
+
+            # Find the maximum level among heading accounts
+            my $max_level = -1;
+            foreach my $accno ( keys %{ $balance_data{$cat} } ) {
+                if ( $balance_data{$cat}{$accno}{charttype} eq 'H' ) {
+                    my $level = $balance_data{$cat}{$accno}{level};
+                    $max_level = $level if $level > $max_level;
+                }
+            }
+
+            # Convert max level headings from 'H' to 'A' and recalculate totals
+            if ( $max_level >= 0 ) {
+                foreach my $accno ( keys %{ $balance_data{$cat} } ) {
+                    if (   $balance_data{$cat}{$accno}{charttype} eq 'H'
+                        && $balance_data{$cat}{$accno}{level} == $max_level )
+                    {
+
+                        # Change charttype to 'A'
+                        $balance_data{$cat}{$accno}{charttype} = 'A';
+
+                        # Update label format for 'A' type
+                        my $description = $balance_data{$cat}{$accno}{label};
+                        $balance_data{$cat}{$accno}{label} =
+                          $form->{l_accno}
+                          ? "$accno - $description"
+                          : $description;
+
+                        # Now add these amounts to category totals
+                        foreach my $period (@periods) {
+                            if (
+                                exists $balance_data{$cat}{$accno}{amounts}
+                                {$period} )
+                            {
+                                my $formatted =
+                                  $balance_data{$cat}{$accno}{amounts}{$period};
+
+                                # Parse the formatted amount back to numeric
+                                my $amount =
+                                  $form->parse_amount( $myconfig, $formatted );
+
+                                # Determine the multiplier
+                                my $ml;
+                                if ( $cat eq 'A' ) {
+                                    $ml = 1;
+                                }
+                                elsif ( $cat eq 'L' || $cat eq 'Q' ) {
+                                    $ml = -1;
+                                }
+
+                                my $signed_amount = $amount * $ml;
+                                $category_totals{$cat}{$period} +=
+                                  $signed_amount;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    # Calculate final totals
+    my %net_totals;
+    my %current_earnings;
+
+    foreach my $period (@periods) {
+
+        # Get the raw summed totals for each category for this period
+        my $raw_assets   = $category_totals{'A'}{$period} || 0;
+        my $raw_liabs    = $category_totals{'L'}{$period} || 0;
+        my $raw_equity_q = $category_totals{'Q'}{$period} || 0;
+
+        # Core Calculation Logic
+        my $total_assets      = $raw_assets;       # Should be positive
+        my $total_liabilities = -$raw_liabs;       # Should now be positive
+        my $recorded_equity   = -$raw_equity_q;    # Should now be positive
+
+        # Equity = Assets - Liabilities
+        my $calculated_total_equity = $total_assets - $total_liabilities;
+
+        # Current Earnings = Calculated Total Equity - Recorded Equity
+        my $current_earnings_amount =
+          $calculated_total_equity - $recorded_equity;
+
+        $net_totals{assets}{$period}           = $total_assets;
+        $net_totals{liabilities}{$period}      = $total_liabilities;
+        $net_totals{recorded_equity}{$period}  = $recorded_equity;
+        $net_totals{total_equity}{$period}     = $calculated_total_equity;
+        $net_totals{current_earnings}{$period} = $current_earnings_amount;
+        $net_totals{total_liabilities_equity}{$period} =
+          $total_liabilities + $calculated_total_equity;
+
+        # Format current earnings for display
+        $current_earnings{$period} =
+          $form->format_amount( $myconfig, $current_earnings_amount,
+            $form->{decimalplaces}, '' );
+    }
+
+    # Format net totals for display
+    my %formatted_net_totals;
+    foreach my $period (@periods) {
+        $formatted_net_totals{assets}{$period} = $form->format_amount(
+            $myconfig,
+            $net_totals{assets}{$period},
+            $form->{decimalplaces}, ''
+        );
+        $formatted_net_totals{liabilities}{$period} = $form->format_amount(
+            $myconfig,
+            $net_totals{liabilities}{$period},
+            $form->{decimalplaces}, ''
+        );
+        $formatted_net_totals{total_equity}{$period} = $form->format_amount(
+            $myconfig,
+            $net_totals{total_equity}{$period},
+            $form->{decimalplaces}, ''
+        );
+        $formatted_net_totals{total_liabilities_equity}{$period} =
+          $form->format_amount(
+            $myconfig,
+            $net_totals{total_liabilities_equity}{$period},
+            $form->{decimalplaces}, ''
+          );
+    }
+
+    # Store data for template
+    $form->{assets_data}           = $balance_data{'A'} || {};
+    $form->{liabilities_data}      = $balance_data{'L'} || {};
+    $form->{equity_data}           = $balance_data{'Q'} || {};
+    $form->{assets_hierarchy}      = $hierarchy{'A'}    || {};
+    $form->{liabilities_hierarchy} = $hierarchy{'L'}    || {};
+    $form->{equity_hierarchy}      = $hierarchy{'Q'}    || {};
+    $form->{current_earnings}      = \%current_earnings;
+    $form->{net_totals}            = \%formatted_net_totals;
+    $form->{period}                = join( " / ", @periods );
+    $form->{_periods}              = \@periods;
+
+    $form->{timeperiod} = $timeperiod;
+    return 1;    # Indicate success
+}
+
+# Helper function to calculate account levels in hierarchy
+sub _calculate_levels {
+    my ( $data, $accno, $level ) = @_;
+
+    $data->{$accno}{level} = $level;
+
+    foreach
+      my $child_accno ( sort { $a <=> $b } keys %{ $data->{$accno}{children} } )
+    {
+        _calculate_levels( $data, $child_accno, $level + 1 );
+    }
 }
 
 $api->get(
@@ -6826,7 +6899,9 @@ $api->get(
         $form->{includeperiod}   = $params->{includeperiod}   // "year";
         $form->{previousyear}    = $params->{previousyear}    // "0";
         $form->{accounttype}     = $params->{accounttype}     // "standard";
+        $form->{l_accno}         = $params->{l_accno}         // 0;
         $form->{usetemplate}     = $params->{usetemplate}     // '';
+        $form->{heading_only}    = $params->{heading_only}    // 0;
 
         my $periods = [];
         foreach my $key ( keys %$params ) {
@@ -6839,41 +6914,10 @@ $api->get(
 
         RP->balance_sheet_periods( $c->slconfig, $form, $locale );
         warn Dumper $form;
+
         if ( $form->{usetemplate} eq 'Y' ) {
-            my %spacer = (
-                H => '',
-                A => '&nbsp;&nbsp;&nbsp;'
-            );
-            my $account_map = {
-                A => {
-                    type  => 'asset',
-                    ml    => 1,
-                    label => $locale->text('Assets')
-                },
-                L => {
-                    type  => 'liability',
-                    ml    => 1,
-                    label => $locale->text('Liabilities')
-                },
-                Q => {
-                    type  => 'equity',
-                    ml    => 1,
-                    label => $locale->text('Equity')
-                },
-                I => {
-                    type  => 'income',
-                    ml    => 1,
-                    label => $locale->text('Income')
-                },
-                E => {
-                    type  => 'expense',
-                    ml    => -1,
-                    label => $locale->text('Expense')
-                },
-            };
 
-            my $myconfig = $c->slconfig;
-
+            my $myconfig   = $c->slconfig;
             my $timeperiod = "";
             if ( @{ $form->{periods} } == 1 ) {
                 $timeperiod = $locale->date( \%myconfig, $form->{todate},
@@ -6883,26 +6927,48 @@ $api->get(
                 $timeperiod =
                   join( " / ", map { $_->{label} } @{ $form->{periods} } );
             }
-            my $userspath = "tmp";
-            $form->{templates} = "templates/$client/";
-            $form->{IN}        = "balance_sheet_new.html";
-            $form->{OUT}       = ">tmp/balance_sheet.html";
 
-            build_report( $form, $locale, $account_map, $myconfig, $timeperiod,
-                'balance_sheet' );
-            $form->parse_template( \%$myconfig, $userspath );
+            # Build report data
+            build_balance_sheet( $form, $locale, $myconfig,
+                $timeperiod, 'balance_sheet' );
 
-            ( my $file_path = $form->{OUT} ) =~ s/^>//;
-            open my $fh, '<', $file_path or die "Cannot open $file_path: $!";
-            { local $/; $form->{html_content} = <$fh>; }
-            close $fh;
-            unlink $file_path or warn "Could not delete $file_path: $!";
-            my $pdf = html_to_pdf( $form->{html_content} );
+            my $logo_base64 = get_image_base64(
+                $c->app->home->rel_file("templates/$client/logo.png") );
+
+            # Prepare template data
+            my $template_data = {
+                company               => $form->{company} || '',
+                address               => $form->{address} || '',
+                timeperiod            => $timeperiod,
+                department            => $form->{department},
+                projectnumber         => $form->{projectnumber},
+                currency              => $form->{currency},
+                periods               => $form->{periods},
+                assets_data           => $form->{assets_data},
+                liabilities_data      => $form->{liabilities_data},
+                equity_data           => $form->{equity_data},
+                assets_hierarchy      => $form->{assets_hierarchy},
+                liabilities_hierarchy => $form->{liabilities_hierarchy},
+                equity_hierarchy      => $form->{equity_hierarchy},
+                current_earnings      => $form->{current_earnings},
+                net_totals            => $form->{net_totals},
+                logo                  => $logo_base64,
+            };
+            warn Dumper $template_data;
+
+            # Render using Mojolicious template
+            my $html_content = $c->render_to_string(
+                template => "$client/balance_sheet",
+                %$template_data
+            );
+            $html_content;
+            my $pdf = html_to_pdf($html_content);
             unless ($pdf) {
                 $c->res->status(500);
                 $c->render( text => "Failed to generate PDF" );
                 return;
             }
+
             $c->res->headers->content_type('application/pdf');
             $c->render( data => $pdf );
             return;
