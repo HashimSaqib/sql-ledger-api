@@ -966,8 +966,25 @@ sub post_invoice {
 		  lineitemdetail = '$lineitemdetail'
 		  WHERE id = $id|;
       $dbh->do($query) || $form->dberror($query);
-      
 
+      my $taxamount      = 0;
+      my $taxamounttotal = 0;
+
+      for (@taxaccounts) {
+        $taxamount = $linetotal * $form->{"${_}_rate"} if $form->{"${_}_rate"} != 0;
+        $taxamounttotal += $taxamount;
+        if ( $taxamount != 0 ) {
+          my $query = qq|INSERT INTO invoicetax (trans_id, invoice_id, chart_id, amount, taxamount)
+          VALUES ($form->{id}, $id, (SELECT id FROM chart WHERE accno='$_'), $linetotal, $taxamount)|;
+        $dbh->do($query) || $form->dberror($query);
+        }
+      }
+      if ( $taxamounttotal == 0 ) {    # Item is not taxed
+        my $query = qq|INSERT INTO invoicetax (trans_id, invoice_id, chart_id, amount, taxamount)
+          VALUES ($form->{id}, $id, 0, $linetotal, 0)|;
+          $dbh->do($query) || $form->dberror($query);
+      }
+      
       if ($form->{"inventory_accno_id_$i"}) {
         
         # add purchase to inventory
@@ -1976,7 +1993,7 @@ sub reverse_invoice {
   $sth->finish;
   
   
-  for (qw(acc_trans dpt_trans invoice inventory shipto cargo vr payment)) {
+  for (qw(acc_trans dpt_trans invoice invoicetax inventory shipto cargo vr payment)) {
     $query = qq|DELETE FROM $_ WHERE trans_id = $form->{id}|;
     $dbh->do($query) || $form->dberror($query);
   }

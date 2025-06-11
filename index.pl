@@ -4459,7 +4459,7 @@ $api->get(
 
         # List of valid modules
         my @valid_modules =
-          qw(customer vendor ic gl chart gl_report projects incomestatement employees reminder import);
+          qw(customer vendor ic gl chart gl_report projects incomestatement employees reminder import alltaxes);
 
         # Return empty JSON object if module not valid
         return $c->render( json => {} )
@@ -4721,6 +4721,13 @@ $api->get(
                 closedto     => $formatted_closedto,
                 parts        => $parts,
             };
+        }
+
+        elsif ( $module eq 'alltaxes' ) {
+            return unless $c->check_perms('reports.alltaxes');
+            my $role        = undef;
+            my $departments = $c->get_departments($role);
+            $response = { departments => $departments, };
         }
 
         # If we got here, it means we have a valid module and passed checks
@@ -6975,6 +6982,17 @@ $api->get(
         }
 
         $c->render( json => {%$form} );
+    }
+);
+
+$api->get(
+    '/reports/all_taxes' => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+        return unless my $form = $c->check_perms("reports.alltaxes");
+        $form->{dbs} = $c->dbs($client);
+        my $rows = RP->alltaxes($form);
+        $c->render( json => $rows );
     }
 );
 

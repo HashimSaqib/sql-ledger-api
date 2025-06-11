@@ -1196,6 +1196,36 @@ sub post_invoice {
 		  WHERE id = $id|;
       $dbh->do($query) || $form->dberror($query);
 
+      # armaghan - per line tax amount for each tax
+      my $taxamount      = 0;
+      my $taxamounttotal = 0;
+      for (@taxaccounts) {
+          $ok = $dbh->selectrow_array("
+              SELECT 1 FROM customertax WHERE customer_id = $form->{customer_id}
+              AND chart_id IN (SELECT id FROM chart WHERE accno = '$_')"
+          );
+          if ($ok) {
+              $taxamount = $linetotal * $form->{"${_}_rate"} if $form->{"${_}_rate"} != 0;
+              $taxamounttotal += $taxamount;
+              if ( $taxamount != 0 ) {
+                  my $query = qq|INSERT INTO invoicetax (trans_id, invoice_id, chart_id, amount, taxamount)
+                VALUES ($form->{id}, $id, (SELECT id FROM chart WHERE accno=| . $dbh->quote($_) . qq|), $linetotal,  $taxamount)|;
+
+                  $dbh->do($query) || $form->dberror($query);
+              }
+          }
+          if ( $taxamounttotal == 0 ) {    # Item is not taxed
+              $ok = $dbh->selectrow_array("
+                  SELECT 1 FROM customertax WHERE customer_id = $form->{customer_id}
+                  AND chart_id IN (SELECT id FROM chart WHERE accno = '$_')");
+              if ($ok) {
+                  my $query = qq|INSERT INTO invoicetax (trans_id, invoice_id, chart_id, amount, taxamount)
+                VALUES ($form->{id}, $id, (SELECT id FROM chart WHERE accno = '$_'), $linetotal, 0)|;
+                  $dbh->do($query) || $form->dberror($query);
+              }
+          }
+      }
+
       # add id
       $form->{acc_trans}{lineitems}[$ndx]->{id} = $id;
 
@@ -2251,7 +2281,7 @@ sub reverse_invoice {
   $sth->finish;
   
   
-  for (qw(acc_trans dpt_trans invoice inventory cargo shipto vr payment)) {
+  for (qw(acc_trans dpt_trans invoice invoicetax inventory cargo shipto vr payment)) {
     $query = qq|DELETE FROM $_ WHERE trans_id = $form->{id}|;
     $dbh->do($query) || $form->dberror($query);
   }
