@@ -4459,7 +4459,7 @@ $api->get(
 
         # List of valid modules
         my @valid_modules =
-          qw(customer vendor ic gl chart gl_report projects incomestatement employees reminder import alltaxes);
+          qw(customer vendor ic gl chart gl_report projects incomestatement employees reminder import alltaxes tax_report);
 
         # Return empty JSON object if module not valid
         return $c->render( json => {} )
@@ -4728,6 +4728,16 @@ $api->get(
             my $role        = undef;
             my $departments = $c->get_departments($role);
             $response = { departments => $departments, };
+        }
+        elsif ( $module eq 'tax_report' ) {
+            return
+              unless $c->check_perms('vendor.taxreport,customer.taxreport');
+            my $role        = undef;
+            my $departments = $c->get_departments($role);
+            $response = {
+                departments  => $departments,
+                tax_accounts => $tax_accounts,
+            };
         }
 
         # If we got here, it means we have a valid module and passed checks
@@ -6209,6 +6219,66 @@ $api->post(
     }
 );
 
+$api->get(
+    '/taxreport/:vc' => sub {
+        my $c  = shift;
+        my $vc = $c->param('vc');
+
+        # Validate vc parameter
+        unless ( $vc eq 'customer' || $vc eq 'vendor' ) {
+            return $c->render(
+                json   => { error => "Invalid vc parameter" },
+                status => 400
+            );
+        }
+        my $form = new Form;
+        if ( $vc eq 'customer' ) {
+            return unless $form = $c->check_perms("customer.taxreport");
+        }
+        else {
+            return unless $form = $c->check_perms("vendor.taxreport");
+        }
+
+        # Core parameters
+        $form->{db}         = $vc eq 'customer' ? 'ar' : 'ap';
+        $form->{fromdate}   = $c->param('fromdate');
+        $form->{todate}     = $c->param('todate');
+        $form->{reportcode} = $c->param('reportcode');
+        $form->{summary}    = $c->param('summary') ? 1 : 0;
+        $form->{method}     = $c->param('method') || 'accrual';
+
+        # Account filtering
+        $form->{taxaccounts}      = $c->param('taxaccounts');
+        $form->{gifi_taxaccounts} = $c->param('gifi_taxaccounts');
+        $form->{department}       = $c->param('department');
+
+        # Set individual account flags if taxaccounts provided
+        if ( $form->{taxaccounts} ) {
+            for my $account ( split / /, $form->{taxaccounts} ) {
+                $form->{"accno_$account"} = 1;
+            }
+        }
+
+        # Set individual GIFI flags if gifi_taxaccounts provided
+        if ( $form->{gifi_taxaccounts} ) {
+            for my $gifi ( split / /, $form->{gifi_taxaccounts} ) {
+                $form->{"gifi_$gifi"} = 1;
+            }
+        }
+
+        # Alternative date parameters
+        $form->{year}     = $c->param('year');
+        $form->{month}    = $c->param('month');
+        $form->{interval} = $c->param('interval');
+
+        warn Dumper($form);
+
+        RP->tax_report( $c->slconfig, $form );
+
+        # Return results
+        $c->render( json => $form->{TR} || [] );
+    }
+);
 ###############################
 ####                       ####
 ####        Reports        ####
@@ -6991,10 +7061,10 @@ $api->get(
         my $client = $c->param('client');
         return unless my $form = $c->check_perms("reports.alltaxes");
 
-        $form->{fromdate} = $c->param('fromdate') // '';
-        $form->{todate} = $c->param('todate') // '';
+        $form->{fromdate}   = $c->param('fromdate')   // '';
+        $form->{todate}     = $c->param('todate')     // '';
         $form->{department} = $c->param('department') // '';
-     
+
         $form->{dbs} = $c->dbs($client);
         my $rows = RP->alltaxes($form);
         $c->render( json => $rows );
