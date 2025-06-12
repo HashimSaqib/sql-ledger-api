@@ -6990,6 +6990,11 @@ $api->get(
         my $c      = shift;
         my $client = $c->param('client');
         return unless my $form = $c->check_perms("reports.alltaxes");
+
+        $form->{fromdate} = $c->param('fromdate') // '';
+        $form->{todate} = $c->param('todate') // '';
+        $form->{department} = $c->param('department') // '';
+     
         $form->{dbs} = $c->dbs($client);
         my $rows = RP->alltaxes($form);
         $c->render( json => $rows );
