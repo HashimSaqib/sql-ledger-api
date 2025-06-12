@@ -99,7 +99,7 @@ sub post_transaction {
     # set $form->{linetax} = 1 if linetax is enabled
     $form->{linetax} = ($form->{"linetaxamount_$_"} > 0) if !$form->{linetax}; 
   }
-    $form->{linetax} *= 1; # set to 0 if null;
+   $form->{linetax} = $form->{linetax} ? 'true' : 'false';
 
   for (qw(taxincluded onhold)) { $form->{$_} *= 1 }
   
