@@ -211,7 +211,7 @@ get '/logo/:client/' => sub {
 ###############################
 
 my $neoledger_perms =
-'["dashboard", "cash", "cash.recon", "gl", "gl.add", "gl.transactions", "items", "items.part", "items.service", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income", "system", "system.currencies", "system.projects", "system.departments", "system.defaults", "system.chart", "system.chart.list", "system.chart.add", "system.chart.gifi", "system.taxes",  "system.templates", "system.audit", "system.batch", "import", "import.gl", "import.customer", "import.ar_invoice", "import.ar.transactions", "import.vendor", "import.ap_invoice", "import.ap.transactions", "reports.balance", "customer", "customer.transaction", "customer.invoice", "customer.transaction.return", "customer.invoice.return", "customer.add", "customer.batch", "customer.reminder", "customer.consolidate", "customer.transactions", "customer.search", "customer.history", "vendor", "vendor.transaction", "vendor.invoice", "vendor.transaction.return", "vendor.invoice.return", "vendor.add", "vendor.transactions", "vendor.search", "vendor.history", "reports.alltaxes", "vendor.taxreport", "customer.taxreport", "cash.payments", "cash.receipts", "cash.report.customer", "cash.report.vendor"]';
+'["dashboard", "cash", "cash.recon", "gl", "gl.add", "gl.transactions", "items", "items.part", "items.service", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income", "system", "system.currencies", "system.projects", "system.departments", "system.defaults", "system.chart", "system.chart.list", "system.chart.add", "system.chart.gifi", "system.taxes",  "system.templates", "system.audit", "system.yearend", "system.batch", "import", "import.gl", "import.customer", "import.ar_invoice", "import.ar.transactions", "import.vendor", "import.ap_invoice", "import.ap.transactions", "reports.balance", "customer", "customer.transaction", "customer.invoice", "customer.transaction.return", "customer.invoice.return", "customer.add", "customer.batch", "customer.reminder", "customer.consolidate", "customer.transactions", "customer.search", "customer.history", "vendor", "vendor.transaction", "vendor.invoice", "vendor.transaction.return", "vendor.invoice.return", "vendor.add", "vendor.transactions", "vendor.search", "vendor.history", "reports.alltaxes", "vendor.taxreport", "customer.taxreport", "cash.payments", "cash.receipts", "cash.report.customer", "cash.report.vendor"]';
 
 my $reports_only =
 '["dashboard", "gl", "gl.transactions", "items", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income",  "reports.balance", "customer", "customer.transactions", "customer.search", "customer.history", "vendor", "vendor.search", "vendor.history", "vendor.transactions", "reports.alltaxes", "vendor.taxreport", "customer.taxreport", "cash.report.customer", "cash.report.vendor"]';
@@ -3276,6 +3276,139 @@ $api->get(
     }
 );
 
+$api->get(
+    '/system/yearend' => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+        return unless my $form = $c->check_perms("system.yearend");
+
+        my $all_accounts = $c->get_accounts();
+
+        # Filter accounts with category 'Q' and charttype 'A'
+        my @yearend_accounts =
+          grep { $_->{category} eq 'Q' && $_->{charttype} eq 'A' }
+          @{ $all_accounts->{all} };
+
+        $c->render( json => \@yearend_accounts );
+    }
+);
+$api->post(
+    '/system/yearend' => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+        return unless my $form = $c->check_perms("system.yearend");
+        my $dbs = $c->dbs($client);
+
+        # Get JSON data from request
+        my $json_data = $c->req->json;
+
+        # Map JSON data to form
+        $form->{todate}      = $json_data->{todate};
+        $form->{accno}       = $json_data->{accno};
+        $form->{description} = $json_data->{description}
+          if $json_data->{description};
+        $form->{notes}     = $json_data->{notes}     if $json_data->{notes};
+        $form->{reference} = $json_data->{reference} if $json_data->{reference};
+        $form->{method}    = $json_data->{method} || 'accrual';
+
+        # Validate required fields
+        unless ( $form->{todate} ) {
+            return $c->render(
+                json => {
+                    status  => 'error',
+                    message => 'Year-end date missing!'
+                }
+            );
+        }
+
+        unless ( $form->{accno} ) {
+            return $c->render(
+                json => {
+                    status  => 'error',
+                    message => 'Retained earnings account missing!'
+                }
+            );
+        }
+
+        # Get year-end statement data
+        RP->yearend_statement( $c->slconfig, $form );
+
+        # Set transaction date
+        $form->{transdate} = $form->{todate};
+
+        my $earnings = 0;
+        my $ok       = 0;
+        $form->{rowcount} = 1;
+
+        # Process Income accounts (create debits to zero them out)
+        for my $accno ( keys %{ $form->{I} } ) {
+            if ( $form->{I}{$accno}{charttype} eq "A" ) {
+                $form->{"debit_$form->{rowcount}"} = $form->{I}{$accno}{amount};
+                $earnings += $form->{I}{$accno}{amount};
+                $form->{"accno_$form->{rowcount}"} = $accno;
+                $form->{rowcount}++;
+                $ok = 1;
+            }
+        }
+
+        # Process Expense accounts (create credits to zero them out)
+        for my $accno ( keys %{ $form->{E} } ) {
+            if ( $form->{E}{$accno}{charttype} eq "A" ) {
+                $form->{"credit_$form->{rowcount}"} =
+                  $form->{E}{$accno}{amount} * -1;
+                $earnings += $form->{E}{$accno}{amount};
+                $form->{"accno_$form->{rowcount}"} = $accno;
+                $form->{rowcount}++;
+                $ok = 1;
+            }
+        }
+
+        # Create retained earnings entry
+        if ( $earnings > 0 ) {
+
+            # Profit: Credit retained earnings
+            $form->{"credit_$form->{rowcount}"} = $earnings;
+            $form->{"accno_$form->{rowcount}"}  = $form->{accno};
+        }
+        else {
+            # Loss: Debit retained earnings
+            $form->{"debit_$form->{rowcount}"} = $earnings * -1;
+            $form->{"accno_$form->{rowcount}"} = $form->{accno};
+        }
+
+        # Check if there's anything to post
+        unless ( $ok && $earnings ) {
+            return $c->render(
+                json => {
+                    status  => 'error',
+                    message => 'Nothing to post for year-end!'
+                }
+            );
+        }
+
+        # Post the year-end transaction
+        if ( AM->post_yearend( $c->slconfig, $form ) ) {
+            $c->render(
+                json => {
+                    status    => 'success',
+                    message   => 'Year-end posted successfully!',
+                    reference => $form->{reference},
+                    trans_id  => $form->{id},
+                    earnings  => $earnings,
+                    entries   => $form->{rowcount} - 1
+                }
+            );
+        }
+        else {
+            $c->render(
+                json => {
+                    status  => 'error',
+                    message => 'Year-end posting failed!'
+                }
+            );
+        }
+    }
+);
 $api->post(
     '/system/audit' => sub {
         my $c      = shift;
