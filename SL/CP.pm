@@ -980,7 +980,8 @@ sub post_payment {
     if ($assignvoucherid) {
       for (qw(id number)) { delete $form->{"voucher$_"} }
     }
-    OP::overpayment("", $myconfig, $form, $dbh, $paymentamount, $ml);
+    use SL::OP;
+    OP->overpayment($myconfig, $form, $dbh, $paymentamount, $ml);
   }
 
   $form->remove_locks($myconfig, $dbh, $form->{arap}) if $form->{payment} eq 'payment';

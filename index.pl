@@ -4749,6 +4749,7 @@ $api->get(
                 accounts    => $accounts,
                 departments => $departments,
                 currencies  => $currencies,
+                closedto    => $formatted_closedto,
             };
         }
 
@@ -6342,7 +6343,241 @@ $api->get(
 
     }
 );
+$api->post(
+    '/open_invoices/:vc' => sub {
+        my $c    = shift;
+        my $vc   = $c->param('vc');
+        my $json = $c->req->json;
+        my $form = new Form;
 
+        # Check permissions
+        if ( $vc eq 'customer' ) {
+            return unless $form = $c->check_perms("cash.receipts");
+        }
+        else {
+            return unless $form = $c->check_perms("cash.payments");
+        }
+
+        # Validate required JSON fields
+        unless ( $json->{account}
+            && $json->{date}
+            && $json->{payments}
+            && $json->{method} )
+        {
+            return $c->render(
+                json => {
+                    error =>
+                      'Missing required fields: account, date, payments, method'
+                },
+                status => 400
+            );
+        }
+
+        # Validate method
+        unless ( $json->{method} eq 'individual' || $json->{method} eq 'group' )
+        {
+            return $c->render(
+                json => {
+                    error => 'Invalid method. Must be "individual" or "group"'
+                },
+                status => 400
+            );
+        }
+
+        # Prepare common form data using the existing form object
+        $form->{vc}            = $vc;
+        $form->{datepaid}      = $json->{date};
+        $form->{currency}      = $json->{currency} || $form->{defaultcurrency};
+        $form->{exchangerate}  = $json->{exchangerate}  || 1;
+        $form->{paymentmethod} = $json->{paymentmethod} || '';
+        $form->{source}        = $json->{source}        || '';
+        $form->{memo}          = $json->{memo}          || '';
+        $form->{type}          = $vc eq 'customer' ? 'receipt' : 'payment';
+        $form->{formname}      = $vc eq 'customer' ? 'receipt' : 'payment';
+        $form->{payment}       = 'payment';
+
+        # Set ARAP table name and payment account based on vc type
+        if ( $vc eq 'customer' ) {
+            $form->{arap}    = 'ar';
+            $form->{ARAP}    = 'AR';
+            $form->{AR_paid} = $json->{account};
+        }
+        elsif ( $vc eq 'vendor' ) {
+            $form->{arap}    = 'ap';
+            $form->{ARAP}    = 'AP';
+            $form->{AP_paid} = $json->{account};
+        }
+
+        my $method          = $json->{method};
+        my $total_processed = 0;
+        my $total_amount    = 0;
+        my @results;
+
+        if ( $method eq 'individual' ) {
+
+            # Handle individual payments using the existing form object
+            my $payments = $json->{payments};
+            $form->{rowcount} = scalar @$payments;
+
+            for my $i ( 0 .. $#$payments ) {
+                my $row_num = $i + 1;            # 1-based indexing
+                my $payment = $payments->[$i];
+
+                # Validate required payment fields
+                unless ( $payment->{id} && defined $payment->{paid} ) {
+                    return $c->render(
+                        json => {
+                            error =>
+"Payment $row_num missing required fields: id, paid"
+                        },
+                        status => 400
+                    );
+                }
+
+                # Set payment row data
+                $form->{"checked_$row_num"} = 1;              # Mark as selected
+                $form->{"id_$row_num"}      = $payment->{id};
+                $form->{"paid_$row_num"}    = $payment->{paid};
+
+                # Add to total amount
+                $total_amount += $payment->{paid};
+            }
+
+            # Override source/memo with individual payment data if provided
+            if ( $payments->[0]->{source} || $payments->[0]->{memo} ) {
+                $form->{source} = $payments->[0]->{source} || $form->{source};
+                $form->{memo}   = $payments->[0]->{memo}   || $form->{memo};
+            }
+
+            # Set total payment amount
+            $form->{amount} = $total_amount;
+
+            # Call the payment posting routine
+            my $result = CP->post_payment( $c->slconfig, $form );
+
+            if ($result) {
+                $total_processed = scalar @$payments;
+            }
+            else {
+                return $c->render(
+                    json   => { error => 'Payment posting failed' },
+                    status => 500
+                );
+            }
+
+        }
+        elsif ( $method eq 'group' ) {
+
+            # Handle group payments
+            my $payments = $json->{payments};
+
+            for my $payment_group (@$payments) {
+
+                # Validate payment group structure
+                unless ( $payment_group->{total_amount}
+                    && $payment_group->{invoices} )
+                {
+                    return $c->render(
+                        json => {
+                            error =>
+'Invalid payment group structure. Required: customer, total_amount, invoices'
+                        },
+                        status => 400
+                    );
+                }
+
+           # Create a new form for this payment group, copying from the original
+                my $group_form = new Form;
+                $group_form->{"${vc}_id"} = $payment_group->{vc_id};
+
+             # Copy all data from the original form (including permissions data)
+                for my $key ( keys %$form ) {
+                    $group_form->{$key} = $form->{$key};
+                }
+
+                # Override source and memo for this payment group if provided
+                $group_form->{source} =
+                  $payment_group->{source} || $form->{source};
+                $group_form->{memo} = $payment_group->{memo} || $form->{memo};
+
+                # Transform invoices into indexed format
+                my $invoices = $payment_group->{invoices};
+                $group_form->{rowcount} = scalar @$invoices;
+
+                # Clear any existing row data from the copied form
+                for my $key ( keys %$group_form ) {
+                    if ( $key =~ /^(checked_|id_|paid_)\d+$/ ) {
+                        delete $group_form->{$key};
+                    }
+                }
+
+                for my $i ( 0 .. $#$invoices ) {
+                    my $row_num = $i + 1;            # 1-based indexing
+                    my $invoice = $invoices->[$i];
+
+                    # Validate required invoice fields
+                    unless ( $invoice->{id} && defined $invoice->{paid} ) {
+                        return $c->render(
+                            json => {
+                                error =>
+"Invoice in payment group for $payment_group->{customer} missing required fields: id, paid"
+                            },
+                            status => 400
+                        );
+                    }
+
+                    # Set invoice row data
+                    $group_form->{"checked_$row_num"} = 1;    # Mark as selected
+                    $group_form->{"id_$row_num"}      = $invoice->{id};
+                    $group_form->{"paid_$row_num"}    = $invoice->{paid};
+                }
+
+                # Set total payment amount for this group
+                $group_form->{amount} = $payment_group->{total_amount};
+
+                # Post payment for this group
+                my $result = CP->post_payment( $c->slconfig, $group_form );
+
+                if ($result) {
+                    push @results,
+                      {
+                        customer       => $payment_group->{customer},
+                        amount         => $payment_group->{total_amount},
+                        invoices_count => scalar @$invoices,
+                        success        => 1
+                      };
+                    $total_processed += scalar @$invoices;
+                    $total_amount    += $payment_group->{total_amount};
+                }
+                else {
+                    return $c->render(
+                        json => {
+                            error =>
+"Payment posting failed for customer: $payment_group->{customer}"
+                        },
+                        status => 500
+                    );
+                }
+            }
+        }
+
+        # Return success response
+        my $response = {
+            success            => 1,
+            message            => 'Payment(s) posted successfully',
+            method             => $method,
+            total_amount       => $total_amount,
+            payments_processed => $total_processed
+        };
+
+        # Add group-specific details
+        if ( $method eq 'group' ) {
+            $response->{payment_groups} = \@results;
+        }
+
+        $c->render( json => $response );
+    }
+);
 ###############################
 ####                       ####
 ####        Reports        ####
