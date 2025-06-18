@@ -211,10 +211,10 @@ get '/logo/:client/' => sub {
 ###############################
 
 my $neoledger_perms =
-'["dashboard", "cash", "cash.recon", "gl", "gl.add", "gl.transactions", "items", "items.part", "items.service", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income", "system", "system.currencies", "system.projects", "system.departments", "system.defaults", "system.chart", "system.chart.list", "system.chart.add", "system.chart.gifi", "system.taxes",  "system.templates", "system.audit", "system.batch", "import", "import.gl", "import.customer", "import.ar_invoice", "import.ar.transactions", "import.vendor", "import.ap_invoice", "import.ap.transactions", "reports.balance", "customer", "customer.transaction", "customer.invoice", "customer.transaction.return", "customer.invoice.return", "customer.add", "customer.batch", "customer.reminder", "customer.consolidate", "customer.transactions", "customer.search", "customer.history", "vendor", "vendor.transaction", "vendor.invoice", "vendor.transaction.return", "vendor.invoice.return", "vendor.add", "vendor.transactions", "vendor.search", "vendor.history", "reports.alltaxes", "vendor.taxreport", "customer.taxreport", "cash.payments", "cash.receipts"]';
+'["dashboard", "cash", "cash.recon", "gl", "gl.add", "gl.transactions", "items", "items.part", "items.service", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income", "system", "system.currencies", "system.projects", "system.departments", "system.defaults", "system.chart", "system.chart.list", "system.chart.add", "system.chart.gifi", "system.taxes",  "system.templates", "system.audit", "system.batch", "import", "import.gl", "import.customer", "import.ar_invoice", "import.ar.transactions", "import.vendor", "import.ap_invoice", "import.ap.transactions", "reports.balance", "customer", "customer.transaction", "customer.invoice", "customer.transaction.return", "customer.invoice.return", "customer.add", "customer.batch", "customer.reminder", "customer.consolidate", "customer.transactions", "customer.search", "customer.history", "vendor", "vendor.transaction", "vendor.invoice", "vendor.transaction.return", "vendor.invoice.return", "vendor.add", "vendor.transactions", "vendor.search", "vendor.history", "reports.alltaxes", "vendor.taxreport", "customer.taxreport", "cash.payments", "cash.receipts", "cash.report.customer", "cash.report.vendor"]';
 
 my $reports_only =
-'["dashboard", "gl", "gl.transactions", "items", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income",  "reports.balance", "customer", "customer.transactions", "customer.search", "customer.history", "vendor", "vendor.search", "vendor.history", "vendor.transactions", "reports.alltaxes", "vendor.taxreport", "customer.taxreport"]';
+'["dashboard", "gl", "gl.transactions", "items", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income",  "reports.balance", "customer", "customer.transactions", "customer.search", "customer.history", "vendor", "vendor.search", "vendor.history", "vendor.transactions", "reports.alltaxes", "vendor.taxreport", "customer.taxreport", "cash.report.customer", "cash.report.vendor"]';
 helper send_email_central => sub {
     use Email::Sender::Transport::SMTP;
     use Email::Stuffer;
@@ -4459,7 +4459,7 @@ $api->get(
 
         # List of valid modules
         my @valid_modules =
-          qw(customer vendor ic gl chart gl_report projects incomestatement employees reminder import alltaxes tax_report payments);
+          qw(customer vendor ic gl chart gl_report projects incomestatement employees reminder import alltaxes tax_report payments payments_report);
 
         # Return empty JSON object if module not valid
         return $c->render( json => {} )
@@ -4750,6 +4750,18 @@ $api->get(
                 departments => $departments,
                 currencies  => $currencies,
                 closedto    => $formatted_closedto,
+            };
+        }
+        elsif ( $module eq 'payments_report' ) {
+            return
+              unless $c->check_perms('cash.report.customer,cash.report.vendor');
+            my $role        = undef;
+            my $departments = $c->get_departments($role);
+            $response = {
+                departments => $departments,
+                accounts    => $accounts,
+                customers   => $customers,
+                vendors     => $vendors
             };
         }
 
@@ -6576,6 +6588,76 @@ $api->post(
         }
 
         $c->render( json => $response );
+    }
+);
+$api->get(
+    '/cash/report/:vc' => sub {
+        my $c  = shift;
+        my $vc = $c->param('vc');
+
+        # Validate vc parameter
+        unless ( $vc eq 'customer' || $vc eq 'vendor' ) {
+            return $c->render(
+                json   => { error => "Invalid vc parameter" },
+                status => 400
+            );
+        }
+
+        my $form = new Form;
+
+        # Check permissions
+        return unless $form = $c->check_perms("cash.report.$vc");
+
+        # Core parameters
+        $form->{db} = $vc eq 'customer' ? 'ar' : 'ap';
+        $form->{vc} = $vc;
+
+        # Date parameters
+        $form->{fromdate} = $c->param('fromdate');
+        $form->{todate}   = $c->param('todate');
+
+        # Alternative date parameters
+        $form->{year}     = $c->param('year');
+        $form->{month}    = $c->param('month');
+        $form->{interval} = $c->param('interval');
+
+        # Payment account filtering (key parameter for the subroutine)
+        $form->{paymentaccounts} = $c->param('paymentaccounts');
+
+        # Department filtering
+        $form->{department_id} = $c->param('department_id');
+
+        # Search filters
+        $form->{description} = $c->param('description') || '';
+        $form->{source}      = $c->param('source')      || '';
+        $form->{memo}        = $c->param('memo')        || '';
+
+        # Customer/Vendor filtering
+        $form->{$vc} = $c->param('vc_name') || '';
+
+        warn Dumper($form);
+
+        # Call the payments report function
+        RP->payments( $c->slconfig, $form );
+
+        # Build response with accounts and their transactions
+        my @response = ();
+
+        if ( $form->{PR} && ref $form->{PR} eq 'ARRAY' ) {
+            foreach my $account ( @{ $form->{PR} } ) {
+                my $account_data = {
+                    id           => $account->{id},
+                    accno        => $account->{accno},
+                    description  => $account->{description},
+                    translation  => $account->{translation},
+                    transactions => $form->{ $account->{id} } || []
+                };
+                push @response, $account_data;
+            }
+        }
+
+        # Return results
+        $c->render( json => \@response );
     }
 );
 ###############################
