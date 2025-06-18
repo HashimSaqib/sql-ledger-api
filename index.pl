@@ -211,7 +211,7 @@ get '/logo/:client/' => sub {
 ###############################
 
 my $neoledger_perms =
-'["dashboard", "cash", "cash.recon", "gl", "gl.add", "gl.transactions", "items", "items.part", "items.service", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income", "system", "system.currencies", "system.projects", "system.departments", "system.defaults", "system.chart", "system.chart.list", "system.chart.add", "system.chart.gifi", "system.taxes",  "system.templates", "system.audit", "system.batch", "import", "import.gl", "import.customer", "import.ar_invoice", "import.ar.transactions", "import.vendor", "import.ap_invoice", "import.ap.transactions", "reports.balance", "customer", "customer.transaction", "customer.invoice", "customer.transaction.return", "customer.invoice.return", "customer.add", "customer.batch", "customer.reminder", "customer.consolidate", "customer.transactions", "customer.search", "customer.history", "vendor", "vendor.transaction", "vendor.invoice", "vendor.transaction.return", "vendor.invoice.return", "vendor.add", "vendor.transactions", "vendor.search", "vendor.history", "reports.alltaxes", "vendor.taxreport", "customer.taxreport"]';
+'["dashboard", "cash", "cash.recon", "gl", "gl.add", "gl.transactions", "items", "items.part", "items.service", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income", "system", "system.currencies", "system.projects", "system.departments", "system.defaults", "system.chart", "system.chart.list", "system.chart.add", "system.chart.gifi", "system.taxes",  "system.templates", "system.audit", "system.batch", "import", "import.gl", "import.customer", "import.ar_invoice", "import.ar.transactions", "import.vendor", "import.ap_invoice", "import.ap.transactions", "reports.balance", "customer", "customer.transaction", "customer.invoice", "customer.transaction.return", "customer.invoice.return", "customer.add", "customer.batch", "customer.reminder", "customer.consolidate", "customer.transactions", "customer.search", "customer.history", "vendor", "vendor.transaction", "vendor.invoice", "vendor.transaction.return", "vendor.invoice.return", "vendor.add", "vendor.transactions", "vendor.search", "vendor.history", "reports.alltaxes", "vendor.taxreport", "customer.taxreport", "cash.payments", "cash.receipts"]';
 
 my $reports_only =
 '["dashboard", "gl", "gl.transactions", "items", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income",  "reports.balance", "customer", "customer.transactions", "customer.search", "customer.history", "vendor", "vendor.search", "vendor.history", "vendor.transactions", "reports.alltaxes", "vendor.taxreport", "customer.taxreport"]';
@@ -4459,14 +4459,14 @@ $api->get(
 
         # List of valid modules
         my @valid_modules =
-          qw(customer vendor ic gl chart gl_report projects incomestatement employees reminder import alltaxes tax_report);
+          qw(customer vendor ic gl chart gl_report projects incomestatement employees reminder import alltaxes tax_report payments);
 
         # Return empty JSON object if module not valid
         return $c->render( json => {} )
           unless grep { $_ eq $module } @valid_modules;
 
         my $tax_accounts = $dbs->query(
-            "SELECT t.*, c.description, c.accno,
+            "SELECT t.*, c.description, c.accno, c.link,
                 CONCAT(c.accno, '--', c.description) AS label
          FROM tax t
          JOIN chart c ON (c.id = t.chart_id)
@@ -4737,6 +4737,18 @@ $api->get(
             $response = {
                 departments  => $departments,
                 tax_accounts => $tax_accounts,
+            };
+        }
+        elsif ( $module eq 'payments' ) {
+            return unless $c->check_perms('cash.receipts,cash.payments');
+            my $role        = undef;
+            my $departments = $c->get_departments($role);
+            $response = {
+                customers   => $customers,
+                vendors     => $vendors,
+                accounts    => $accounts,
+                departments => $departments,
+                currencies  => $currencies,
             };
         }
 
@@ -6279,6 +6291,58 @@ $api->get(
         $c->render( json => $form->{TR} || [] );
     }
 );
+$api->get(
+    '/open_invoices/:vc' => sub {
+        my $c  = shift;
+        my $vc = $c->param('vc');
+
+        my $form = new Form;
+        if ( $vc eq 'customer' ) {
+            return unless $form = $c->check_perms("cash.receipts");
+        }
+        else {
+            return unless $form = $c->check_perms("cash.payments");
+        }
+
+        # Set required parameters
+        $form->{vc}       = $vc;
+        $form->{fromdate} = $c->param('fromdate');
+        $form->{todate}   = $c->param('todate');
+
+        # Set additional parameters that get_openinvoices expects
+        $form->{"${vc}_id"}    = $c->param("${vc}_id");
+        $form->{currency}      = $c->param('currency');
+        $form->{duedatefrom}   = $c->param('duedatefrom');
+        $form->{duedateto}     = $c->param('duedateto');
+        $form->{department}    = $c->param('department');
+        $form->{paymentmethod} = $c->param('paymentmethod');
+        $form->{payment}       = $c->param('payment');
+        $form->{datepaid}      = $c->param('datepaid');
+
+        # Set ARAP table name based on vc type
+        if ( $vc eq 'customer' ) {
+            $form->{arap} = 'ar';
+            $form->{ARAP} = 'AR';
+        }
+        elsif ( $vc eq 'vendor' ) {
+            $form->{arap}     = 'ap';
+            $form->{ARAP}     = 'AP';
+            $form->{business} = $c->param('business');
+        }
+        else {
+            return $c->render(
+                json => {
+                    error => 'Invalid vc parameter. Must be customer or vendor'
+                },
+                status => 400
+            );
+        }
+        CP->get_openinvoices( $c->slconfig, $form );
+        $c->render( json => $form->{PR} || [] );
+
+    }
+);
+
 ###############################
 ####                       ####
 ####        Reports        ####
