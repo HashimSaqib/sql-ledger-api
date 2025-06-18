@@ -518,7 +518,7 @@ INSERT INTO defaults (fldname, fldvalue) VALUES ('customernumber','KD-0');
 INSERT INTO defaults (fldname, fldvalue) VALUES ('vendornumber','L-0');
 INSERT INTO defaults (fldname, fldvalue) VALUES ('projectnumber','P-0');
 INSERT INTO defaults (fldname, fldvalue) VALUES ('audittrail','1');
-
+INSERT INTO defaults (fldname, fldvalue) VALUES ('linetax', '1');
 --------------------
 --- 8 CURRENCIES ---
 --------------------
