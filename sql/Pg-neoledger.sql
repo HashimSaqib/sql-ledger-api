@@ -1,9 +1,24 @@
+-- Add columns to existing tables
+ALTER TABLE ar 
+ADD linetax BOOLEAN NOT NULL DEFAULT FALSE,
+ADD COLUMN created TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+ADD COLUMN updated TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;
 
-ALTER TABLE ar ADD linetax BOOLEAN NOT NULL DEFAULT FALSE;
-ALTER TABLE ap ADD linetax BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE ap 
+ADD linetax BOOLEAN NOT NULL DEFAULT FALSE,
+ADD COLUMN created TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+ADD COLUMN updated TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;
+
+ALTER TABLE gl 
+ADD COLUMN created TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+ADD COLUMN updated TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;
+
+ALTER TABLE oe 
+ADD COLUMN created TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+ADD COLUMN updated TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;
+
 ALTER TABLE acc_trans ADD tax_chart_id INTEGER;
 ALTER TABLE acc_trans ADD linetaxamount NUMERIC NOT NULL DEFAULT 0;
-
 ALTER TABLE chart ADD parent_id INTEGER;
 ALTER TABLE tax ADD id SERIAL PRIMARY KEY;
  
@@ -52,9 +67,39 @@ CREATE TABLE invoicetax (
     taxamount double precision NOT NULL,
     amount double precision NOT NULL
 );
+
+-- Create indexes
 CREATE INDEX idx_invoicetax_trans_id ON invoicetax (trans_id);
-
-
 CREATE INDEX idx_files_module ON files(module);
 CREATE INDEX idx_files_location ON files(location);
 CREATE INDEX idx_files_reference_id ON files(reference_id);
+
+-- Create trigger function for updating 'updated' column
+CREATE OR REPLACE FUNCTION update_updated_column()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Create triggers for automatic timestamp updates
+CREATE TRIGGER gl_update_updated_trigger
+    BEFORE UPDATE ON gl
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_column();
+
+CREATE TRIGGER ar_update_updated_trigger
+    BEFORE UPDATE ON ar
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_column();
+
+CREATE TRIGGER ap_update_updated_trigger
+    BEFORE UPDATE ON ap
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_column();
+
+CREATE TRIGGER oe_update_updated_trigger
+    BEFORE UPDATE ON oe
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_column();
