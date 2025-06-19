@@ -1216,7 +1216,6 @@ $central->post(
         $c->render( json => { message => "Dataset created successfully" } );
     }
 );
-
 sub run_sql_file {
     my ( $dataset, $sql_file ) = @_;
 
@@ -1245,24 +1244,14 @@ sub run_sql_file {
         }
     }
 
-    # Split SQL content into individual statements
-    my @statements = split( /;\s*/, $sql );
-    foreach my $statement (@statements) {
-        next if $statement =~ /^\s*$/;
-
-        # Execute each statement inside an eval block to catch errors
-        eval {
-            $dbh->do($statement);
-            1;
-        } or do {
-            my $error = $@ || 'Unknown error';
-
-     # Log a trimmed version of the statement for context (first 100 characters)
-            my $trimmed_statement = substr( $statement, 0, 100 );
-            die
-"Failed to execute SQL statement in file '$sql_file': $error\nStatement (truncated): $trimmed_statement...";
-        };
-    }
+    # Execute the entire SQL content as one block
+    eval {
+        $dbh->do($sql);
+        1;
+    } or do {
+        my $error = $@ || 'Unknown error';
+        die "Failed to execute SQL file '$sql_file': $error";
+    };
 
     $dbh->disconnect;
 }

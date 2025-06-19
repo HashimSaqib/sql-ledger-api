@@ -466,18 +466,18 @@ INSERT INTO gifi (accno, description) VALUES ('890', 'Direkte Steuern');
 
 DELETE FROM tax;
 
-INSERT INTO tax (id, chart_id, rate, taxnumber, validto) VALUES (41, (SELECT id FROM chart WHERE accno = '22040'), 0.081, 'CHE-XXX.XXX.XXX MWST', NULL);
-INSERT INTO tax (id, chart_id, rate, taxnumber, validto) VALUES (42, (SELECT id FROM chart WHERE accno = '22050'), 0, 'CHE-XXX.XXX.XXX MWST', NULL);
-INSERT INTO tax (id, chart_id, rate, taxnumber, validto) VALUES (43, (SELECT id FROM chart WHERE accno = '22051'), 0, 'CHE-XXX.XXX.XXX MWST', NULL);
-INSERT INTO tax (id, chart_id, rate, taxnumber, validto) VALUES (44, (SELECT id FROM chart WHERE accno = '22052'), 0, 'CHE-XXX.XXX.XXX MWST', NULL);
-INSERT INTO tax (id, chart_id, rate, taxnumber, validto) VALUES (45, (SELECT id FROM chart WHERE accno = '22053'), 0, 'CHE-XXX.XXX.XXX MWST', NULL);
-INSERT INTO tax (id, chart_id, rate, taxnumber, validto) VALUES (47, (SELECT id FROM chart WHERE accno = '22054'), 0, 'CHE-XXX.XXX.XXX MWST', NULL);
-INSERT INTO tax (id, chart_id, rate, taxnumber, validto) VALUES (48, (SELECT id FROM chart WHERE accno = '22055'), 0, 'CHE-XXX.XXX.XXX MWST', NULL);
-INSERT INTO tax (id, chart_id, rate, taxnumber, validto) VALUES (48, (SELECT id FROM chart WHERE accno = '22060'), 0, 'CHE-XXX.XXX.XXX MWST', NULL);
-INSERT INTO tax (id, chart_id, rate, taxnumber, validto) VALUES (56, (SELECT id FROM chart WHERE accno = '34970'), 0.081, 'CHE-XXX.XXX.XXX MWST', NULL);
-INSERT INTO tax (id, chart_id, rate, taxnumber, validto) VALUES (49, (SELECT id FROM chart WHERE accno = '34980'), 0.038, 'CHE-XXX.XXX.XXX MWST', NULL);
-INSERT INTO tax (id, chart_id, rate, taxnumber, validto) VALUES (53, (SELECT id FROM chart WHERE accno = '34990'), 0.026, 'CHE-XXX.XXX.XXX MWST', NULL);
-INSERT INTO tax (id, chart_id, rate, taxnumber, validto) VALUES (58, (SELECT id FROM chart WHERE accno = '67300'), 0.081, 'CHE-XXX.XXX.XXX MWST', NULL);
+INSERT INTO tax (chart_id, rate, taxnumber, validto) VALUES ((SELECT id FROM chart WHERE accno = '22040'), 0.081, 'CHE-XXX.XXX.XXX MWST', NULL);
+INSERT INTO tax (chart_id, rate, taxnumber, validto) VALUES ((SELECT id FROM chart WHERE accno = '22050'), 0, 'CHE-XXX.XXX.XXX MWST', NULL);
+INSERT INTO tax (chart_id, rate, taxnumber, validto) VALUES ((SELECT id FROM chart WHERE accno = '22051'), 0, 'CHE-XXX.XXX.XXX MWST', NULL);
+INSERT INTO tax (chart_id, rate, taxnumber, validto) VALUES ((SELECT id FROM chart WHERE accno = '22052'), 0, 'CHE-XXX.XXX.XXX MWST', NULL);
+INSERT INTO tax (chart_id, rate, taxnumber, validto) VALUES ((SELECT id FROM chart WHERE accno = '22053'), 0, 'CHE-XXX.XXX.XXX MWST', NULL);
+INSERT INTO tax (chart_id, rate, taxnumber, validto) VALUES ((SELECT id FROM chart WHERE accno = '22054'), 0, 'CHE-XXX.XXX.XXX MWST', NULL);
+INSERT INTO tax (chart_id, rate, taxnumber, validto) VALUES ((SELECT id FROM chart WHERE accno = '22055'), 0, 'CHE-XXX.XXX.XXX MWST', NULL);
+INSERT INTO tax (chart_id, rate, taxnumber, validto) VALUES ((SELECT id FROM chart WHERE accno = '22060'), 0, 'CHE-XXX.XXX.XXX MWST', NULL);
+INSERT INTO tax (chart_id, rate, taxnumber, validto) VALUES ((SELECT id FROM chart WHERE accno = '34970'), 0.081, 'CHE-XXX.XXX.XXX MWST', NULL);
+INSERT INTO tax (chart_id, rate, taxnumber, validto) VALUES ((SELECT id FROM chart WHERE accno = '34980'), 0.038, 'CHE-XXX.XXX.XXX MWST', NULL);
+INSERT INTO tax (chart_id, rate, taxnumber, validto) VALUES ((SELECT id FROM chart WHERE accno = '34990'), 0.026, 'CHE-XXX.XXX.XXX MWST', NULL);
+INSERT INTO tax (chart_id, rate, taxnumber, validto) VALUES ((SELECT id FROM chart WHERE accno = '67300'), 0.081, 'CHE-XXX.XXX.XXX MWST', NULL);
 
 
 
