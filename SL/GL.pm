@@ -454,6 +454,27 @@ sub transactions {
     $arwhere .= " AND ac.transdate <= '$form->{dateto}'";
     $apwhere .= " AND ac.transdate <= '$form->{dateto}'";
   }
+  if ($form->{createdfrom}) {
+      $glwhere .= " AND g.created >= '$form->{createdfrom}'";
+      $arwhere .= " AND a.created >= '$form->{createdfrom}'";
+      $apwhere .= " AND a.created >= '$form->{createdfrom}'";
+  }
+  if ($form->{createdto}) {
+      $glwhere .= " AND g.created < (DATE '$form->{createdto}' + INTERVAL '1 day')";
+      $arwhere .= " AND a.created < (DATE '$form->{createdto}' + INTERVAL '1 day')";
+      $apwhere .= " AND a.created < (DATE '$form->{createdto}' + INTERVAL '1 day')";
+  }
+
+  if ($form->{updatedfrom}) {
+      $glwhere .= " AND g.updated >= '$form->{updatedfrom}'";
+      $arwhere .= " AND a.updated >= '$form->{updatedfrom}'";
+      $apwhere .= " AND a.updated >= '$form->{updatedfrom}'";
+  }
+  if ($form->{updatedto}) {
+      $glwhere .= " AND g.updated < (DATE '$form->{updatedto}' + INTERVAL '1 day')";
+      $arwhere .= " AND a.updated < (DATE '$form->{updatedto}' + INTERVAL '1 day')";
+      $apwhere .= " AND a.updated < (DATE '$form->{updatedto}' + INTERVAL '1 day')";
+  }
   if ($form->{amountfrom}) {
     $form->{amountfrom} = $form->parse_amount($myconfig, $form->{amountfrom});
     $glwhere .= " AND abs(ac.amount) >= $form->{amountfrom}";
@@ -585,7 +606,7 @@ sub transactions {
   my $false = ($myconfig->{dbdriver} =~ /Pg/) ? FALSE : q|'0'|;
  
   my $query = qq|SELECT g.id, 'gl' AS type, $false AS invoice, g.reference,
-                 g.description, ac.transdate, ac.source,
+                 g.description, g.created, g.updated, ac.transdate, ac.source,
 		 ac.amount, c.accno, c.description as account_description,
                  l.description AS account_translation, c.category,
                  c.contra AS ca,
@@ -608,7 +629,7 @@ sub transactions {
                  WHERE $glwhere
 	UNION ALL
 	         SELECT a.id, 'ar' AS type, a.invoice, a.invnumber,
-		 a.description, ac.transdate, ac.source,
+		 a.description, a.created, a.updated, ac.transdate, ac.source,
 		 ac.amount, c.accno, c.description as account_description,
                  l.description AS account_translation, c.category,
                  c.contra AS ca,
@@ -634,7 +655,7 @@ sub transactions {
 		 WHERE $arwhere
 	UNION ALL
 	         SELECT a.id, 'ap' AS type, a.invoice, a.invnumber,
-		 a.description, ac.transdate, ac.source,
+		 a.description, a.created, a.updated, ac.transdate, ac.source,
 		 ac.amount, c.accno, c.description as account_description,
                  l.description AS account_translation, c.category,
                  c.contra AS ca,

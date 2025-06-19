@@ -852,7 +852,7 @@ sub transactions {
   my $query = qq|SELECT a.id, a.invnumber, a.ordnumber, a.transdate,
                  a.duedate, ($taxfld) * $ml AS tax,
                  a.amount, ($paid) AS paid,
-                 a.invoice, a.datepaid, a.terms, a.notes,
+                 a.invoice, a.datepaid, a.terms, a.notes, a.created, a.updated,
                  a.shipvia, a.waybill, a.shippingpoint,
                  e.name AS employee, vc.name, vc.$form->{vc}number,
                  a.$form->{vc}_id, a.till, a.curr,
@@ -944,6 +944,12 @@ sub transactions {
 
   $where .= " AND a.transdate >= '$form->{transdatefrom}'" if $form->{transdatefrom};
   $where .= " AND a.transdate <= '$form->{transdateto}'" if $form->{transdateto};
+  
+  $where .= " AND a.created >= '$form->{createdfrom}'" if $form->{createdfrom};
+  $where .= " AND a.created < (DATE '$form->{createdto}' + INTERVAL '1 day')" if $form->{createdto};
+
+  $where .= " AND a.updated >= '$form->{updatedfrom}'" if $form->{updatedfrom};
+  $where .= " AND a.updated < (DATE '$form->{updatedto}' + INTERVAL '1 day')" if $form->{updatedto};
 
   if ($form->{paidlate} || $form->{paidearly}) {
     $form->{open} = 0;
