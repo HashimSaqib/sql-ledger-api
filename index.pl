@@ -7560,20 +7560,58 @@ $api->get(
 
 $api->get(
     '/reports/all_taxes' => sub {
-        my $c      = shift;
+        my $c = shift;
         my $client = $c->param('client');
         return unless my $form = $c->check_perms("reports.alltaxes");
-
-        $form->{fromdate}   = $c->param('fromdate')   // '';
-        $form->{todate}     = $c->param('todate')     // '';
+        
+        $form->{fromdate} = $c->param('fromdate') // '';
+        $form->{todate} = $c->param('todate') // '';
         $form->{department} = $c->param('department') // '';
-
+        
+        my $dbs = $c->dbs($client);
         $form->{dbs} = $c->dbs($client);
         my $rows = RP->alltaxes($form);
+        
+        # Add address field to each row
+        foreach my $row (@$rows) {
+            my $address = '';
+            
+            if ($row->{vc_id}) {
+                my $addr_data = $dbs->select('address', 
+                    ['city', 'state', 'zipcode', 'country'],
+                    { trans_id => $row->{vc_id} }
+                )->hash;
+                
+                if ($addr_data) {
+                    # Build address as: "City, State Zipcode, Country"
+                    my $address_line = '';
+                    
+                    if ($addr_data->{city} && $addr_data->{city} ne '') {
+                        $address_line .= $addr_data->{city};
+                    }
+                    
+                    if ($addr_data->{state} && $addr_data->{state} ne '') {
+                        $address_line .= ($address_line ? ', ' : '') . $addr_data->{state};
+                    }
+                    
+                    if ($addr_data->{zipcode} && $addr_data->{zipcode} ne '') {
+                        $address_line .= ($addr_data->{state} && $addr_data->{state} ne '' ? ' ' : ($address_line ? ', ' : '')) . $addr_data->{zipcode};
+                    }
+                    
+                    if ($addr_data->{country} && $addr_data->{country} ne '') {
+                        $address_line .= ($address_line ? ', ' : '') . $addr_data->{country};
+                    }
+                    
+                    $address = $address_line;
+                }
+            }
+            
+            $row->{address} = $address;
+        }
+        
         $c->render( json => $rows );
     }
 );
-
 $api->get(
     '/reports/metrics' => sub {
         my $c           = shift;
