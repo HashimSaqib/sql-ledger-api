@@ -149,6 +149,31 @@ helper validate_date => sub {
 };
 plugin 'Minion::Admin' => { return_to => '/minion' };
 
+# Database Updates on Startup
+app->hook(
+    before_server_start => sub {
+        my ( $server, $app ) = @_;
+
+        $app->log->info("Running database updates on startup...");
+
+        # Check if db_updates directory exists
+        unless ( -d "db_updates/" ) {
+            $app->log->info(
+                "No db_updates directory found, skipping startup updates");
+            return;
+        }
+
+        eval {
+            run_startup_database_updates($app);
+            $app->log->info("Database updates completed successfully");
+        } or do {
+            my $error = $@ || 'Unknown error';
+            $app->log->error("Database updates failed: $error");
+            exit 1;
+        };
+    }
+);
+
 # Enable CORS for all routes
 app->hook(
     before_dispatch => sub {
@@ -1161,7 +1186,7 @@ $central->post(
         $dbh->disconnect;
 
      # Connect directly to the dataset database to grant schema-level privileges
-        my $dataset_dbh = DBI->connect( "dbi:Pg:dbname=$dataset;host=localhost",
+       $dataset_dbh = DBI->connect( "dbi:Pg:dbname=$dataset;host=localhost",
             $postgres_user, $postgres_password, { AutoCommit => 1 } )
           or die "Failed to connect to dataset '$dataset': $DBI::errstr";
 
@@ -1216,6 +1241,7 @@ $central->post(
         $c->render( json => { message => "Dataset created successfully" } );
     }
 );
+
 sub run_sql_file {
     my ( $dataset, $sql_file ) = @_;
 
@@ -1958,6 +1984,182 @@ $central->get(
     }
 );
 
+### DB UPDATES
+
+sub run_startup_database_updates {
+    my ($app) = @_;
+
+    # Get all datasets from central database
+    my $central_dbh = DBI->connect( "dbi:Pg:dbname=centraldb;host=localhost",
+        $postgres_user, $postgres_password, { AutoCommit => 1 } )
+      or die "Failed to connect to central database: $DBI::errstr";
+
+    my $sth =
+      $central_dbh->prepare("SELECT db_name FROM dataset ORDER BY db_name");
+    $sth->execute();
+
+    my @datasets;
+    while ( my ($db_name) = $sth->fetchrow_array() ) {
+        push @datasets, $db_name;
+    }
+    $sth->finish();
+    $central_dbh->disconnect();
+
+    return unless @datasets;
+
+    $app->log->info(
+        "Checking " . scalar(@datasets) . " datasets for updates" );
+
+    my $updated_count = 0;
+
+    for my $dataset (@datasets) {
+        eval {
+            my $result = process_startup_updates( $dataset, $app );
+            if ( $result->{updated} ) {
+                $updated_count++;
+                $app->log->info(
+"Updated $dataset to version $result->{new_version}: $result->{update_applied}"
+                );
+            }
+            else {
+                $app->log->debug(
+"Dataset '$dataset' is up to date (version $result->{current_version})"
+                );
+            }
+        } or do {
+            my $error = $@ || 'Unknown error';
+            $app->log->error("Failed to update dataset '$dataset': $error");
+            die $error;    # Stop on any error
+        };
+    }
+
+    $app->log->info(
+        "Startup updates complete: $updated_count datasets updated");
+}
+
+sub process_startup_updates {
+    my ( $dataset, $app ) = @_;
+
+    my $dbh = DBI->connect( "dbi:Pg:dbname=$dataset;host=localhost",
+        $postgres_user, $postgres_password, { AutoCommit => 1 } )
+      or die "Failed to connect to dataset '$dataset': $DBI::errstr";
+
+    # Create db_updates table if it doesn't exist
+    my $table_exists = $dbh->prepare(
+"SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'db_updates')"
+    );
+    $table_exists->execute();
+    my ($exists) = $table_exists->fetchrow_array();
+    $table_exists->finish();
+
+    my $current_version = '000';
+
+    if ( !$exists ) {
+        my $create_table_sql = q{
+            CREATE TABLE db_updates (
+                id SERIAL PRIMARY KEY,
+                version VARCHAR(3) NOT NULL,
+                updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_update TEXT NOT NULL
+            );
+        };
+        $dbh->do($create_table_sql);
+
+        my $insert_sth = $dbh->prepare(
+            "INSERT INTO db_updates (version, last_update) VALUES (?, ?)");
+        $insert_sth->execute( '000', 'Initial setup' );
+        $insert_sth->finish();
+    }
+    else {
+        my $version_sth = $dbh->prepare(
+            "SELECT version FROM db_updates ORDER BY updated DESC LIMIT 1");
+        $version_sth->execute();
+        ($current_version) = $version_sth->fetchrow_array();
+        $version_sth->finish();
+    }
+
+    # Apply all pending updates
+    my $updates_applied   = 0;
+    my $final_version     = $current_version;
+    my $final_update_name = 'No updates';
+
+    while (1) {
+        my $next_version = sprintf( "%03d", int($final_version) + 1 );
+
+        # Look for next update file
+        my $updates_dir = "db_updates/";
+
+        # Check if directory exists
+        unless ( -d $updates_dir ) {
+            $app->log->debug("No db_updates directory found, skipping updates");
+            last;
+        }
+
+        opendir( my $dh, $updates_dir )
+          or die "Cannot open db_updates directory: $!";
+        my @update_files = grep { /^${next_version}-.*\.sql$/ } readdir($dh);
+        closedir($dh);
+
+        last unless @update_files;
+        die "Multiple files for version $next_version" if @update_files > 1;
+
+        my $update_file = $update_files[0];
+        my $file_path   = "db_updates/$update_file";
+
+        # Extract update name
+        my $update_name = $update_file;
+        $update_name =~ s/^${next_version}-//;
+        $update_name =~ s/\.sql$//;
+        $update_name =~ s/-/ /g;
+
+        # Apply update
+        apply_startup_update( $dbh, $file_path, $next_version, $update_name );
+
+        $updates_applied++;
+        $final_version     = $next_version;
+        $final_update_name = $update_name;
+    }
+
+    $dbh->disconnect();
+
+    return {
+        current_version => $current_version,
+        new_version     => $final_version,
+        update_applied  => $final_update_name,
+        updated         => $updates_applied > 0
+    };
+}
+
+sub apply_startup_update {
+    my ( $dbh, $file_path, $version, $update_name ) = @_;
+
+    $dbh->begin_work();
+
+    eval {
+        # Read and execute SQL file
+        open( my $fh, '<', $file_path ) or die "Cannot open '$file_path': $!";
+        my $sql = do { local $/; <$fh> };
+        close $fh;
+
+        die "Update file '$file_path' is empty"
+          if !defined($sql) || $sql =~ /^\s*$/;
+
+        $dbh->do($sql);
+
+        # Record the update
+        my $update_sth = $dbh->prepare(
+            "INSERT INTO db_updates (version, last_update) VALUES (?, ?)");
+        $update_sth->execute( $version, $update_name );
+        $update_sth->finish();
+
+        $dbh->commit();
+
+    } or do {
+        my $error = $@ || 'Unknown error';
+        $dbh->rollback();
+        die "Failed to apply update $version ($update_name): $error";
+    };
+}
 #########################
 ####                 ####
 ####    LANGUAGE     ####
@@ -7541,7 +7743,6 @@ $api->get(
                 template => "$client/balance_sheet",
                 %$template_data
             );
-            $html_content;
             my $pdf = html_to_pdf($html_content);
             unless ($pdf) {
                 $c->res->status(500);
@@ -7560,55 +7761,65 @@ $api->get(
 
 $api->get(
     '/reports/all_taxes' => sub {
-        my $c = shift;
+        my $c      = shift;
         my $client = $c->param('client');
         return unless my $form = $c->check_perms("reports.alltaxes");
-        
-        $form->{fromdate} = $c->param('fromdate') // '';
-        $form->{todate} = $c->param('todate') // '';
+
+        $form->{fromdate}   = $c->param('fromdate')   // '';
+        $form->{todate}     = $c->param('todate')     // '';
         $form->{department} = $c->param('department') // '';
-        
+
         my $dbs = $c->dbs($client);
         $form->{dbs} = $c->dbs($client);
         my $rows = RP->alltaxes($form);
-        
+
         # Add address field to each row
         foreach my $row (@$rows) {
             my $address = '';
-            
-            if ($row->{vc_id}) {
-                my $addr_data = $dbs->select('address', 
-                    ['city', 'state', 'zipcode', 'country'],
+
+            if ( $row->{vc_id} ) {
+                my $addr_data = $dbs->select(
+                    'address',
+                    [ 'city', 'state', 'zipcode', 'country' ],
                     { trans_id => $row->{vc_id} }
                 )->hash;
-                
+
                 if ($addr_data) {
+
                     # Build address as: "City, State Zipcode, Country"
                     my $address_line = '';
-                    
-                    if ($addr_data->{city} && $addr_data->{city} ne '') {
+
+                    if ( $addr_data->{city} && $addr_data->{city} ne '' ) {
                         $address_line .= $addr_data->{city};
                     }
-                    
-                    if ($addr_data->{state} && $addr_data->{state} ne '') {
-                        $address_line .= ($address_line ? ', ' : '') . $addr_data->{state};
+
+                    if ( $addr_data->{state} && $addr_data->{state} ne '' ) {
+                        $address_line .=
+                          ( $address_line ? ', ' : '' ) . $addr_data->{state};
                     }
-                    
-                    if ($addr_data->{zipcode} && $addr_data->{zipcode} ne '') {
-                        $address_line .= ($addr_data->{state} && $addr_data->{state} ne '' ? ' ' : ($address_line ? ', ' : '')) . $addr_data->{zipcode};
+
+                    if ( $addr_data->{zipcode} && $addr_data->{zipcode} ne '' )
+                    {
+                        $address_line .= (
+                            $addr_data->{state} && $addr_data->{state} ne ''
+                            ? ' '
+                            : ( $address_line ? ', ' : '' )
+                        ) . $addr_data->{zipcode};
                     }
-                    
-                    if ($addr_data->{country} && $addr_data->{country} ne '') {
-                        $address_line .= ($address_line ? ', ' : '') . $addr_data->{country};
+
+                    if ( $addr_data->{country} && $addr_data->{country} ne '' )
+                    {
+                        $address_line .=
+                          ( $address_line ? ', ' : '' ) . $addr_data->{country};
                     }
-                    
+
                     $address = $address_line;
                 }
             }
-            
+
             $row->{address} = $address;
         }
-        
+
         $c->render( json => $rows );
     }
 );
