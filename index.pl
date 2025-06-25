@@ -236,7 +236,7 @@ get '/logo/:client/' => sub {
 ###############################
 
 my $neoledger_perms =
-'["dashboard", "cash", "cash.recon", "gl", "gl.add", "gl.transactions", "items", "items.part", "items.service", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income", "system", "system.currencies", "system.projects", "system.departments", "system.defaults", "system.chart", "system.chart.list", "system.chart.add", "system.chart.gifi", "system.taxes",  "system.templates", "system.audit", "system.yearend", "system.batch", "import", "import.gl", "import.customer", "import.ar_invoice", "import.ar.transactions", "import.vendor", "import.ap_invoice", "import.ap.transactions", "reports.balance", "customer", "customer.transaction", "customer.invoice", "customer.transaction.return", "customer.invoice.return", "customer.add", "customer.batch", "customer.reminder", "customer.consolidate", "customer.transactions", "customer.search", "customer.history", "vendor", "vendor.transaction", "vendor.invoice", "vendor.transaction.return", "vendor.invoice.return", "vendor.add", "vendor.transactions", "vendor.search", "vendor.history", "reports.alltaxes", "vendor.taxreport", "customer.taxreport", "cash.payments", "cash.receipts", "cash.report.customer", "cash.report.vendor"]';
+    '["dashboard", "cash", "cash.recon", "gl", "gl.add", "gl.transactions", "items", "items.part", "items.service", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income", "system", "system.currencies", "system.projects", "system.departments", "system.defaults", "system.chart", "system.chart.list", "system.chart.add", "system.chart.gifi", "system.taxes",  "system.templates", "system.audit", "system.yearend", "system.batch", "import", "import.gl", "import.customer", "import.ar_invoice", "import.ar.transactions", "import.vendor", "import.ap_invoice", "import.ap.transactions", "reports.balance", "customer", "customer.transaction", "customer.invoice", "customer.transaction.return", "customer.invoice.return", "customer.add", "customer.batch", "customer.reminder", "customer.consolidate", "customer.transactions", "customer.search", "customer.history", "vendor", "vendor.transaction", "vendor.invoice", "vendor.transaction.return", "vendor.invoice.return", "vendor.add", "vendor.transactions", "vendor.search", "vendor.history", "reports.alltaxes", "vendor.taxreport", "customer.taxreport", "cash.payments", "cash.receipts", "cash.report.customer", "cash.report.vendor", "system.bank"]';
 
 my $reports_only =
 '["dashboard", "gl", "gl.transactions", "items", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income",  "reports.balance", "customer", "customer.transactions", "customer.search", "customer.history", "vendor", "vendor.search", "vendor.history", "vendor.transactions", "reports.alltaxes", "vendor.taxreport", "customer.taxreport", "cash.report.customer", "cash.report.vendor"]';
@@ -1186,7 +1186,7 @@ $central->post(
         $dbh->disconnect;
 
      # Connect directly to the dataset database to grant schema-level privileges
-       $dataset_dbh = DBI->connect( "dbi:Pg:dbname=$dataset;host=localhost",
+        $dataset_dbh = DBI->connect( "dbi:Pg:dbname=$dataset;host=localhost",
             $postgres_user, $postgres_password, { AutoCommit => 1 } )
           or die "Failed to connect to dataset '$dataset': $DBI::errstr";
 
@@ -3881,6 +3881,106 @@ $api->delete(
 
         $c->render( status => 204, data => '' );
 
+    }
+);
+
+### Bank Accounts
+# Get all bank accounts
+$api->get(
+    '/system/bank/accounts' => sub {
+        my $c = shift;
+        return unless my $form = $c->check_perms("system.bank");
+        my $client = $c->param('client');
+
+        my $result = AM->bank_accounts( $c->slconfig, $form );
+
+        if ($result) {
+            $c->render( json => $form->{ALL} );
+        }
+        else {
+            $c->render(
+                status => 500,
+                json   => {
+                    status  => 'error',
+                    message => 'Failed to get bank accounts'
+                }
+            );
+        }
+    }
+);
+
+# Get specific bank account by id
+$api->get(
+    '/system/bank/accounts/:id' => sub {
+        my $c = shift;
+        return unless my $form = $c->check_perms("system.bank");
+        my $client = $c->param('client');
+        my $id     = $c->param('id');
+        my $dbs    = $c->dbs($client);
+
+        # Check for related records (similar to chart accounts)
+        my $transactions =
+          $dbs->query( "SELECT * FROM acc_trans WHERE chart_id = ?", $id );
+
+        $form->{id} = $id;
+        my $result = AM->get_bank( $c->slconfig, $form );
+
+        $form->{has_transactions} = $transactions->rows > 0 ? \1 : \0;
+
+        if ($result) {
+            $c->render( json => {%$form} );
+        }
+        else {
+            $c->render(
+                status => 500,
+                json   => {
+                    status  => 'error',
+                    message => 'Failed to get bank account'
+                }
+            );
+        }
+    }
+);
+
+# Create or update bank account
+$api->post(
+    '/system/bank/accounts/:id' => { id => undef } => sub {
+        my $c = shift;
+        return unless my $form = $c->check_perms("system.bank");
+        my $client = $c->param('client');
+        my $id     = $c->param("id");
+        my $params = $c->req->json;
+
+        # Copy parameters from request to form
+        for ( keys %$params ) {
+            $form->{$_} = $params->{$_} if defined $params->{$_};
+        }
+
+        if ( $params->{check_number} ) {
+            my ($accno) = split /--/, $form->{account};
+            $form->{"check_$accno"} = $params->{check_number};
+        }
+        if ( $params->{receipt_number} ) {
+            my ($accno) = split /--/, $form->{account};
+            $form->{"receipt_$accno"} = $params->{receipt_number};
+        }
+
+        $form->{id} = $id // undef;
+
+        my $result = AM->save_bank( $c->slconfig, $form );
+
+        if ($result) {
+            $c->render( json => {%$form} );
+        }
+        else {
+            $c->render(
+                status => 500,
+                json   => {
+                    status  => 'error',
+                    message => 'Failed to save bank account'
+                }
+            );
+        }
     }
 );
 ############################
