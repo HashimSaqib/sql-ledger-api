@@ -236,7 +236,7 @@ get '/logo/:client/' => sub {
 ###############################
 
 my $neoledger_perms =
-    '["dashboard", "cash", "cash.recon", "gl", "gl.add", "gl.transactions", "items", "items.part", "items.service", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income", "system", "system.currencies", "system.projects", "system.departments", "system.defaults", "system.chart", "system.chart.list", "system.chart.add", "system.chart.gifi", "system.taxes",  "system.templates", "system.audit", "system.yearend", "system.batch", "import", "import.gl", "import.customer", "import.ar_invoice", "import.ar.transactions", "import.vendor", "import.ap_invoice", "import.ap.transactions", "reports.balance", "customer", "customer.transaction", "customer.invoice", "customer.transaction.return", "customer.invoice.return", "customer.add", "customer.batch", "customer.reminder", "customer.consolidate", "customer.transactions", "customer.search", "customer.history", "vendor", "vendor.transaction", "vendor.invoice", "vendor.transaction.return", "vendor.invoice.return", "vendor.add", "vendor.transactions", "vendor.search", "vendor.history", "reports.alltaxes", "vendor.taxreport", "customer.taxreport", "cash.payments", "cash.receipts", "cash.report.customer", "cash.report.vendor", "system.bank"]';
+'["dashboard", "cash", "cash.recon", "gl", "gl.add", "gl.transactions", "items", "items.part", "items.service", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income", "system", "system.currencies", "system.projects", "system.departments", "system.defaults", "system.chart", "system.chart.list", "system.chart.add", "system.chart.gifi", "system.taxes",  "system.templates", "system.audit", "system.yearend", "system.batch", "import", "import.gl", "import.customer", "import.ar_invoice", "import.ar.transactions", "import.vendor", "import.ap_invoice", "import.ap.transactions", "reports.balance", "customer", "customer.transaction", "customer.invoice", "customer.transaction.return", "customer.invoice.return", "customer.add", "customer.batch", "customer.reminder", "customer.consolidate", "customer.transactions", "customer.search", "customer.history", "vendor", "vendor.transaction", "vendor.invoice", "vendor.transaction.return", "vendor.invoice.return", "vendor.add", "vendor.transactions", "vendor.search", "vendor.history", "reports.alltaxes", "vendor.taxreport", "customer.taxreport", "cash.payments", "cash.receipts", "cash.report.customer", "cash.report.vendor", "system.bank"]';
 
 my $reports_only =
 '["dashboard", "gl", "gl.transactions", "items", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income",  "reports.balance", "customer", "customer.transactions", "customer.search", "customer.history", "vendor", "vendor.search", "vendor.history", "vendor.transactions", "reports.alltaxes", "vendor.taxreport", "customer.taxreport", "cash.report.customer", "cash.report.vendor"]';
@@ -7858,7 +7858,6 @@ $api->get(
         $c->render( json => {%$form} );
     }
 );
-
 $api->get(
     '/reports/all_taxes' => sub {
         my $c      = shift;
@@ -7872,11 +7871,68 @@ $api->get(
         my $dbs = $c->dbs($client);
         $form->{dbs} = $c->dbs($client);
         my $rows = RP->alltaxes($form);
+        warn Dumper $rows;
 
-        # Add address field to each row
+        # Get all tax data and chart data in separate queries
+        my $tax_lookup   = {};
+        my $chart_lookup = {};
+
+        # Get all charts
+        my $chart_results = $dbs->select( 'chart', [ 'id', 'accno' ] );
+        while ( my $chart_row = $chart_results->hash ) {
+            $chart_lookup->{ $chart_row->{id} } = $chart_row->{accno};
+        }
+
+        # Get all taxes
+        my $tax_results = $dbs->select( 'tax', '*' );
+        while ( my $tax_row = $tax_results->hash ) {
+            my $accno = $chart_lookup->{ $tax_row->{chart_id} };
+            if ($accno) {
+                push @{ $tax_lookup->{$accno} }, $tax_row;
+            }
+        }
+
+        # Sort tax records by validto date (most recent first, nulls first)
+        foreach my $accno ( keys %$tax_lookup ) {
+            $tax_lookup->{$accno} = [
+                sort {
+                    # Handle nulls - nulls (no expiry) should come first
+                    return -1
+                      if !defined( $a->{validto} ) && defined( $b->{validto} );
+                    return 1
+                      if defined( $a->{validto} ) && !defined( $b->{validto} );
+                    return 0
+                      if !defined( $a->{validto} ) && !defined( $b->{validto} );
+
+                    # For non-nulls, sort by date descending (most recent first)
+                    return $b->{validto} cmp $a->{validto};
+                } @{ $tax_lookup->{$accno} }
+            ];
+        }
+
+        # Function to find the right tax for a given account and date
+        my $find_tax = sub {
+            my ( $account_number, $trans_date ) = @_;
+            return undef unless $tax_lookup->{$account_number};
+
+            # Find the most recent tax that's valid for this date
+            foreach my $tax ( @{ $tax_lookup->{$account_number} } ) {
+
+                # Tax is valid if validto is null or >= trans_date
+                if ( !$tax->{validto} || $tax->{validto} ge $trans_date ) {
+                    return {
+                        tax_id    => $tax->{id},
+                        rate      => $tax->{rate} * 100,
+                        taxnumber => $tax->{taxnumber}
+                    };
+                }
+            }
+            return undef;
+        };
+
+        # Add address field and tax information to each row
         foreach my $row (@$rows) {
             my $address = '';
-
             if ( $row->{vc_id} ) {
                 my $addr_data = $dbs->select(
                     'address',
@@ -7888,16 +7944,13 @@ $api->get(
 
                     # Build address as: "City, State Zipcode, Country"
                     my $address_line = '';
-
                     if ( $addr_data->{city} && $addr_data->{city} ne '' ) {
                         $address_line .= $addr_data->{city};
                     }
-
                     if ( $addr_data->{state} && $addr_data->{state} ne '' ) {
                         $address_line .=
                           ( $address_line ? ', ' : '' ) . $addr_data->{state};
                     }
-
                     if ( $addr_data->{zipcode} && $addr_data->{zipcode} ne '' )
                     {
                         $address_line .= (
@@ -7906,18 +7959,45 @@ $api->get(
                             : ( $address_line ? ', ' : '' )
                         ) . $addr_data->{zipcode};
                     }
-
                     if ( $addr_data->{country} && $addr_data->{country} ne '' )
                     {
                         $address_line .=
                           ( $address_line ? ', ' : '' ) . $addr_data->{country};
                     }
-
                     $address = $address_line;
                 }
             }
-
             $row->{address} = $address;
+
+           # Extract account number from the account field (before the first --)
+            my $account_number = '';
+            if ( $row->{account} && $row->{account} =~ /^([^-]+)--/ ) {
+                $account_number = $1;
+            }
+
+            # Get tax information using our lookup
+            if ( $account_number && $row->{transdate} ) {
+                my $tax_data =
+                  $find_tax->( $account_number, $row->{transdate} );
+
+                if ($tax_data) {
+                    $row->{tax_rate}  = $tax_data->{rate};
+                    $row->{tax_id}    = $tax_data->{tax_id};
+                    $row->{taxnumber} = $tax_data->{taxnumber};
+                }
+                else {
+                    # Set default values if no tax found
+                    $row->{tax_rate}  = undef;
+                    $row->{tax_id}    = undef;
+                    $row->{taxnumber} = undef;
+                }
+            }
+            else {
+               # Set default values if account number or transdate not available
+                $row->{tax_rate}  = undef;
+                $row->{tax_id}    = undef;
+                $row->{taxnumber} = undef;
+            }
         }
 
         $c->render( json => $rows );
