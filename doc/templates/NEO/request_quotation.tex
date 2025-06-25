@@ -1,0 +1,71 @@
+%%%%%%%%%%%%%  TITLE  %%%%%%%%%%%%%
+
+\newcommand{\DocType}{Offertanfrage}
+
+%%%%%%%%%%%%%  DEFINITIONS  %%%%%%%%%%%%%
+
+<%include definitions_packages.tex%>
+
+<%include content_language.tex%>
+
+<%include definitions_language.tex%>
+
+%%%%%%%%%%%%% GENERAL SETTINGS FOR THE TEMPLATE %%%%%%%%%%%%
+
+%%% PAGE LAYOUT %%%
+\usepackage[a4paper,top=5cm,bottom=3.1cm,left=1.8cm,right=1.8cm]{geometry} 
+\textblockorigin{0.00cm}{0.00cm} % - nach links / + nach unten
+\newcommand{\PageNumber}{on}
+\newcommand{\PrintOnPaper}{off}
+\newcommand{\Greetings}{on}
+\newcommand{\Deliveraddress}{on}
+\newcommand{\Footer}{on}
+\newcommand{\StandardBackground}{../<%templates%>/background_with_footer.pdf}
+\newcommand{\BackgroundESRorange}{../<%templates%>/background_ESR.pdf}
+\newcommand{\BackgroundESRwhite}{../<%templates%>/background_without_footer.pdf}
+
+%%% PLACE OF ADDRESS %%%
+\newcommand{\Addressblock}{right}
+%\newcommand{\Addressblock}{left}
+%\newcommand{\Addressblock}{pingenleft}
+
+%Tabellendefinitionen
+\newcolumntype{L}[1]{>{\raggedright\let\newline\\\arraybackslash\hspace{0pt}}p{#1}} % linksbündig mit Breitenangabe
+\newcolumntype{C}[1]{>{\centering\let\newline\\\arraybackslash\hspace{0pt}}p{#1}} % zentriert mit Breitenangabe
+\newcolumntype{R}[1]{>{\raggedleft\let\newline\\\arraybackslash\hspace{0pt}}p{#1} }% rechtsbündig mit Breitenangabe 
+\newcolumntype{Z}{>{\raggedright\let\newline\\\arraybackslash\hspace{0pt}}X}
+
+<%include content_footer.tex%>
+
+<%include definitions_settings.tex%>
+
+\pagestyle{myfoot}
+
+%%%%%%%%%%%%%  CONTENT  %%%%%%%%%%%%%
+
+<%include content_pagebreak_withoutamount_withfooter.tex%>
+
+<%include content_address.tex%>
+
+<%include content_header.tex%>
+
+<%include content_articles_withoutamount.tex%>
+
+\vspace{0.5cm}
+
+\textbf{Einreichung an:}
+\\
+<%company%>\\
+\BeforeSubString{ --}{<%address%>}\\
+\BehindSubString{-- }{<%address%>}\\
+
+\vspace{0.5cm}
+\parbox{\textwidth}{
+Wir bedanken uns für Ihre Einreichung bis zum \textbf{<%reqdate%>}.
+}
+
+<%include content_notes.tex%>
+
+%%%%%%%%%%%%%  END  %%%%%%%%%%%%%
+ 
+\end{document}

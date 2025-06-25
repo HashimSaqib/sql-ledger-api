@@ -1,0 +1,12 @@
+\renewcommand{\arraystretch}{1.3} %Abstand zwischen den Zeilen
+
+\begin{tabularx}{\textwidth}{@{}Xr@{}}
+
+\hline
+\textbf{Beschreibung} & \textbf{Total <%currency%>} \\
+\hline
+
+<%foreach amount%>
+ <%description%> & <%amount%>\\
+<%end amount%>
+\end{tabularx}
