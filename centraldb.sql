@@ -6,7 +6,8 @@ CREATE TABLE profile (
     password VARCHAR(255) NOT NULL,
     active BOOLEAN DEFAULT true,
     created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    last_login TIMESTAMP WITHOUT TIME ZONE
+    last_login TIMESTAMP WITHOUT TIME ZONE,
+    config JSONB
 );
 
 -- Create the dataset table

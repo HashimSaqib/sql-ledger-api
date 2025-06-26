@@ -102,6 +102,37 @@ helper dbs => sub {
     return $dbs;
 };
 
+# Subroutine to ensure profile table has config column
+sub _ensure_profile_config_column {
+    my ( $dbh, $app_log ) = @_;
+
+    eval {
+        my $column_check_sql = q{
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name = 'profile' 
+            AND column_name = 'config'
+        };
+
+        my $sth = $dbh->prepare($column_check_sql);
+        $sth->execute();
+        my $column_exists = $sth->fetchrow_array();
+        $sth->finish();
+
+        # If column doesn't exist, add it
+        if ( !$column_exists ) {
+            my $alter_sql = "ALTER TABLE profile ADD COLUMN config JSONB";
+            $dbh->do($alter_sql);
+            $app_log->info("Added 'config' column (JSONB) to 'profile' table")
+              if $app_log;
+        }
+    };
+    if ($@) {
+        die "Schema update failed: "
+          . ( $DBI::errstr // $@ // "Unknown error" );
+    }
+}
+
 helper central_dbs => sub {
     my $c      = shift;
     my $dbname = "centraldb";
@@ -110,7 +141,6 @@ helper central_dbs => sub {
         $dbh = DBI->connect( "dbi:Pg:dbname=$dbname", $postgres_user,
             $postgres_password, { RaiseError => 1, PrintError => 1 } );
     };
-
     if ( $@ || !$dbh ) {
         my $error_message = $DBI::errstr // $@ // "Unknown error";
 
@@ -125,6 +155,20 @@ helper central_dbs => sub {
         $c->app->log->error(
             "Failed to connect to the database '$dbname': $error_message");
         return undef;    # Return undef to prevent further processing
+    }
+
+    # Ensure profile table has config column
+    eval { _ensure_profile_config_column( $dbh, $c->app->log ); };
+    if ($@) {
+        my $error_message = "$@";
+        $c->render(
+            status => 500,
+            json   => {
+                message => "Database schema update failed: $error_message"
+            }
+        );
+        $c->app->log->error("Database schema update failed: $error_message");
+        return undef;
     }
 
     my $dbs = DBIx::Simple->connect($dbh);
@@ -364,7 +408,7 @@ helper get_user_profile => sub {
     my $dbs        = $c->central_dbs();
     my $sessionkey = $c->req->headers->header('Authorization');
     my $profile    = $dbs->query(
-        "SELECT s.profile_id, p.email
+        "SELECT s.profile_id, p.email, p.config
 FROM session s
 LEFT JOIN profile p ON s.profile_id = p.id
 WHERE s.sessionkey = ?",
@@ -666,7 +710,7 @@ $central->post(
         return unless $central_dbs;
 
         my $login = $central_dbs->query( '
-            SELECT id
+            SELECT id, config
             FROM profile
             WHERE email = ? AND crypt(?, password) = password
         ', $email, $password )->hash;
@@ -712,8 +756,55 @@ $central->post(
 
         return $c->render(
             json => {
-                sessionkey => $session_key
+                sessionkey => $session_key,
+                config     => $login->{config}
             }
+        );
+    }
+);
+
+$central->post(
+    '/update_config' => sub {
+        my $c             = shift;
+        my $params        = $c->req->json;
+        my $number_format = $params->{number_format};
+        my $profile       = $c->get_user_profile();
+        if ($number_format) {
+
+            # Define valid number formats as a hash for O(1) lookup
+            my %valid_formats = map { $_ => 1 }
+              ( "1,000.00", "1'000.00", "1.000,00", "1000,00", "1000.00" );
+
+            # Check if the provided format is valid
+            unless ( $valid_formats{$number_format} ) {
+                return $c->render(
+                    json => {
+                        error => "Invalid number format. Must be one of: "
+                          . join( ", ", keys %valid_formats )
+                    },
+                    status => 400
+                );
+            }
+
+            my $central_dbs = $c->central_dbs();
+            return unless $central_dbs;
+
+            $central_dbs->query(
+'UPDATE profile SET config = jsonb_set(COALESCE(config, \'{}\'::jsonb), \'{number_format}\', ?::jsonb) WHERE id = ?',
+                qq("$number_format"), $profile->{profile_id}
+            );
+
+            return $c->render(
+                json => {
+                    success => 1,
+                    message => "Number format updated successfully"
+                }
+            );
+        }
+
+        return $c->render(
+            json   => { error => "number_format parameter is required" },
+            status => 400
         );
     }
 );
@@ -2234,18 +2325,24 @@ helper check_perms => sub {
         return 0;
     }
 
+    # Parse the config JSON and get number format
+    my $config = $profile->{config} ? decode_json( $profile->{config} ) : {};
+    my $number_format = $config->{number_format}
+      // $c->slconfig->{numberformat} // '1,000.00';
+    $c->slconfig->{numberformat} = $number_format;
+
     my $dataset =
       $central_dbs->query( "SELECT id from dataset WHERE db_name = ?", $client )
       ->hash;
-
     my $admin = $central_dbs->query(
         "SELECT 1 FROM dataset_access da
-         WHERE da.profile_id = ? 
-           AND da.access_level IN ('admin','owner') 
-           AND da.dataset_id = ?
+         WHERE da.profile_id = ?
+         AND da.access_level IN ('admin','owner')
+         AND da.dataset_id = ?
          LIMIT 1",
         $profile->{profile_id}, $dataset->{id}
     )->hash;
+
     my $defaults = $c->get_defaults;
     my $form     = new Form;
     $form->{api_url}      = $base_url;
@@ -2254,24 +2351,22 @@ helper check_perms => sub {
     $form->{closedto}     = format_date( $defaults->{closedto} ) || '';
     $form->{revtrans}     = $defaults->{revtrans}                || 0;
     $form->{audittrail}   = $defaults->{audittrail}              || 0;
+
     return $form if $admin;
 
-    # Fetch all roles for the given dataset
+    # Rest of your permission checking code remains the same...
     my $role = $central_dbs->query(
         "SELECT r.acs
          FROM role r
          JOIN dataset_access da ON r.id = da.role_id
-         WHERE da.profile_id = ? 
+         WHERE da.profile_id = ?
          AND da.dataset_id = ?",
         $profile->{profile_id}, $dataset->{id}
     )->hash;
 
-    # Combine allowed permissions into a hash for faster lookup
     my %allowed;
-
     my $acs   = $role->{acs} // '[]';
     my $perms = ref($acs) eq 'ARRAY' ? $acs : decode_json($acs);
-
     $allowed{$_} = 1 for @$perms;
 
     for my $perm ( split /\s*,\s*/, $permissions_string ) {
@@ -2287,7 +2382,6 @@ helper check_perms => sub {
     );
     return 0;
 };
-
 $api->post(
     '/auth/validate' => sub {
         my $c          = shift;

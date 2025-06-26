@@ -677,6 +677,8 @@ sub ordinal_order {
 sub format_amount {
   my ($self, $myconfig, $amount, $places, $dash) = @_;
 
+  $places = 2 unless defined $places;
+  
   if ($places =~ /\d+/) {
     $amount = $self->round_amount($amount, $places);
   }
