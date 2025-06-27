@@ -971,18 +971,34 @@ sub post_invoice {
       my $taxamounttotal = 0;
 
       for (@taxaccounts) {
-        $taxamount = $linetotal * $form->{"${_}_rate"} if $form->{"${_}_rate"} != 0;
-        $taxamounttotal += $taxamount;
-        if ( $taxamount != 0 ) {
-          my $query = qq|INSERT INTO invoicetax (trans_id, invoice_id, chart_id, amount, taxamount)
-          VALUES ($form->{id}, $id, (SELECT id FROM chart WHERE accno='$_'), $linetotal, $taxamount)|;
-        $dbh->do($query) || $form->dberror($query);
+        my $rate = $form->{"${_}_rate"};
+        next unless $rate && $rate != 0;
+
+        if ($form->{taxincluded}) {
+          # Correct tax-included formula
+          $taxamount = $linetotal * ($rate / (1 + $rate));
+        } else {
+          # Standard tax-exclusive formula
+          $taxamount = $linetotal * $rate;
         }
+
+        $taxamounttotal += $taxamount;
+        $taxamount = $form->round_amount($taxamount, $form->{precision});
+
+        my $query = qq|
+          INSERT INTO invoicetax (trans_id, invoice_id, chart_id, amount, taxamount)
+          VALUES ($form->{id}, $id, (SELECT id FROM chart WHERE accno='$_'), $linetotal, $taxamount)
+        |;
+        $dbh->do($query) || $form->dberror($query);
       }
-      if ( $taxamounttotal == 0 ) {    # Item is not taxed
-        my $query = qq|INSERT INTO invoicetax (trans_id, invoice_id, chart_id, amount, taxamount)
-          VALUES ($form->{id}, $id, 0, $linetotal, 0)|;
-          $dbh->do($query) || $form->dberror($query);
+
+      # If no applicable tax, insert zero-tax row
+      if ($taxamounttotal == 0) {
+        my $query = qq|
+          INSERT INTO invoicetax (trans_id, invoice_id, chart_id, amount, taxamount)
+          VALUES ($form->{id}, $id, 0, $linetotal, 0)
+        |;
+        $dbh->do($query) || $form->dberror($query);
       }
       
       if ($form->{"inventory_accno_id_$i"}) {

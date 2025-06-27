@@ -122,6 +122,7 @@ sub new {
 
   $self->{version} = "3.2.12";
   $self->{dbversion} = "3.2.4";
+  $self->{precision} = 2;
 
   bless $self, $type;
   

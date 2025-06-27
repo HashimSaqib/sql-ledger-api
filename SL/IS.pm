@@ -1199,28 +1199,47 @@ sub post_invoice {
       # armaghan - per line tax amount for each tax
       my $taxamount      = 0;
       my $taxamounttotal = 0;
+      my $linetotal_for_tax = $linetotal;
+
+      # For tax-included scenarios, use the gross amount before tax extraction
+      if ($form->{taxincluded}) {
+          $linetotal_for_tax = $grossamount;
+      }
+
       for (@taxaccounts) {
           $ok = $dbh->selectrow_array("
               SELECT 1 FROM customertax WHERE customer_id = $form->{customer_id}
               AND chart_id IN (SELECT id FROM chart WHERE accno = '$_')"
           );
           if ($ok) {
-              $taxamount = $linetotal * $form->{"${_}_rate"} if $form->{"${_}_rate"} != 0;
+              if ($form->{taxincluded}) {
+                  # For tax-included: calculate tax from gross amount
+                  my $rate = $form->{"${_}_rate"};
+                  $taxamount = $linetotal_for_tax * ($rate / (1 + $rate)) if $rate != 0;
+              } else {
+                  # For tax-excluded: calculate tax normally
+                  $taxamount = $linetotal_for_tax * $form->{"${_}_rate"} if $form->{"${_}_rate"} != 0;
+              }
               $taxamounttotal += $taxamount;
+              $taxamount = $form->round_amount($taxamount, $form->{precision});
               if ( $taxamount != 0 ) {
                   my $query = qq|INSERT INTO invoicetax (trans_id, invoice_id, chart_id, amount, taxamount)
-                VALUES ($form->{id}, $id, (SELECT id FROM chart WHERE accno=| . $dbh->quote($_) . qq|), $linetotal,  $taxamount)|;
+                VALUES ($form->{id}, $id, (SELECT id FROM chart WHERE accno=| . $dbh->quote($_) . qq|), $linetotal_for_tax,  $taxamount)|;
 
                   $dbh->do($query) || $form->dberror($query);
               }
           }
-          if ( $taxamounttotal == 0 ) {    # Item is not taxed
+      }
+
+      # Handle non-taxed items
+      if ( $taxamounttotal == 0 ) {    # Item is not taxed
+          for (@taxaccounts) {
               $ok = $dbh->selectrow_array("
                   SELECT 1 FROM customertax WHERE customer_id = $form->{customer_id}
                   AND chart_id IN (SELECT id FROM chart WHERE accno = '$_')");
               if ($ok) {
                   my $query = qq|INSERT INTO invoicetax (trans_id, invoice_id, chart_id, amount, taxamount)
-                VALUES ($form->{id}, $id, (SELECT id FROM chart WHERE accno = '$_'), $linetotal, 0)|;
+                VALUES ($form->{id}, $id, (SELECT id FROM chart WHERE accno = '$_'), $linetotal_for_tax, 0)|;
                   $dbh->do($query) || $form->dberror($query);
               }
           }
