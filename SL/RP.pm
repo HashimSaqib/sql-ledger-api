@@ -508,6 +508,7 @@ sub add_accounts {
 sub get_accounts {
   my ($form, $dbh, $fromdate, $todate, $category, $excludeyearend) = @_;
 
+  $excludeyearend = 0;
   my %c;
   my $department_id;
   my $project_id;
