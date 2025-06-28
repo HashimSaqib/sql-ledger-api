@@ -68,6 +68,14 @@ CREATE TABLE invoicetax (
     amount double precision NOT NULL
 );
 
+CREATE TABLE db_updates (
+    id SERIAL PRIMARY KEY,
+    version VARCHAR(3) NOT NULL,
+    updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_update TEXT NOT NULL
+);
+
+
 -- Create indexes
 CREATE INDEX idx_invoicetax_trans_id ON invoicetax (trans_id);
 CREATE INDEX idx_files_module ON files(module);

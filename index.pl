@@ -2076,9 +2076,27 @@ $central->get(
 );
 
 ### DB UPDATES
-
 sub run_startup_database_updates {
     my ($app) = @_;
+
+    # First, update the central database itself
+    eval {
+        my $result = process_startup_updates( 'centraldb', $app );
+        if ( $result->{updated} ) {
+            $app->log->info(
+"Updated centraldb to version $result->{new_version}: $result->{update_applied}"
+            );
+        }
+        else {
+            $app->log->debug(
+"Central database is up to date (version $result->{current_version})"
+            );
+        }
+    } or do {
+        my $error = $@ || 'Unknown error';
+        $app->log->error("Failed to update central database: $error");
+        die $error;    # Stop on any error
+    };
 
     # Get all datasets from central database
     my $central_dbh = DBI->connect( "dbi:Pg:dbname=centraldb;host=localhost",
@@ -2177,25 +2195,35 @@ sub process_startup_updates {
     while (1) {
         my $next_version = sprintf( "%03d", int($final_version) + 1 );
 
-        # Look for next update file
-        my $updates_dir = "db_updates/";
+        # Look for next update file - check both generic and database-specific directories
+        my @search_dirs = (
+            "db_updates/",
+            "db_updates/$dataset/"
+        );
 
-        # Check if directory exists
-        unless ( -d $updates_dir ) {
-            $app->log->debug("No db_updates directory found, skipping updates");
-            last;
+        my $update_file;
+        my $file_path;
+
+        # Search in order of preference: database-specific first, then generic
+        for my $updates_dir (@search_dirs) {
+            next unless -d $updates_dir;
+
+            opendir( my $dh, $updates_dir )
+              or die "Cannot open $updates_dir directory: $!";
+            my @update_files = grep { /^${next_version}-.*\.sql$/ } readdir($dh);
+            closedir($dh);
+
+            if (@update_files) {
+                die "Multiple files for version $next_version in $updates_dir" 
+                    if @update_files > 1;
+                
+                $update_file = $update_files[0];
+                $file_path = "$updates_dir$update_file";
+                last;
+            }
         }
 
-        opendir( my $dh, $updates_dir )
-          or die "Cannot open db_updates directory: $!";
-        my @update_files = grep { /^${next_version}-.*\.sql$/ } readdir($dh);
-        closedir($dh);
-
-        last unless @update_files;
-        die "Multiple files for version $next_version" if @update_files > 1;
-
-        my $update_file = $update_files[0];
-        my $file_path   = "db_updates/$update_file";
+        last unless $update_file;
 
         # Extract update name
         my $update_name = $update_file;

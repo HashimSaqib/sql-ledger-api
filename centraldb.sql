@@ -99,3 +99,35 @@ CREATE TABLE invite (
     FOREIGN KEY (dataset_id) REFERENCES dataset(id) ON DELETE CASCADE,
     FOREIGN KEY (role_id) REFERENCES role(id) ON DELETE SET NULL
 );
+
+CREATE TABLE db_updates (
+    id SERIAL PRIMARY KEY,
+    version VARCHAR(3) NOT NULL,
+    updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_update TEXT NOT NULL
+);
+
+CREATE TABLE api_key (
+    id SERIAL PRIMARY KEY,
+    profile_id INTEGER NOT NULL REFERENCES profile(id) ON DELETE CASCADE,
+    apikey TEXT NOT NULL UNIQUE,
+    label TEXT,                      
+    scopes JSONB DEFAULT '[]',       
+    created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    expires TIMESTAMP,           
+    last_used TIMESTAMP,
+    is_active BOOLEAN DEFAULT TRUE
+);
+
+CREATE TABLE api_key_access (
+    id SERIAL PRIMARY KEY,
+    apikey_id INTEGER NOT NULL REFERENCES api_key(id) ON DELETE CASCADE,
+    dataset_id INTEGER NOT NULL REFERENCES dataset(id) ON DELETE CASCADE,
+    created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    scopes JSONB DEFAULT '[]'
+);
+CREATE UNIQUE INDEX idx_api_key_dataset ON api_key_access(apikey_id, dataset_id);
+CREATE INDEX idx_dataset_id ON api_key_access(dataset_id);
+CREATE INDEX idx_api_key_profile_id ON api_key(profile_id);
+
+INSERT INTO db_updates (version, last_update) VALUES ('001', 'API Tables');
