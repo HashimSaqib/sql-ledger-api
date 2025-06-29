@@ -224,7 +224,7 @@ app->hook(
         my $c = shift;
         $c->res->headers->header( 'Access-Control-Allow-Origin' => '*' );
         $c->res->headers->header( 'Access-Control-Allow-Methods' =>
-              'GET, POST, PUT, DELETE, OPTIONS' );
+              'GET, POST, PUT, PATCH, DELETE, OPTIONS' );
         $c->res->headers->header( 'Access-Control-Allow-Headers' =>
               'Origin, X-Requested-With, Content-Type, Accept, Authorization' );
         $c->res->headers->header( 'Access-Control-Max-Age' => '3600' );
@@ -244,7 +244,7 @@ app->hook(
             my $error = $@ || 'Unknown error';
             $c->res->headers->header( 'Access-Control-Allow-Origin' => '*' );
             $c->res->headers->header( 'Access-Control-Allow-Methods' =>
-                  'GET, POST, PUT, DELETE, OPTIONS' );
+                  'GET, POST, PUT, PATCH, DELETE, OPTIONS' );
             $c->res->headers->header( 'Access-Control-Allow-Headers' =>
 'Origin, X-Requested-With, Content-Type, Accept, Authorization'
             );
@@ -2279,6 +2279,180 @@ sub apply_startup_update {
         die "Failed to apply update $version ($update_name): $error";
     };
 }
+
+#########################
+####                 ####
+####    API KEYS     ####
+####                 ####
+#########################
+$central->get('/api_keys' => sub {
+    my $c = shift;
+    return unless $c->is_admin();
+    
+    my $client = $c->param('client');
+    return $c->render(json => {error => 'client parameter required'}) unless $client;
+    
+    my $dbs = $c->central_dbs();
+    
+    # First find the dataset by db_name (client)
+    my $dataset = $dbs->select('dataset', ['id'], {db_name => $client, active => 1})->hash;
+    return $c->render(json => {error => 'Dataset not found'}) unless $dataset;
+    
+    # Get all API keys that have access to this dataset
+    my @api_keys = $dbs->query("
+        SELECT 
+            ak.id,
+            ak.profile_id,
+            ak.apikey,
+            ak.label,
+            ak.scopes,
+            ak.created,
+            ak.expires,
+            ak.last_used,
+            ak.is_active,
+            aka.scopes as access_scopes
+        FROM api_key_access aka
+        JOIN api_key ak ON ak.id = aka.apikey_id
+        WHERE aka.dataset_id = ?
+          AND ak.is_active = true
+        ORDER BY ak.last_used DESC, ak.created DESC
+    ", $dataset->{id})->hashes;
+
+
+    return $c->render(json => {error => 'No API keys found'}, status => 404) unless @api_keys;
+    return $c->render(json => {api_keys => \@api_keys});
+});
+$central->post('/api_keys' => sub {
+    my $c = shift;
+    return unless $c->is_admin();
+    
+    my $profile_id = $c->get_user_profile->{profile_id};
+    my $client = $c->param('client');
+    my $label = $c->param('label');
+    
+    # Validation
+    return $c->render(json => {error => 'client parameter required'}, status => 400) unless $client;
+    return $c->render(json => {error => 'label required'}, status => 400) unless $label;
+    
+    my $dbs = $c->central_dbs();
+    
+    # Find dataset by db_name (client)
+    my $dataset = $dbs->select('dataset', ['id'], {db_name => $client, active => 1})->hash;
+    return $c->render(json => {error => 'Dataset not found or inactive'}, status => 404) unless $dataset;
+    
+    eval {
+        # Begin transaction - DBIx::Simple style
+        $dbs->begin;
+        
+        # Generate API key and hash it in one PostgreSQL query
+        my $result = $dbs->query(
+            q{
+                WITH new_key AS (
+                    SELECT 'ak_' || encode(gen_random_bytes(32), 'base64') AS plain_key
+                )
+                INSERT INTO api_key (profile_id, apikey, label, created, is_active)
+                SELECT ?, crypt(plain_key, gen_salt('bf', 8)), ?, CURRENT_TIMESTAMP, true
+                FROM new_key
+                RETURNING id, (SELECT plain_key FROM new_key) AS api_key
+            },
+            $profile_id, $label
+        )->hash;
+        
+        # Grant access to dataset
+        $dbs->insert('api_key_access', {
+            apikey_id => $result->{id},
+            dataset_id => $dataset->{id},
+            created => \'CURRENT_TIMESTAMP'
+        });
+        
+        # Commit transaction - call directly on $dbs
+        $dbs->commit;
+        
+        $c->render(json => {
+            success => 1,
+            message => 'API key created successfully',
+            api_key => $result->{api_key},
+            key_id => $result->{id},
+            warning => 'Save this key now - it will not be shown again'
+        });
+    };
+    
+    if ($@) {
+        # Rollback on error
+        eval { $dbs->rollback };
+        $c->render(json => {error => "Failed to create API key: $@"}, status => 500);
+    }
+});
+sub verify_api_key {
+    my ($dbs, $provided_key) = @_;
+    
+    my $result = $dbs->query(
+        'SELECT id, profile_id, is_active, expires 
+         FROM api_key 
+         WHERE apikey = crypt(?, apikey) 
+         AND is_active = true 
+         AND (expires IS NULL OR expires > CURRENT_TIMESTAMP)',
+        $provided_key
+    )->hash;
+    
+    if ($result) {
+        $dbs->query('UPDATE api_key SET last_used = CURRENT_TIMESTAMP WHERE id = ?', $result->{id});
+        return $result;
+    }
+    
+    return undef;
+}
+$central->delete('/api_keys/:id' => sub {
+    my $c = shift;
+    return unless $c->is_admin();
+    
+    my $key_id = $c->param('id');
+    return $c->render(json => {error => 'API key ID required'}, status => 400) unless $key_id;
+    
+    # Validate ID format (assuming numeric IDs)
+    return $c->render(json => {error => 'Invalid API key ID'}, status => 400) unless $key_id =~ /^\d+$/;
+    
+    my $dbs = $c->central_dbs();
+    
+    eval {
+        # Begin transaction
+        $dbs->begin;
+        
+        # First check if the API key exists and get its details
+        my $api_key = $dbs->select('api_key', ['id', 'label', 'profile_id'], {id => $key_id})->hash;
+        
+        unless ($api_key) {
+            $dbs->rollback;
+            return $c->render(json => {error => 'API key not found'}, status => 404);
+        }
+        
+        # Check if the current user owns this API key
+        my $current_profile_id = $c->get_user_profile->{profile_id};
+        unless ($api_key->{profile_id} == $current_profile_id) {
+            $dbs->rollback;
+            return $c->render(json => {error => 'Unauthorized to delete this API key'}, status => 403);
+        }
+        
+        # Delete related entries from api_key_access first (foreign key constraint)
+        my $access_deleted = $dbs->delete('api_key_access', {apikey_id => $key_id});
+        
+        # Delete the API key itself
+        my $key_deleted = $dbs->delete('api_key', {id => $key_id});
+        
+        # Commit transaction
+        $dbs->commit;
+        
+        # Return 204 No Content for successful deletion
+        $c->rendered(204);
+    };
+    
+    if ($@) {
+        # Rollback on error
+        eval { $dbs->rollback };
+        $c->render(json => {error => "Failed to delete API key: $@"}, status => 500);
+    }
+});
+
 #########################
 ####                 ####
 ####    LANGUAGE     ####
