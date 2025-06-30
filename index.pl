@@ -2195,11 +2195,8 @@ sub process_startup_updates {
     while (1) {
         my $next_version = sprintf( "%03d", int($final_version) + 1 );
 
-        # Look for next update file - check both generic and database-specific directories
-        my @search_dirs = (
-            "db_updates/",
-            "db_updates/$dataset/"
-        );
+# Look for next update file - check both generic and database-specific directories
+        my @search_dirs = ( "db_updates/", "db_updates/$dataset/" );
 
         my $update_file;
         my $file_path;
@@ -2210,15 +2207,16 @@ sub process_startup_updates {
 
             opendir( my $dh, $updates_dir )
               or die "Cannot open $updates_dir directory: $!";
-            my @update_files = grep { /^${next_version}-.*\.sql$/ } readdir($dh);
+            my @update_files =
+              grep { /^${next_version}-.*\.sql$/ } readdir($dh);
             closedir($dh);
 
             if (@update_files) {
-                die "Multiple files for version $next_version in $updates_dir" 
-                    if @update_files > 1;
-                
+                die "Multiple files for version $next_version in $updates_dir"
+                  if @update_files > 1;
+
                 $update_file = $update_files[0];
-                $file_path = "$updates_dir$update_file";
+                $file_path   = "$updates_dir$update_file";
                 last;
             }
         }
@@ -2285,21 +2283,26 @@ sub apply_startup_update {
 ####    API KEYS     ####
 ####                 ####
 #########################
-$central->get('/api_keys' => sub {
-    my $c = shift;
-    return unless $c->is_admin();
-    
-    my $client = $c->param('client');
-    return $c->render(json => {error => 'client parameter required'}) unless $client;
-    
-    my $dbs = $c->central_dbs();
-    
-    # First find the dataset by db_name (client)
-    my $dataset = $dbs->select('dataset', ['id'], {db_name => $client, active => 1})->hash;
-    return $c->render(json => {error => 'Dataset not found'}) unless $dataset;
-    
-    # Get all API keys that have access to this dataset
-    my @api_keys = $dbs->query("
+$central->get(
+    '/api_keys' => sub {
+        my $c = shift;
+        return unless $c->is_admin();
+
+        my $client = $c->param('client');
+        return $c->render( json => { error => 'client parameter required' } )
+          unless $client;
+
+        my $dbs = $c->central_dbs();
+
+        # First find the dataset by db_name (client)
+        my $dataset =
+          $dbs->select( 'dataset', ['id'], { db_name => $client, active => 1 } )
+          ->hash;
+        return $c->render( json => { error => 'Dataset not found' } )
+          unless $dataset;
+
+        # Get all API keys that have access to this dataset
+        my @api_keys = $dbs->query( "
         SELECT 
             ak.id,
             ak.profile_id,
@@ -2316,37 +2319,52 @@ $central->get('/api_keys' => sub {
         WHERE aka.dataset_id = ?
           AND ak.is_active = true
         ORDER BY ak.last_used DESC, ak.created DESC
-    ", $dataset->{id})->hashes;
+    ", $dataset->{id} )->hashes;
 
+        return $c->render(
+            json   => { error => 'No API keys found' },
+            status => 404
+        ) unless @api_keys;
+        return $c->render( json => { api_keys => \@api_keys } );
+    }
+);
+$central->post(
+    '/api_keys' => sub {
+        my $c = shift;
+        return unless $c->is_admin();
 
-    return $c->render(json => {error => 'No API keys found'}, status => 404) unless @api_keys;
-    return $c->render(json => {api_keys => \@api_keys});
-});
-$central->post('/api_keys' => sub {
-    my $c = shift;
-    return unless $c->is_admin();
-    
-    my $profile_id = $c->get_user_profile->{profile_id};
-    my $client = $c->param('client');
-    my $label = $c->param('label');
-    
-    # Validation
-    return $c->render(json => {error => 'client parameter required'}, status => 400) unless $client;
-    return $c->render(json => {error => 'label required'}, status => 400) unless $label;
-    
-    my $dbs = $c->central_dbs();
-    
-    # Find dataset by db_name (client)
-    my $dataset = $dbs->select('dataset', ['id'], {db_name => $client, active => 1})->hash;
-    return $c->render(json => {error => 'Dataset not found or inactive'}, status => 404) unless $dataset;
-    
-    eval {
-        # Begin transaction - DBIx::Simple style
-        $dbs->begin;
-        
-        # Generate API key and hash it in one PostgreSQL query
-        my $result = $dbs->query(
-            q{
+        my $profile_id = $c->get_user_profile->{profile_id};
+        my $client     = $c->param('client');
+        my $label      = $c->param('label');
+
+        # Validation
+        return $c->render(
+            json   => { error => 'client parameter required' },
+            status => 400
+        ) unless $client;
+        return $c->render(
+            json   => { error => 'label required' },
+            status => 400
+        ) unless $label;
+
+        my $dbs = $c->central_dbs();
+
+        # Find dataset by db_name (client)
+        my $dataset =
+          $dbs->select( 'dataset', ['id'], { db_name => $client, active => 1 } )
+          ->hash;
+        return $c->render(
+            json   => { error => 'Dataset not found or inactive' },
+            status => 404
+        ) unless $dataset;
+
+        eval {
+            # Begin transaction - DBIx::Simple style
+            $dbs->begin;
+
+            # Generate API key and hash it in one PostgreSQL query
+            my $result = $dbs->query(
+                q{
                 WITH new_key AS (
                     SELECT 'ak_' || encode(gen_random_bytes(32), 'base64') AS plain_key
                 )
@@ -2355,37 +2373,48 @@ $central->post('/api_keys' => sub {
                 FROM new_key
                 RETURNING id, (SELECT plain_key FROM new_key) AS api_key
             },
-            $profile_id, $label
-        )->hash;
-        
-        # Grant access to dataset
-        $dbs->insert('api_key_access', {
-            apikey_id => $result->{id},
-            dataset_id => $dataset->{id},
-            created => \'CURRENT_TIMESTAMP'
-        });
-        
-        # Commit transaction - call directly on $dbs
-        $dbs->commit;
-        
-        $c->render(json => {
-            success => 1,
-            message => 'API key created successfully',
-            api_key => $result->{api_key},
-            key_id => $result->{id},
-            warning => 'Save this key now - it will not be shown again'
-        });
-    };
-    
-    if ($@) {
-        # Rollback on error
-        eval { $dbs->rollback };
-        $c->render(json => {error => "Failed to create API key: $@"}, status => 500);
+                $profile_id, $label
+            )->hash;
+
+            # Grant access to dataset
+            $dbs->insert(
+                'api_key_access',
+                {
+                    apikey_id  => $result->{id},
+                    dataset_id => $dataset->{id},
+                    created    => \'CURRENT_TIMESTAMP'
+                }
+            );
+
+            # Commit transaction - call directly on $dbs
+            $dbs->commit;
+
+            $c->render(
+                json => {
+                    success => 1,
+                    message => 'API key created successfully',
+                    api_key => $result->{api_key},
+                    key_id  => $result->{id},
+                    warning => 'Save this key now - it will not be shown again'
+                }
+            );
+        };
+
+        if ($@) {
+
+            # Rollback on error
+            eval { $dbs->rollback };
+            $c->render(
+                json   => { error => "Failed to create API key: $@" },
+                status => 500
+            );
+        }
     }
-});
+);
+
 sub verify_api_key {
-    my ($dbs, $provided_key) = @_;
-    
+    my ( $dbs, $provided_key ) = @_;
+
     my $result = $dbs->query(
         'SELECT id, profile_id, is_active, expires 
          FROM api_key 
@@ -2394,64 +2423,89 @@ sub verify_api_key {
          AND (expires IS NULL OR expires > CURRENT_TIMESTAMP)',
         $provided_key
     )->hash;
-    
+
     if ($result) {
-        $dbs->query('UPDATE api_key SET last_used = CURRENT_TIMESTAMP WHERE id = ?', $result->{id});
+        $dbs->query(
+            'UPDATE api_key SET last_used = CURRENT_TIMESTAMP WHERE id = ?',
+            $result->{id} );
         return $result;
     }
-    
+
     return undef;
 }
-$central->delete('/api_keys/:id' => sub {
-    my $c = shift;
-    return unless $c->is_admin();
-    
-    my $key_id = $c->param('id');
-    return $c->render(json => {error => 'API key ID required'}, status => 400) unless $key_id;
-    
-    # Validate ID format (assuming numeric IDs)
-    return $c->render(json => {error => 'Invalid API key ID'}, status => 400) unless $key_id =~ /^\d+$/;
-    
-    my $dbs = $c->central_dbs();
-    
-    eval {
-        # Begin transaction
-        $dbs->begin;
-        
-        # First check if the API key exists and get its details
-        my $api_key = $dbs->select('api_key', ['id', 'label', 'profile_id'], {id => $key_id})->hash;
-        
-        unless ($api_key) {
-            $dbs->rollback;
-            return $c->render(json => {error => 'API key not found'}, status => 404);
+$central->delete(
+    '/api_keys/:id' => sub {
+        my $c = shift;
+        return unless $c->is_admin();
+
+        my $key_id = $c->param('id');
+        return $c->render(
+            json   => { error => 'API key ID required' },
+            status => 400
+        ) unless $key_id;
+
+        # Validate ID format (assuming numeric IDs)
+        return $c->render(
+            json   => { error => 'Invalid API key ID' },
+            status => 400
+        ) unless $key_id =~ /^\d+$/;
+
+        my $dbs = $c->central_dbs();
+
+        eval {
+            # Begin transaction
+            $dbs->begin;
+
+            # First check if the API key exists and get its details
+            my $api_key = $dbs->select(
+                'api_key',
+                [ 'id', 'label', 'profile_id' ],
+                { id => $key_id }
+            )->hash;
+
+            unless ($api_key) {
+                $dbs->rollback;
+                return $c->render(
+                    json   => { error => 'API key not found' },
+                    status => 404
+                );
+            }
+
+            # Check if the current user owns this API key
+            my $current_profile_id = $c->get_user_profile->{profile_id};
+            unless ( $api_key->{profile_id} == $current_profile_id ) {
+                $dbs->rollback;
+                return $c->render(
+                    json => { error => 'Unauthorized to delete this API key' },
+                    status => 403
+                );
+            }
+
+     # Delete related entries from api_key_access first (foreign key constraint)
+            my $access_deleted =
+              $dbs->delete( 'api_key_access', { apikey_id => $key_id } );
+
+            # Delete the API key itself
+            my $key_deleted = $dbs->delete( 'api_key', { id => $key_id } );
+
+            # Commit transaction
+            $dbs->commit;
+
+            # Return 204 No Content for successful deletion
+            $c->rendered(204);
+        };
+
+        if ($@) {
+
+            # Rollback on error
+            eval { $dbs->rollback };
+            $c->render(
+                json   => { error => "Failed to delete API key: $@" },
+                status => 500
+            );
         }
-        
-        # Check if the current user owns this API key
-        my $current_profile_id = $c->get_user_profile->{profile_id};
-        unless ($api_key->{profile_id} == $current_profile_id) {
-            $dbs->rollback;
-            return $c->render(json => {error => 'Unauthorized to delete this API key'}, status => 403);
-        }
-        
-        # Delete related entries from api_key_access first (foreign key constraint)
-        my $access_deleted = $dbs->delete('api_key_access', {apikey_id => $key_id});
-        
-        # Delete the API key itself
-        my $key_deleted = $dbs->delete('api_key', {id => $key_id});
-        
-        # Commit transaction
-        $dbs->commit;
-        
-        # Return 204 No Content for successful deletion
-        $c->rendered(204);
-    };
-    
-    if ($@) {
-        # Rollback on error
-        eval { $dbs->rollback };
-        $c->render(json => {error => "Failed to delete API key: $@"}, status => 500);
     }
-});
+);
 
 #########################
 ####                 ####
@@ -7490,22 +7544,18 @@ $api->get(
     '/reports/income_statement' => sub {
         my $c = shift;
         return unless $c->check_perms('reports.income');
+
         my $client = $c->param('client');
         my $params = $c->req->params->to_hash;
         warn Dumper $params;
 
-        # Create the required objects
         my $form   = Form->new;
         my $locale = Locale->new;
 
-        # Assign parameters with a defined-or operator
         $form->{department}      = $params->{department}      // "";
         $form->{projectnumber}   = $params->{projectnumber}   // "";
         $form->{fromdate}        = $params->{fromdate}        // "";
         $form->{todate}          = $params->{todate}          // "";
-        $form->{frommonth}       = $params->{frommonth}       // "";
-        $form->{fromyear}        = $params->{fromyear}        // "";
-        $form->{interval}        = $params->{interval}        // "0";
         $form->{currency}        = $params->{currency}        // "PKR";
         $form->{defaultcurrency} = $params->{defaultcurrency} // "PKR";
         $form->{decimalplaces}   = $params->{decimalplaces}   // "2";
@@ -7513,91 +7563,62 @@ $api->get(
         $form->{includeperiod}   = $params->{includeperiod}   // "year";
         $form->{previousyear}    = $params->{previousyear}    // "0";
         $form->{accounttype}     = $params->{accounttype}     // "standard";
+        $form->{l_accno}         = $params->{l_accno}         // 0;
         $form->{usetemplate}     = $params->{usetemplate}     // '';
-        my $periods = [];
 
+        my $periods = [];
         foreach my $key ( keys %$params ) {
             if ( $key =~ /^periods\[(\d+)\]\[(\w+)\]$/ ) {
                 my ( $index, $field ) = ( $1, $2 );
                 $periods->[$index]{$field} = $params->{$key};
             }
         }
-
         $form->{periods} = $periods;
 
-        # Process income statement report
         RP->income_statement_periods( $c->slconfig, $form, $locale );
 
-        warn( Dumper $form );
-
         if ( $form->{usetemplate} eq 'Y' ) {
-
-            # spacer configuration for formatting (if needed)
-            my %spacer = (
-                H => '',
-                A => '&nbsp;&nbsp;&nbsp;'
-            );
             my $account_map = {
-                A => {
-                    type  => 'asset',
-                    ml    => 1,
-                    label => $locale->text('Assets')
-                },
-                L => {
-                    type  => 'liability',
-                    ml    => 1,
-                    label => $locale->text('Liabilities')
-                },
-                Q => {
-                    type  => 'equity',
-                    ml    => 1,
-                    label => $locale->text('Equity')
-                },
-                I => {
-                    type  => 'income',
-                    ml    => 1,
-                    label => $locale->text('Income')
-                },
-                E => {
-                    type  => 'expense',
-                    ml    => -1,
-                    label => $locale->text('Expense')
-                },
+                I => { ml => 1 },
+                E => { ml => -1 },
             };
 
             my $myconfig = $c->slconfig;
             my $timeperiod =
-              $locale->date( \%myconfig, $form->{fromdate},
+              $locale->date( \%$myconfig, $form->{fromdate},
                 $form->{longformat} )
-              . qq| |
-              . $locale->text('To') . qq| |
+              . ' '
+              . $locale->text('To') . ' '
               . $locale->date( \%myconfig, $form->{todate},
                 $form->{longformat} );
-            my $userspath = "tmp";
-            $form->{templates} = "templates/$client/";
-            $form->{IN}        = "income_statement_new.html";
-            $form->{OUT}       = ">tmp/income_statement.html";
 
-            # Build the report; pass the objects and needed variables
-            build_report( $form, $locale, $account_map, $myconfig,
-                $timeperiod, 'income_statement' );
-            $form->parse_template( \%$myconfig, $userspath );
+            build_income_statement( $form, $locale, $account_map, $myconfig,
+                $timeperiod );
 
-            # Strip the '>' character from the output file path
-            ( my $file_path = $form->{OUT} ) =~ s/^>//;
+            my $logo_base64 = get_image_base64(
+                $c->app->home->rel_file("templates/$client/logo.png") );
 
-            # Open the file for reading
-            open my $fh, '<', $file_path or die "Cannot open $file_path: $!";
+            my $template_data = {
+                company           => $form->{company} || '',
+                address           => $form->{address} || '',
+                department        => $form->{department},
+                projectnumber     => $form->{projectnumber},
+                currency          => $form->{currency},
+                periods           => $form->{_periods},
+                income_data       => $form->{income_data},
+                expense_data      => $form->{expense_data},
+                income_hierarchy  => $form->{income_hierarchy},
+                expense_hierarchy => $form->{expense_hierarchy},
+                formatted_totals  => $form->{formatted_totals},
+                logo              => $logo_base64,
+            };
 
-            # Slurp the entire file into a scalar
-            {
-                local $/;    # Enable 'slurp' mode
-                $form->{html_content} = <$fh>;
-            }
+            my $html_content = $c->render_to_string(
+                template => "$client/income_statement",
+                %$template_data
+            );
 
-            close $fh;
-            unlink $file_path or warn "Could not delete $file_path: $!";
-            my $pdf = html_to_pdf( $form->{html_content} );
+            my $pdf = html_to_pdf($html_content);
             unless ($pdf) {
                 $c->res->status(500);
                 $c->render( text => "Failed to generate PDF" );
@@ -7609,7 +7630,6 @@ $api->get(
             return;
         }
 
-        warn Dumper $form;
         $c->render( json => {%$form} );
     }
 );
@@ -7628,9 +7648,11 @@ sub html_to_pdf {
         return 0;
     };
 
-    # Write HTML to temporary file (this approach worked in debug)
+    # Write HTML to temporary file with UTF-8 encoding
     my ( $fh, $filename ) =
       File::Temp::tempfile( SUFFIX => '.html', UNLINK => 1 );
+
+    binmode( $fh, ':encoding(UTF-8)' );
     print $fh $html_content;
     close $fh;
 
@@ -7696,101 +7718,115 @@ sub get_image_base64 {
 #
 # Now accepts required objects/variables as parameters.
 #----------------------------------------------------------------
-sub build_report {
-    my ( $form, $locale, $account_map, $myconfig, $timeperiod, $report_type ) =
-      @_;
+sub build_income_statement {
+    my ( $form, $locale, $account_map, $myconfig, $timeperiod ) = @_;
 
-    # Extract period labels from the defined periods
     my @periods = map { $_->{label} } @{ $form->{periods} };
 
-    if ( $report_type eq 'income_statement' ) {
+    my ( %income_data,      %expense_data );
+    my ( %total_income,     %total_expense );
+    my ( %income_hierarchy, %expense_hierarchy );
+    my $data_key = '';
 
-        # --- INCOME STATEMENT ---
-        my ( %income_data,  %expense_data );
-        my ( %total_income, %total_expense );
-        my $data_key = '';
+    foreach my $accno ( sort { $a <=> $b } keys %{ $form->{$data_key} } ) {
+        foreach my $period (@periods) {
+            next unless exists $form->{$data_key}{$accno}{$period};
+            my ($cat) = keys %{ $form->{$data_key}{$accno}{$period} };
+            next unless $cat =~ /^(I|E)$/;
 
-        foreach my $accno ( sort { $a <=> $b } keys %{ $form->{$data_key} } ) {
-            foreach my $period (@periods) {
-                next unless exists $form->{$data_key}{$accno}{$period};
-                my ($cat) = keys %{ $form->{$data_key}{$accno}{$period} };
-                next unless $cat =~ /^(I|E)$/;
+            my $data         = $form->{$data_key}{$accno}{$period}{$cat};
+            my $charttype    = $data->{charttype};
+            my $description  = $data->{description};
+            my $amount       = $data->{amount};
+            my $ml           = $account_map->{$cat}{ml} // 1;
+            my $parent_accno = $data->{parent_accno};
 
-                my $data        = $form->{$data_key}{$accno}{$period}{$cat};
-                my $charttype   = $data->{charttype};
-                my $description = $data->{description};
-                my $amount      = $data->{amount};
-                my $ml          = $account_map->{$cat}{ml} // 1;
+            my $formatted_amount = $form->format_amount(
+                $myconfig,
+                $amount * $ml,
+                $form->{decimalplaces}, ''
+            );
 
-                my $formatted_amount = $form->format_amount(
-                    $myconfig,
-                    $amount * $ml,
-                    $form->{decimalplaces}, ''
-                );
+            my $label =
+              $charttype eq "A"
+              ? ( $form->{l_accno} ? "$accno - $description" : $description )
+              : $description;
 
-                my $label = "";
-                if ( $charttype eq "A" ) {
-                    $label =
-                      $form->{l_accno} ? "$accno - $description" : $description;
-                }
-                elsif ( $charttype eq "H" ) {
-                    $label = $description;
-                }
+            my $target_data  = $cat eq 'I' ? \%income_data  : \%expense_data;
+            my $target_total = $cat eq 'I' ? \%total_income : \%total_expense;
+            my $target_hierarchy =
+              $cat eq 'I' ? \%income_hierarchy : \%expense_hierarchy;
 
-                if ( $cat eq 'I' ) {
-                    $income_data{$accno}{label} ||= $label;
-                    $income_data{$accno}{charttype} = $charttype;
-                    $income_data{$accno}{amounts}{$period} = $formatted_amount;
-                    $total_income{$period} +=
-                      ( $charttype eq "H" ? 0 : $amount * $ml );
-                }
-                elsif ( $cat eq 'E' ) {
-                    $expense_data{$accno}{label} ||= $label;
-                    $expense_data{$accno}{charttype} = $charttype;
-                    $expense_data{$accno}{amounts}{$period} = $formatted_amount;
-                    $total_expense{$period} +=
-                      ( $charttype eq "H" ? 0 : $amount * $ml );
-                }
+            $target_data->{$accno}{label} ||= $label;
+            $target_data->{$accno}{charttype}        = $charttype;
+            $target_data->{$accno}{parent_accno}     = $parent_accno;
+            $target_data->{$accno}{amounts}{$period} = $formatted_amount;
+
+            next if $charttype eq 'H';
+            $target_total->{$period} += $amount * $ml;
+        }
+    }
+
+    # Build hierarchy for income and expense
+    foreach my $cat (
+        [ 'I', \%income_data,  \%income_hierarchy ],
+        [ 'E', \%expense_data, \%expense_hierarchy ]
+      )
+    {
+        my ( $c, $data, $hierarchy ) = @$cat;
+        my @root_accounts;
+
+        foreach my $accno ( sort { $a <=> $b } keys %$data ) {
+            my $parent = $data->{$accno}{parent_accno};
+            if ( !$parent || !exists $data->{$parent} ) {
+                push @root_accounts, $accno;
             }
         }
 
-        # Format totals
-        my %formatted_totals;
-        foreach my $period (@periods) {
-            $formatted_totals{income}{$period} = $form->format_amount(
-                $myconfig,
-                $total_income{$period} || 0,
-                $form->{decimalplaces}, ''
-            );
-            $formatted_totals{expense}{$period} = $form->format_amount(
-                $myconfig,
-                $total_expense{$period} || 0,
-                $form->{decimalplaces}, ''
-            );
-            $formatted_totals{profit}{$period} = $form->format_amount(
-                $myconfig,
-                ( $total_income{$period}    || 0 ) -
-                  ( $total_expense{$period} || 0 ),
-                $form->{decimalplaces},
-                ''
-            );
+        foreach my $accno ( keys %$data ) {
+            my $parent = $data->{$accno}{parent_accno};
+            if ( $parent && exists $data->{$parent} ) {
+                $data->{$parent}{children}{$accno} = 1;
+            }
         }
 
-        # Store data for template
-        $form->{income_data}      = \%income_data;
-        $form->{expense_data}     = \%expense_data;
-        $form->{formatted_totals} = \%formatted_totals;
-        $form->{period}           = join( " / ", @periods );
-        $form->{_periods}         = \@periods;
-
+        foreach my $root (@root_accounts) {
+            $hierarchy->{$root} = 1;
+            _calculate_levels( $data, $root, 0 );
+        }
     }
 
-    else {
-        warn "Unknown report type: $report_type";
+    # Format totals
+    my %formatted_totals;
+    foreach my $period (@periods) {
+        $formatted_totals{income}{$period} = $form->format_amount(
+            $myconfig,
+            $total_income{$period} || 0,
+            $form->{decimalplaces}, ''
+        );
+        $formatted_totals{expense}{$period} = $form->format_amount(
+            $myconfig,
+            $total_expense{$period} || 0,
+            $form->{decimalplaces}, ''
+        );
+        $formatted_totals{profit}{$period} = $form->format_amount(
+            $myconfig,
+            ( $total_income{$period} || 0 ) - ( $total_expense{$period} || 0 ),
+            $form->{decimalplaces},
+            ''
+        );
     }
 
-    $form->{timeperiod} = $timeperiod;
-    return 1;    # Indicate success
+    $form->{income_data}       = \%income_data;
+    $form->{expense_data}      = \%expense_data;
+    $form->{income_hierarchy}  = \%income_hierarchy;
+    $form->{expense_hierarchy} = \%expense_hierarchy;
+    $form->{formatted_totals}  = \%formatted_totals;
+    $form->{period}            = join( " / ", @periods );
+    $form->{_periods}          = \@periods;
+    $form->{timeperiod}        = $timeperiod;
+
+    return 1;
 }
 
 sub build_balance_sheet {
