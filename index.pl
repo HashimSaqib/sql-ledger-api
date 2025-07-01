@@ -11,6 +11,9 @@ use Data::Dumper;
 use Mojo::Util qw(unquote);
 use Mojo::JSON qw(encode_json decode_json);
 use Mojo::File;
+use Mojo::Upload;
+use Mojo::Asset::File;
+use Mojo::Headers;
 use Encode qw(decode encode);
 use MIME::Base64;
 use Mojo::UserAgent;
@@ -58,7 +61,7 @@ my $front_end         = $ENV{FRONT_END_URL};
 my $postgres_user     = $ENV{POSTGRES_USER};
 my $postgres_password = $ENV{POSTGRES_PASSWORD};
 
-#$front_end = "http://localhost:9000";
+$front_end = "http://localhost:9000";
 
 my %myconfig = (
     dateformat   => 'yyyy/mm/dd',
@@ -3081,6 +3084,9 @@ $api->post(
         }
         else {
             $data = $c->req->json;
+            if ( ref $data->{files} eq 'ARRAY' ) {
+                $data->{files} = decode_base64_files( $data->{files} );
+            }
         }
 
         $data->{form} = $form;
@@ -3090,7 +3096,7 @@ $api->post(
 
         $c->render(
             status => $status_code,
-            json   => $response_json,
+            json   => { id => $response_json->{id} },
         );
     }
 );
@@ -3110,6 +3116,9 @@ $api->put(
         }
         else {
             $data = $c->req->json;
+            if ( ref $data->{files} eq 'ARRAY' ) {
+                $data->{files} = decode_base64_files( $data->{files} );
+            }
         }
 
         $data->{form} = $form;
@@ -3132,7 +3141,7 @@ $api->put(
 
         $c->render(
             status => $status_code,
-            json   => $response_json,
+            json   => { id => $response_json->{id} },
         );
     }
 );
@@ -3175,6 +3184,41 @@ sub handle_multipart_request {
     }
 
     return $data;
+}
+
+sub decode_base64_files {
+    my ($file_array) = @_;
+    return [] unless ref $file_array eq 'ARRAY';
+    use File::Temp qw(tempfile);
+    my @uploads;
+    for my $entry (@$file_array) {
+        next unless ref $entry eq 'HASH' && $entry->{data} && $entry->{name};
+
+        # Parse data URI: data:<MIME>;base64,<base64>
+        my ( $mime, $base64 ) =
+          $entry->{data} =~ m{^data:([^;]+);base64,(.+)$}i;
+        next unless $mime && $base64;
+
+        my $decoded = eval { decode_base64($base64) };
+        next unless defined $decoded;
+
+        # Write to temporary file
+        my ( $fh, $filename ) = tempfile();
+        binmode $fh;
+        print $fh $decoded;
+        seek $fh, 0, 0;
+
+        # Create upload-like object
+        my $upload = Mojo::Upload->new(
+            asset    => Mojo::Asset::File->new( path => $filename ),
+            filename => $entry->{name},
+            headers  => Mojo::Headers->new( content_type => $mime ),
+        );
+
+        push @uploads, $upload;
+    }
+
+    return \@uploads;
 }
 
 sub calc_line_tax {
@@ -6514,6 +6558,9 @@ $api->post(
         }
         else {
             $data = $c->req->json;
+            if ( ref $data->{files} eq 'ARRAY' ) {
+                $data->{files} = decode_base64_files( $data->{files} );
+            }
         }
 
         my $vc = $c->param('vc');
@@ -6679,6 +6726,7 @@ $api->get(
           : ( 'customernumber', 'customer_id' );
 
         my $files = FM->get_files( $dbs, $c, $form );
+        warn( Dumper $form->{acc_trans} );
 
         # Build JSON response
         my $json_data = {
@@ -6698,7 +6746,7 @@ $api->get(
             invDate       => $form->{transdate},
             dueDate       => $form->{duedate},
             poNumber      => $form->{ponumber},
-            recordAccount => $form->{acc_trans}{$arap_key}[0],
+            recordAccount => $form->{acc_trans}{$arap_key}[0]{accno},
             type          => $form->{type},
             currency      => $form->{currency},
             exchangerate  => $form->{"$form->{currency}"},
@@ -6721,8 +6769,6 @@ $api->get(
         {
             $json_data->{shipto}->{$item} = $form->{"shipto$item"};
         }
-
-        warn Dumper($json_data);
 
         $c->render( json => $json_data );
     }
@@ -6867,7 +6913,7 @@ sub process_invoice {
     }
 
     if ( $data->{files} && ref $data->{files} eq 'ARRAY' ) {
-        $form->{files}  = $data->{files};
+        $form->{files}  = decode_base64_files( $data->{files} );
         $form->{client} = $c->param('client');
         FM->upload_files( $dbs, $c, $form, $vc );
     }
