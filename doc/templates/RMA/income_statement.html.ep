@@ -64,7 +64,7 @@
     </tr>
   </thead>
   <tbody>
-    <%
+    <% 
       sub render_accounts {
         my ($data, $hierarchy, $periods, $level) = @_;
         $level ||= 0;
@@ -80,7 +80,7 @@
           $output .= '<tr>';
           $output .= qq{<td class="account-label $row_class $final_indent">$account->{label}</td>};
           for my $p (@$periods) {
-            my $amt = $account->{amounts}{$p} || '';
+            my $amt = $is_header ? '' : ($account->{amounts}{$p} || '');
             $output .= qq{<td class="account-amount">$amt</td>};
           }
           $output .= '</tr>';
