@@ -6367,7 +6367,7 @@ $api->get(
                     memo         => $payment->{memo},
                     exchangerate => $payment->{exchangerate},
                     amount       => $amount_multiplier * $payment->{amount},
-                    account      => "$payment->{accno}--$payment->{description}"
+                    account      => "$payment->{accno}"
                   };
             }
         }
@@ -6388,28 +6388,29 @@ $api->get(
 
         # Create the transformed data structure
         my $json_data = {
-            $vc_field     => $form->{$vc_field},
-            shippingPoint => $form->{shippingpoint},
-            shipVia       => $form->{shipvia},
-            wayBill       => $form->{waybill},
-            description   => $form->{description},
-            notes         => $form->{notes},
-            intnotes      => $form->{intnotes},
-            invNumber     => $form->{invnumber},
-            ordNumber     => $form->{ordnumber},
-            invDate       => $form->{transdate},
-            dueDate       => $form->{duedate},
-            poNumber      => $form->{ponumber},
-            currency      => $form->{currency},
-            exchangerate  => $form->{exchangerate},
-            department_id => $form->{department_id},
-            id            => $form->{id},
-            recordAccount => $form->{acc_trans}{$transaction_type}[0],
-            $vc_id_field  => $form->{$vc_id_field},
-            lineitems     => \@line_items,
-            payments      => \@payments,
-            type          => $doc_type,
-            files         => $files,
+            $vc_field        => $form->{$vc_field},
+            shippingPoint    => $form->{shippingpoint},
+            shipVia          => $form->{shipvia},
+            wayBill          => $form->{waybill},
+            description      => $form->{description},
+            notes            => $form->{notes},
+            intnotes         => $form->{intnotes},
+            invNumber        => $form->{invnumber},
+            ordNumber        => $form->{ordnumber},
+            invDate          => $form->{transdate},
+            dueDate          => $form->{duedate},
+            poNumber         => $form->{ponumber},
+            currency         => $form->{currency},
+            exchangerate     => $form->{exchangerate},
+            department_id    => $form->{department_id},
+            id               => $form->{id},
+            recordAccount    => $form->{acc_trans}{$transaction_type}[0],
+            paymentmethod_id => $form->{paymentmethod_id},
+            $vc_id_field     => $form->{$vc_id_field},
+            lineitems        => \@line_items,
+            payments         => \@payments,
+            type             => $doc_type,
+            files            => $files,
         };
 
         # Add tax information if present
@@ -6495,7 +6496,6 @@ sub process_transaction {
     # Payments
     $form->{paidaccounts} = 0;
     for my $payment ( @{ $data->{payments} } ) {
-        next unless $payment->{amount} > 0;
         $form->{paidaccounts}++;
         my $i = $form->{paidaccounts};
 
@@ -6505,14 +6505,15 @@ sub process_transaction {
         $form->{"paid_$i"}         = $payment->{amount};
         $form->{"exchangerate_$i"} = $payment->{exchangerate} || 1;
 
-        # Payment account with -- suffix
         $form->{ $form->{vc} eq 'vendor' ? "AP_paid_$i" : "AR_paid_$i" } =
           $payment->{account} . "--";
 
-        # Payment method if exists
-        if ( $payment->{method} ) {
-            $form->{"paymentmethod_$i"} =
-              $payment->{method}->{name} . "--" . $payment->{method}->{id};
+        if ( my $accno = $payment->{account} ) {
+            $dbs->query( "SELECT id FROM chart WHERE accno = ?", $accno )
+              ->into( my $id );
+            $form->{"paymentmethod_$i"} = "0--$id" if defined $id;
+            warn($accno);
+            warn($id);
         }
     }
 
@@ -6532,8 +6533,6 @@ sub process_transaction {
         $form->{taxaccounts} = join( ' ', @taxaccounts );
         $form->{taxincluded} = $data->{taxincluded} ? 1 : 0;
     }
-
-    warn( Dumper($form) );
 
     AA->post_transaction( $c->slconfig, $form );
 
@@ -6735,26 +6734,27 @@ $api->get(
             $vc_field    => $form->{$vc_field},
             $vc_id_field => $form->{$vc_id_field},
 
-            shippingPoint => $form->{shippingpoint},
-            shipVia       => $form->{shipvia},
-            wayBill       => $form->{waybill},
-            description   => $form->{invdescription},
-            notes         => $form->{notes},
-            intnotes      => $form->{intnotes},
-            invNumber     => $form->{invnumber},
-            ordNumber     => $form->{ordnumber},
-            invDate       => $form->{transdate},
-            dueDate       => $form->{duedate},
-            poNumber      => $form->{ponumber},
-            recordAccount => $form->{acc_trans}{$arap_key}[0]{accno},
-            type          => $form->{type},
-            currency      => $form->{currency},
-            exchangerate  => $form->{"$form->{currency}"},
-            id            => $form->{id},
-            department_id => $form->{department_id},
-            files         => $files,
-            lines         => \@lines,
-            payments      => \@payments,
+            shippingPoint    => $form->{shippingpoint},
+            shipVia          => $form->{shipvia},
+            wayBill          => $form->{waybill},
+            description      => $form->{invdescription},
+            notes            => $form->{notes},
+            intnotes         => $form->{intnotes},
+            invNumber        => $form->{invnumber},
+            ordNumber        => $form->{ordnumber},
+            invDate          => $form->{transdate},
+            dueDate          => $form->{duedate},
+            poNumber         => $form->{ponumber},
+            recordAccount    => $form->{acc_trans}{$arap_key}[0]{accno},
+            type             => $form->{type},
+            currency         => $form->{currency},
+            exchangerate     => $form->{"$form->{currency}"},
+            id               => $form->{id},
+            department_id    => $form->{department_id},
+            files            => $files,
+            lines            => \@lines,
+            payments         => \@payments,
+            paymentmethod_id => $form->{"paymentmethod_id"},
         };
 
         if (@taxes) {
@@ -6863,24 +6863,27 @@ sub process_invoice {
     }
 
     # Build payments
-    $form->{paidaccounts} = 0;    # Start with zero processed payments
-    for my $payment ( @{ $data->{payments} || [] } ) {
-
-        # Only process positive amounts
-        next unless $payment->{amount} && $payment->{amount} > 0;
+    $form->{paidaccounts} = 0;
+    for my $payment ( @{ $data->{payments} } ) {
         $form->{paidaccounts}++;
         my $i = $form->{paidaccounts};
 
-        # Payment date, memo, etc.
-        $form->{"datepaid_$i"}     = $payment->{date}   || '';
+        $form->{"datepaid_$i"}     = $payment->{date};
         $form->{"source_$i"}       = $payment->{source} || '';
         $form->{"memo_$i"}         = $payment->{memo}   || '';
         $form->{"paid_$i"}         = $payment->{amount};
         $form->{"exchangerate_$i"} = $payment->{exchangerate} || 1;
 
-        # For AR invoices, the paid key is AR_paid_$i; for AP, it's AP_paid_$i
-        my $paid_key = $invoice_type . "_paid_$i";
-        $form->{$paid_key} = $payment->{account};
+        $form->{ $form->{vc} eq 'vendor' ? "AP_paid_$i" : "AR_paid_$i" } =
+          $payment->{account} . "--";
+
+        if ( my $accno = $payment->{account} ) {
+            $dbs->query( "SELECT id FROM chart WHERE accno = ?", $accno )
+              ->into( my $id );
+            $form->{"paymentmethod_$i"} = "0--$id" if defined $id;
+            warn($accno);
+            warn($id);
+        }
     }
 
     # Taxes
