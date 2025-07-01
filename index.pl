@@ -2854,7 +2854,7 @@ $api->get(
         eval {
             # Fetch files for all transactions in a single operation
             FM->get_files_for_transactions(
-                $dbs, $c,
+                $dbs,
                 {
                     api_url => $base_url,
                     client  => $client
@@ -5883,7 +5883,7 @@ $api->get(
         eval {
             # Fetch files for all transactions in a single operation
             FM->get_files_for_transactions(
-                $dbs, $c,
+                $dbs,
                 {
                     api_url => $base_url,
                     client  => $client
@@ -7576,7 +7576,7 @@ $api->get(
         eval {
             # Fetch files for all transactions in a single operation
             FM->get_files_for_transactions(
-                $dbs, $c,
+                $dbs,
                 {
                     api_url => $base_url,
                     client  => $client
@@ -8383,6 +8383,14 @@ $api->get(
                 $row->{taxnumber} = undef;
             }
         }
+        $rows = FM->get_files_for_transactions(
+            $dbs,
+            {
+                api_url => $base_url,
+                client  => $client
+            },
+            $rows
+        );
 
         $c->render( json => $rows );
     }

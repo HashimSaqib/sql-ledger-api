@@ -538,7 +538,7 @@ sub get_files {
 }
 
 sub get_files_for_transactions {
-    my ( $self, $dbs, $c, $data, $transactions ) = @_;
+    my ( $self, $dbs, $data, $transactions ) = @_;
 
     return [] unless @$transactions;
 
