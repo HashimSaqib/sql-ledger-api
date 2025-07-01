@@ -61,7 +61,7 @@ my $front_end         = $ENV{FRONT_END_URL};
 my $postgres_user     = $ENV{POSTGRES_USER};
 my $postgres_password = $ENV{POSTGRES_PASSWORD};
 
-$front_end = "http://localhost:9000";
+#$front_end = "http://localhost:9000";
 
 my %myconfig = (
     dateformat   => 'yyyy/mm/dd',
