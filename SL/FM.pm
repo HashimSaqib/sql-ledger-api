@@ -446,6 +446,10 @@ sub process_local {
         $local_dir = "files/$client/$module/$year/$month";
     }
 
+    my $row = $dbs->query("SELECT gen_random_uuid()::text AS uuid")->hash;
+
+    my $link = $row->{uuid};
+
     eval { make_path($local_dir); };
     if ($@) {
         $c->app->log->error(
@@ -477,7 +481,7 @@ sub process_local {
                       extract_file_extension( $file_info->{original_filename} ),
                     location     => $storage_location,
                     path         => $target_path,
-                    link         => undef,
+                    link         => $link,
                     reference_id => $data->{id},
                 }
             );
@@ -525,7 +529,7 @@ sub get_files {
         my $link;
         if ( $file->{location} eq 'local' ) {
             $link =
-"$data->{api_url}client/$data->{client}/files/$file->{module}/$file->{id}";
+"https://$data->{api_url}/client/$data->{client}/files/$file->{link}";
         }
         else {
             $link = $file->{link};
@@ -558,7 +562,7 @@ sub get_files_for_transactions {
         my $link;
         if ( $file->{location} eq 'local' ) {
             $link =
-"$data->{api_url}client/$data->{client}/files/$file->{module}/$file->{id}";
+"https://$data->{api_url}/client/$data->{client}/files/$file->{link}";
         }
         else {
             $link = $file->{link};
@@ -1356,11 +1360,16 @@ sub _get_date_parts {
 }
 
 sub _generate_unique_filename {
-    my ($original_filename) = @_;
-    my $unique_filename = time() . '_' . $original_filename;
-    $unique_filename = lc($unique_filename);
-    $unique_filename =~ s/[^a-z0-9_.-]/_/g;
-    return $unique_filename;
+    my ($orig) = @_;
+
+    # 6 hex digits of randomness
+    my $salt = sprintf "%04x", int rand(0xFFFFFF);
+
+    # normalize and sanitize the original
+    $orig = lc $orig;
+    $orig =~ s/[^a-z0-9_.-]+/_/g;
+
+    return "$salt\_$orig";
 }
 
 sub extract_file_extension {

@@ -10378,6 +10378,27 @@ $api->post(
     }
 );
 
+$api->get(
+    "/files/:id" => sub {
+        my $c        = shift;
+        my $module   = $c->param('module');
+        my $client   = $c->param('client');
+        my $dbs      = $c->dbs($client);
+        my $filename = $c->param('id');
+        my $file =
+          $dbs->query( "SELECT path FROM files WHERE link = ?", $filename )
+          ->hash;
+        my $path = $c->app->home->rel_file( $file->{path} );
+        if ( -e $path ) {
+            $c->reply->file($path);
+        }
+        else {
+            $c->reply->not_found;
+        }
+
+    }
+);
+
 $api->delete(
     "/files/:module/:id" => sub {
         my $c        = shift;
