@@ -5871,10 +5871,13 @@ $api->get(
         };
 
         foreach my $transaction ( @{ $form->{transactions} } ) {
-            $totals->{amount}      += $transaction->{amount}      || 0;
-            $totals->{netamount}   += $transaction->{netamount}   || 0;
-            $totals->{paid}        += $transaction->{paid}        || 0;
+            $totals->{amount}    += $transaction->{amount}    || 0;
+            $totals->{netamount} += $transaction->{netamount} || 0;
+            $totals->{paid}      += $transaction->{paid}      || 0;
+            $transaction->{paymentdiff} =
+              $transaction->{amount} - $transaction->{paid};
             $totals->{paymentdiff} += $transaction->{paymentdiff} || 0;
+            $totals->{tax}         += $transaction->{tax}         || 0;
         }
         my $dbs = $c->dbs($client);
         eval {
