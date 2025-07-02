@@ -2568,65 +2568,113 @@ $api->get(
 #### ACCESS CONTROL  ####
 ####                 ####
 #########################
+
 helper check_perms => sub {
     my ( $c, $permissions_string ) = @_;
     my $client = $c->param('client');
-    $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
-    my $central_dbs = $c->central_dbs();
 
-    # Validate the session and get the profile (user) record
-    my $profile = $c->get_user_profile();
-    unless ($profile) {
+    my $central = $c->central_dbs;
+    my $dataset =
+      $central->query( "SELECT * FROM dataset WHERE db_name = ?", $client )
+      ->hash;
+    unless ( $dataset && $dataset->{id} ) {
         $c->render(
-            status => 401,
-            json   => { message => "Invalid session key" }
+            status => 404,
+            json   => { message => "Unknown dataset: $client" }
         );
         return 0;
     }
 
-    # Parse the config JSON and get number format
+    # point subsequent queries at the tenant database
+    $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+
+    my $profile;
+
+    # --- API-Key flow ---
+    if ( my $api_key = $c->req->headers->header('X-API-Key') ) {
+
+        # verify the key itself
+        my $ak = verify_api_key( $central, $api_key );
+        unless ( $ak && $ak->{id} ) {
+            $c->render(
+                status => 401,
+                json   => { message => "Invalid API key" }
+            );
+            return 0;
+        }
+
+        # check this key has access to the current dataset
+
+        my $has_access = $central->query(
+"SELECT 1 FROM api_key_access WHERE apikey_id = ? AND dataset_id = ?",
+            $ak->{id}, $dataset->{id}
+        )->array;
+        unless ($has_access) {
+            $c->render(
+                status => 403,
+                json   =>
+                  { message => "API key has no access to dataset $client" }
+            );
+            return 0;
+        }
+
+        # fetch the user profile via api_key.profile_id
+        if ( my $pid = $ak->{profile_id} ) {
+            $profile =
+              $central->query( "SELECT * FROM profile WHERE id = ?", $pid )
+              ->hash;
+            $profile->{profile_id} = $pid;
+        }
+    }
+
+    # --- Session-flow (fallback) ---
+    unless ($profile) {
+        $profile = $c->get_user_profile();
+
+        unless ($profile) {
+            $c->render(
+                status => 401,
+                json   => { message => "Invalid session key" }
+            );
+            return 0;
+        }
+    }
+
+    # --- common setup ---
+    # number format preference
     my $config = $profile->{config} ? decode_json( $profile->{config} ) : {};
     my $number_format = $config->{number_format}
       // $c->slconfig->{numberformat} // '1,000.00';
     $c->slconfig->{numberformat} = $number_format;
 
-    my $dataset =
-      $central_dbs->query( "SELECT id from dataset WHERE db_name = ?", $client )
-      ->hash;
-    my $admin = $central_dbs->query(
-        "SELECT 1 FROM dataset_access da
-         WHERE da.profile_id = ?
-         AND da.access_level IN ('admin','owner')
-         AND da.dataset_id = ?
-         LIMIT 1",
-        $profile->{profile_id}, $dataset->{id}
-    )->hash;
-
+    # build the form object
     my $defaults = $c->get_defaults;
     my $form     = new Form;
     $form->{api_url}      = $base_url;
     $form->{frontend_url} = $front_end;
-    $form->{client}       = $c->param('client');
+    $form->{client}       = $client;
     $form->{closedto}     = format_date( $defaults->{closedto} ) || '';
     $form->{revtrans}     = $defaults->{revtrans}                || 0;
     $form->{audittrail}   = $defaults->{audittrail}              || 0;
 
+    # admin/owner bypass
+    my $admin = $central->query(
+        "SELECT 1 FROM dataset_access WHERE profile_id = ? 
+         AND access_level IN ('admin','owner') AND dataset_id = ? LIMIT 1",
+        $profile->{profile_id}, $dataset->{id}
+    )->array;
     return $form if $admin;
 
-    # Rest of your permission checking code remains the same...
-    my $role = $central_dbs->query(
+    # enforce individual permissions
+    my $acs = $central->query(
         "SELECT r.acs
          FROM role r
          JOIN dataset_access da ON r.id = da.role_id
-         WHERE da.profile_id = ?
-         AND da.dataset_id = ?",
+         WHERE da.profile_id = ? AND da.dataset_id = ?",
         $profile->{profile_id}, $dataset->{id}
-    )->hash;
-
-    my %allowed;
-    my $acs   = $role->{acs} // '[]';
-    my $perms = ref($acs) eq 'ARRAY' ? $acs : decode_json($acs);
-    $allowed{$_} = 1 for @$perms;
+    )->hash->{acs} // '[]';
+    my $perms   = ref($acs) eq 'ARRAY' ? $acs : decode_json($acs);
+    my %allowed = map { $_ => 1 } @$perms;
 
     for my $perm ( split /\s*,\s*/, $permissions_string ) {
         return $form if $allowed{$perm};
@@ -2641,6 +2689,62 @@ helper check_perms => sub {
     );
     return 0;
 };
+
+$api->post(
+    '/auth/validate_api' => sub {
+        my $c       = shift;
+        my $client  = $c->param('client');
+        my $api_key = $c->req->headers->header('X-API-Key');
+
+        # 1. Missing key?
+        unless ($api_key) {
+            return $c->render(
+                status => 400,
+                json   => { message => "Missing X-API-Key header" }
+            );
+        }
+
+        # 2. Delegate to verify_api_key
+        my $central = $c->central_dbs;
+        my $ak      = verify_api_key( $central, $api_key );
+
+        unless ( $ak && $ak->{id} ) {
+            return $c->render(
+                status => 401,
+                json   => { message => "Invalid, inactive, or expired API key" }
+            );
+        }
+
+        # 3. Lookup dataset
+        my $dataset =
+          $central->query( "SELECT id FROM dataset WHERE db_name = ?", $client )
+          ->hash;
+        unless ( $dataset && $dataset->{id} ) {
+            return $c->render(
+                status => 404,
+                json   => { message => "Unknown dataset: $client" }
+            );
+        }
+
+        # 4. Check key→dataset access
+        my $has_access = $central->query(
+"SELECT 1 FROM api_key_access WHERE apikey_id = ? AND dataset_id = ?",
+            $ak->{id}, $dataset->{id}
+        )->array;
+
+        unless ($has_access) {
+            return $c->render(
+                status => 403,
+                json   =>
+                  { message => "API key has no access to dataset $client" }
+            );
+        }
+
+        # 5. Success
+        return $c->render( json => { success => 1 } );
+    }
+);
+
 $api->post(
     '/auth/validate' => sub {
         my $c          = shift;
@@ -2892,7 +2996,7 @@ $api->get(
         if ($dateto)   { $c->validate_date($dateto)   or return; }
 
         my $query =
-'SELECT id, reference, transdate, description, notes, curr, department_id AS department, approved, ts, exchangerate AS exchangeRate, employee_id FROM gl';
+'SELECT id, reference, transdate, description, notes, curr, department_id, approved, exchangerate, created, updated FROM gl';
         my @query_params;
 
         my @conditions;
@@ -2946,7 +3050,7 @@ $api->get(
                 && !$transaction_ids_for_accno{ $transaction->{id} } );
 
             my $entries_results = $dbs->query(
-'SELECT chart.accno, chart.description, acc_trans.amount, acc_trans.source, acc_trans.memo, acc_trans.tax_chart_id, acc_trans.taxamount, acc_trans.fx_transaction, acc_trans.cleared FROM acc_trans JOIN chart ON acc_trans.chart_id = chart.id WHERE acc_trans.trans_id = ?',
+'SELECT chart.accno, chart.description, acc_trans.amount, acc_trans.source, acc_trans.memo, acc_trans.tax_chart_id, acc_trans.linetaxamount, acc_trans.fx_transaction, acc_trans.cleared FROM acc_trans JOIN chart ON acc_trans.chart_id = chart.id WHERE acc_trans.trans_id = ?',
                 $transaction->{id}
             );
             my @lines;
@@ -2975,6 +3079,14 @@ $api->get(
             $transaction->{lines} = \@lines;
             push @transactions, $transaction;
         }
+        FM->get_files_for_transactions(
+            $dbs,
+            {
+                api_url => $base_url,
+                client  => $client
+            },
+            \@transactions
+        );
 
         $c->render( json => \@transactions );
     }
