@@ -2145,19 +2145,40 @@ sub alltaxes {
 
         UNION ALL
 
-         SELECT 3 AS ordr, 'GL' module, c.accno || '--' || c.description account,
+        -- 9. GL-Debit (negative amounts converted to positive)
+        SELECT 3 AS ordr, 'GL-Debit' module, c.accno || '--' || c.description account,
         aa.id, aa.reference, aa.transdate,
         aa.description, '', '', 'gl.pl' script, 0 as vc_id,
         '' f,
-        SUM(ac.amount), SUM(ac.linetaxamount) AS tax, true as taxincluded
+        -SUM(ac.amount) AS amount,  -- Flip sign: negative to positive
+        SUM(ac.linetaxamount) AS tax, 
+        true as taxincluded
         FROM acc_trans ac
         JOIN chart c ON (c.id = ac.tax_chart_id)
         JOIN gl aa ON (aa.id = ac.trans_id)
         $aawhere
+        AND ac.amount < 0  -- Only negative amounts (Debits)
+        GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12
+
+        UNION ALL
+
+        -- 10. GL-Credit (positive amounts remain positive)
+        SELECT 4 AS ordr, 'GL-Credit' module, c.accno || '--' || c.description account,
+        aa.id, aa.reference, aa.transdate,
+        aa.description, '', '', 'gl.pl' script, 0 as vc_id,
+        '' f,
+        SUM(ac.amount) AS amount, 
+        SUM(ac.linetaxamount) AS tax, 
+        true as taxincluded
+        FROM acc_trans ac
+        JOIN chart c ON (c.id = ac.tax_chart_id)
+        JOIN gl aa ON (aa.id = ac.trans_id)
+        $aawhere
+        AND ac.amount > 0  -- Only positive amounts (Credits)
         GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12
 
         ORDER BY 1, 2, 3, 6
-    ~;
+      ~;
 
     my $allrows = $form->{dbs}->query($query)->hashes;
 
