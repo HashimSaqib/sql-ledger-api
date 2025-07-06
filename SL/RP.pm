@@ -148,7 +148,7 @@ sub balance_sheet_periods {
       };
       
       # Retrieve and add the account data for the current category and period.
-      my %c = &get_accounts($form, $dbh, $fromdate, $todate, $category, 1);
+      my %c = &get_accounts($form, $dbh, undef, $todate, $category);
       &add_accounts($form, \%c, $label, $category);
     }
   }
@@ -508,7 +508,6 @@ sub add_accounts {
 sub get_accounts {
   my ($form, $dbh, $fromdate, $todate, $category, $excludeyearend) = @_;
 
-  $excludeyearend = 0;
   my %c;
   my $department_id;
   my $project_id;
