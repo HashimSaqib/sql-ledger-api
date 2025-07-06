@@ -384,9 +384,10 @@ sub transactions {
   if ($form->{l_lineitem}) {
     $gdescription = "ac.memo";
     $lineitem = "i.description";
-    $invoicejoin = qq|
-                 LEFT JOIN invoice i ON (i.id = ac.id)|;
   }
+
+  $invoicejoin = qq|
+             LEFT JOIN invoice i ON (i.id = ac.id)|;
 
   if ($form->{source}) {
     $var = $form->like(lc $form->{source});
@@ -616,12 +617,12 @@ sub transactions {
 		 $gdescription AS lineitem, '' AS name, '' AS vcnumber,
 		 '' AS address1, '' AS address2, '' AS city,
 		 '' AS zipcode, '' AS country,
-  tc.accno linetax_accno, tc.description linetax_description, ac.linetaxamount,
+                 tc.accno AS linetax_accno, tc.description AS linetax_description, ac.linetaxamount,
                  ac.project_id, COALESCE(tp.description, p.description) AS project_description
                  FROM gl g
 		 JOIN acc_trans ac ON (g.id = ac.trans_id)
 		 JOIN chart c ON (ac.chart_id = c.id)
-    LEFT JOIN chart tc ON (ac.tax_chart_id = tc.id)
+                 LEFT JOIN chart tc ON (ac.tax_chart_id = tc.id)
 		 LEFT JOIN department d ON (d.id = g.department_id)
 		 LEFT JOIN translation l ON (l.trans_id = c.id AND l.language_code = '$myconfig->{countrycode}')
                  LEFT JOIN project p ON (ac.project_id = p.id)
@@ -639,7 +640,29 @@ sub transactions {
 		 $lineitem AS lineitem, ct.name, ct.customernumber,
 		 ad.address1, ad.address2, ad.city,
 		 ad.zipcode, ad.country,
-  tc.accno linetax_accno, tc.description linetax_description, ac.linetaxamount,
+                 CASE 
+                     WHEN a.invoice AND ac.id IS NOT NULL AND i.id IS NOT NULL THEN 
+                         (SELECT STRING_AGG(DISTINCT tc2.accno, ', ' ORDER BY tc2.accno) 
+                          FROM invoicetax it 
+                          JOIN chart tc2 ON it.chart_id = tc2.id 
+                          WHERE it.trans_id = a.id AND it.invoice_id = i.id)
+                     ELSE tc.accno 
+                 END AS linetax_accno,
+                 CASE 
+                     WHEN a.invoice AND ac.id IS NOT NULL AND i.id IS NOT NULL THEN 
+                         (SELECT STRING_AGG(DISTINCT tc2.description, ', ' ORDER BY tc2.description) 
+                          FROM invoicetax it 
+                          JOIN chart tc2 ON it.chart_id = tc2.id 
+                          WHERE it.trans_id = a.id AND it.invoice_id = i.id)
+                     ELSE tc.description 
+                 END AS linetax_description,
+                 CASE 
+                     WHEN a.invoice AND ac.id IS NOT NULL AND i.id IS NOT NULL THEN 
+                         (SELECT SUM(it.taxamount) 
+                          FROM invoicetax it 
+                          WHERE it.trans_id = a.id AND it.invoice_id = i.id)
+                     ELSE ac.linetaxamount 
+                 END AS linetaxamount,
                  ac.project_id, COALESCE(tp.description, p.description) AS project_description
 		 FROM ar a
 		 JOIN acc_trans ac ON (a.id = ac.trans_id)
@@ -647,7 +670,7 @@ sub transactions {
 		 JOIN chart c ON (ac.chart_id = c.id)
 		 JOIN customer ct ON (a.customer_id = ct.id)
 		 JOIN address ad ON (ad.trans_id = ct.id)
-     LEFT JOIN chart tc ON (ac.tax_chart_id = tc.id)
+                 LEFT JOIN chart tc ON (ac.tax_chart_id = tc.id)
 		 LEFT JOIN department d ON (d.id = a.department_id)
 		 LEFT JOIN translation l ON (l.trans_id = c.id AND l.language_code = '$myconfig->{countrycode}')
                  LEFT JOIN project p ON (ac.project_id = p.id)
@@ -665,7 +688,29 @@ sub transactions {
 		 $lineitem AS lineitem, ct.name, ct.vendornumber,
 		 ad.address1, ad.address2, ad.city,
 		 ad.zipcode, ad.country,
-     tc.accno linetax_accno, tc.description linetax_description, ac.linetaxamount,
+                 CASE 
+                     WHEN a.invoice AND ac.id IS NOT NULL AND i.id IS NOT NULL THEN 
+                         (SELECT STRING_AGG(DISTINCT tc2.accno, ', ' ORDER BY tc2.accno) 
+                          FROM invoicetax it 
+                          JOIN chart tc2 ON it.chart_id = tc2.id 
+                          WHERE it.trans_id = a.id AND it.invoice_id = i.id)
+                     ELSE tc.accno 
+                 END AS linetax_accno,
+                 CASE 
+                     WHEN a.invoice AND ac.id IS NOT NULL AND i.id IS NOT NULL THEN 
+                         (SELECT STRING_AGG(DISTINCT tc2.description, ', ' ORDER BY tc2.description) 
+                          FROM invoicetax it 
+                          JOIN chart tc2 ON it.chart_id = tc2.id 
+                          WHERE it.trans_id = a.id AND it.invoice_id = i.id)
+                     ELSE tc.description 
+                 END AS linetax_description,
+                 CASE 
+                     WHEN a.invoice AND ac.id IS NOT NULL AND i.id IS NOT NULL THEN 
+                         (SELECT SUM(it.taxamount) 
+                          FROM invoicetax it 
+                          WHERE it.trans_id = a.id AND it.invoice_id = i.id)
+                     ELSE ac.linetaxamount 
+                 END AS linetaxamount,
                  ac.project_id, COALESCE(tp.description, p.description) AS project_description
 		 FROM ap a
 		 JOIN acc_trans ac ON (a.id = ac.trans_id)
@@ -673,7 +718,7 @@ sub transactions {
 		 JOIN chart c ON (ac.chart_id = c.id)
 		 JOIN vendor ct ON (a.vendor_id = ct.id)
 		 JOIN address ad ON (ad.trans_id = ct.id)
-     LEFT JOIN chart tc ON (ac.tax_chart_id = tc.id)
+                 LEFT JOIN chart tc ON (ac.tax_chart_id = tc.id)
 		 LEFT JOIN department d ON (d.id = a.department_id)
 		 LEFT JOIN translation l ON (l.trans_id = c.id AND l.language_code = '$myconfig->{countrycode}')
                  LEFT JOIN project p ON (ac.project_id = p.id)
@@ -906,7 +951,6 @@ sub transactions {
   }
 
 }
-
 
 sub transaction {
   my ($self, $myconfig, $form) = @_;
