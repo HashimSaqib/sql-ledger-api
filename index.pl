@@ -5751,6 +5751,30 @@ $api->get(
                 LIMIT 5;
                 }
         }
+        elsif ( $module eq 'yearend' ) {
+            return unless $c->check_perms('system.yearend');
+            $sql = qq{
+                SELECT
+        gl.*,
+        d.description  AS department,
+        COALESCE(a.amount, 0) AS amount
+        FROM yearend y
+        JOIN gl ON gl.id = y.trans_id
+        LEFT JOIN (
+        SELECT
+            trans_id,
+            SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END) AS amount
+        FROM acc_trans
+        GROUP BY trans_id
+        ) AS a
+        ON a.trans_id = gl.id
+        LEFT JOIN department AS d
+        ON d.id = gl.department_id
+        ORDER BY y.transdate DESC, gl.id DESC
+        LIMIT 5;
+            }
+        }
+
         my $transactions = $dbs->query($sql)->hashes;
         $c->render( json => $transactions );
     }
