@@ -4085,6 +4085,10 @@ $api->post(
 
         # Post the year-end transaction
         if ( AM->post_yearend( $c->slconfig, $form ) ) {
+            $dbs->query("DELETE FROM defaults WHERE fldname = 'closedto'");
+            $form->{todate} =~ /^(\d{4})-(\d{2})-(\d{2})$/; 
+            my $closedto = "$1$2$3";
+            $dbs->query("INSERT INTO defaults (fldname, fldvalue) VALUES ('closedto', '$closedto')");
             $c->render(
                 json => {
                     status    => 'success',
