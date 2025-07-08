@@ -647,6 +647,9 @@ sub get_accounts {
     $where .= " AND ac.transdate <= '$todate'";
     $subwhere .= " AND ac.transdate <= '$todate'";
     $yearendwhere = "ac.transdate < '$todate'";
+    $ywhere = " AND ac.trans_id NOT IN
+               (SELECT trans_id FROM yearend
+                WHERE transdate = '$todate')";
   }
 
   if ($excludeyearend) {
