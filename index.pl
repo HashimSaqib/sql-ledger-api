@@ -283,7 +283,7 @@ get '/logo/:client/' => sub {
 ###############################
 
 my $neoledger_perms =
-'["dashboard", "cash", "cash.recon", "gl", "gl.add", "gl.transactions", "items", "items.part", "items.service", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income", "system", "system.currencies", "system.projects", "system.departments", "system.defaults", "system.chart", "system.chart.list", "system.chart.add", "system.chart.gifi", "system.taxes",  "system.templates", "system.audit", "system.yearend", "system.batch", "import", "import.gl", "import.customer", "import.ar_invoice", "import.ar.transactions", "import.vendor", "import.ap_invoice", "import.ap.transactions", "reports.balance", "customer", "customer.transaction", "customer.invoice", "customer.transaction.return", "customer.invoice.return", "customer.add", "customer.batch", "customer.reminder", "customer.consolidate", "customer.transactions", "customer.search", "customer.history", "vendor", "vendor.transaction", "vendor.invoice", "vendor.transaction.return", "vendor.invoice.return", "vendor.add", "vendor.transactions", "vendor.search", "vendor.history", "reports.alltaxes", "vendor.taxreport", "customer.taxreport", "cash.payments", "cash.receipts", "cash.report.customer", "cash.report.vendor", "system.bank"]';
+'["dashboard", "cash", "cash.recon", "gl", "gl.add", "gl.transactions", "items", "items.part", "items.service", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income", "system", "system.currencies", "system.projects", "system.departments", "system.defaults", "system.chart", "system.chart.list", "system.chart.add", "system.chart.gifi", "system.taxes",  "system.templates", "system.audit", "system.yearend", "system.batch", "import", "import.gl", "import.customer", "import.ar_invoice", "import.ar.transactions", "import.vendor", "import.ap_invoice", "import.ap.transactions", "reports.balance", "customer", "customer.transaction", "customer.invoice", "customer.transaction.return", "customer.invoice.return", "customer.add", "customer.batch", "customer.reminder", "customer.consolidate", "customer.transactions", "customer.search", "customer.history", "vendor", "vendor.transaction", "vendor.invoice", "vendor.transaction.return", "vendor.invoice.return", "vendor.add", "vendor.transactions", "vendor.search", "vendor.history", "reports.alltaxes", "vendor.taxreport", "customer.taxreport", "cash.payments", "cash.receipts", "cash.report.customer", "cash.report.vendor", "system.bank", "import.bank"]';
 
 my $reports_only =
 '["dashboard", "gl", "gl.transactions", "items", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income",  "reports.balance", "customer", "customer.transactions", "customer.search", "customer.history", "vendor", "vendor.search", "vendor.history", "vendor.transactions", "reports.alltaxes", "vendor.taxreport", "customer.taxreport", "cash.report.customer", "cash.report.vendor"]';
@@ -3915,7 +3915,7 @@ $api->post(
         warn( Dumper $form );
 
         $form->{optional} =
-"company address tel fax companyemail companywebsite yearend weightunit businessnumber closedto revtrans audittrail method cdt namesbynumber xelatex typeofcontact roundchange referenceurl annualinterest latepaymentfee restockingcharge checkinventory hideaccounts linetax forcewarehouse glnumber sinumber sonumber vinumber batchnumber vouchernumber ponumber sqnumber rfqnumber partnumber projectnumber employeenumber customernumber vendornumber lock_glnumber lock_sinumber lock_sonumber lock_ponumber lock_sqnumber lock_rfqnumber lock_employeenumber lock_customernumber lock_vendornumber";
+"company address tel fax companyemail companywebsite yearend weightunit businessnumber closedto revtrans audittrail method cdt namesbynumber xelatex typeofcontact roundchange referenceurl annualinterest latepaymentfee restockingcharge checkinventory hideaccounts linetax forcewarehouse glnumber sinumber sonumber vinumber batchnumber vouchernumber ponumber sqnumber rfqnumber partnumber projectnumber employeenumber customernumber vendornumber lock_glnumber lock_sinumber lock_sonumber lock_ponumber lock_sqnumber lock_rfqnumber lock_employeenumber lock_customernumber lock_vendornumber clearing transition";
 
         # Save the defaults
         my $result = AM->save_defaults( $c->slconfig, $form );
@@ -5317,6 +5317,7 @@ helper get_accounts => sub {
         service_income => 'AR_amount:IC_income',
         cogs           => 'AP_amount:IC_cogs',
         expense        => 'AP_amount:IC_expense',
+        payment        => 'AR_paid|AP_paid',    
         all            => ''
     );
 
@@ -5324,9 +5325,16 @@ helper get_accounts => sub {
     my %filtered_accounts;
     foreach my $type ( keys %filter_mapping ) {
         my $filter_str = $filter_mapping{$type};
-        my @filtered =
-          grep { defined $_->{link} && $_->{link} =~ /\Q$filter_str\E/ }
-          @$accounts;
+      my @filtered;
+        if ( $type eq 'payment' ) {
+            @filtered = grep {
+                defined $_->{link} && ($_->{link} =~ /\bAR_paid\b/ || $_->{link} =~ /\bAP_paid\b/)
+            } @$accounts;
+        } else {
+            @filtered = grep {
+                defined $_->{link} && $_->{link} =~ /\Q$filter_str\E/
+            } @$accounts;
+        }
         $filtered_accounts{$type} = \@filtered;
     }
 
@@ -5393,7 +5401,7 @@ $api->get(
 
         # List of valid modules
         my @valid_modules =
-          qw(customer vendor ic gl chart gl_report projects incomestatement employees reminder import alltaxes tax_report payments payments_report);
+          qw(customer vendor ic gl chart gl_report projects incomestatement employees reminder import alltaxes tax_report payments payments_report import_bank);
 
         # Return empty JSON object if module not valid
         return $c->render( json => {} )
@@ -5697,6 +5705,14 @@ $api->get(
                 customers   => $customers,
                 vendors     => $vendors
             };
+        }
+        elsif ( $module eq 'import_bank' ) {
+            return unless $c->check_perms('import.bank');
+            my $accounts = $c->get_accounts();
+            my $defaults = $c->get_defaults();
+            my $clearing_account = $defaults->{clearing};
+            my $bank_accounts = $accounts->{payment};
+            $response = { payment_accounts => $bank_accounts, clearing_account => $clearing_account };
         }
 
         # If we got here, it means we have a valid module and passed checks
