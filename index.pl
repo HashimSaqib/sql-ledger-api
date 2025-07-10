@@ -7644,6 +7644,562 @@ $api->get(
 );
 ###############################
 ####                       ####
+####    Bank Adjustments   ####
+####                       ####
+###############################
+$api->get('/bank_adjustments/transactions' => sub  {
+    my $c = shift;
+    return unless my $form = $c->check_perms('bank.adjustments');
+    my $dbs = $c->dbs($c->param('client'));
+    my $clearing_account = $c->get_defaults->{clearing};
+
+    eval {
+        # Get account description
+        my $account_desc = $dbs->query( 
+            "SELECT description FROM chart WHERE accno = ?", 
+            $clearing_account 
+        )->list || 'Unknown Account';
+
+        my $sql = q{
+            -- Accounts Receivable transactions
+            SELECT ac.transdate, ar.invnumber as reference, ar.curr, ac.amount, ac.source, ac.memo,
+                   ar.id as trans_id, ar.invoice, ar.description, c.name as company, 'AR' as trans_type
+            FROM acc_trans ac 
+            INNER JOIN ar ON ar.id = ac.trans_id 
+            LEFT JOIN customer c ON c.id = ar.customer_id
+            WHERE ac.chart_id IN (SELECT id FROM chart WHERE accno=?)
+            
+            UNION ALL
+            
+            -- Accounts Payable transactions  
+            SELECT ac.transdate, ap.invnumber as reference, ap.curr, ac.amount, ac.source, ac.memo,
+                   ap.id as trans_id, ap.invoice, ap.description, v.name as company, 'AP' as trans_type
+            FROM acc_trans ac 
+            INNER JOIN ap ON ap.id = ac.trans_id 
+            LEFT JOIN vendor v ON v.id = ap.vendor_id
+            WHERE ac.chart_id IN (SELECT id FROM chart WHERE accno=?)
+            
+            UNION ALL
+            
+            -- General Ledger transactions
+            SELECT ac.transdate, gl.reference as reference, gl.curr, ac.amount, ac.source, ac.memo,
+                   gl.id as trans_id, NULL as invoice, gl.description, '' as company, 'GL' as trans_type
+            FROM acc_trans ac 
+            INNER JOIN gl ON gl.id = ac.trans_id
+            WHERE ac.chart_id IN (SELECT id FROM chart WHERE accno=?)
+            
+            ORDER BY transdate, reference
+        };
+
+        my $results = $dbs->query( 
+            $sql, 
+            $clearing_account, 
+            $clearing_account, 
+            $clearing_account 
+        )->hashes;
+
+        # Process results
+        my ( $total_debit, $total_credit ) = ( 0, 0 );
+
+        for my $row (@$results) {
+            $row->{reference_display} = $row->{reference} || '';
+
+            if ( $row->{amount} < 0 ) {
+                $row->{debit}  = abs( $row->{amount} );
+                $row->{credit} = 0;
+                $total_debit += abs( $row->{amount} );
+            } else {
+                $row->{debit}  = 0;
+                $row->{credit} = $row->{amount};
+                $total_credit += $row->{amount};
+            }
+        }
+
+        $c->render(json => {
+            success => 1,
+            data => {
+                transactions => $results,
+                totals => {
+                    debit => $total_debit,
+                    credit => $total_credit
+                },
+                account_info => {
+                    number => $clearing_account,
+                    description => $account_desc
+                },
+                summary => {
+                    total_records => scalar @$results,
+                    total_debit_formatted => $total_debit,
+                    total_credit_formatted => $total_credit
+                }
+            }
+        });
+    };
+
+    if ($@) {
+        $c->render(json => {
+            success => 0,
+            error => "Database error: $@"
+        }, status => 500);
+    }
+});
+$api->get('/bank_adjustments/transaction_detail' => sub {
+    my $c = shift;
+    return unless my $form = $c->check_perms('bank.adjustments');
+    my $dbs = $c->dbs($c->param('client'));
+    
+    my $trans_id = $c->param('trans_id');
+    my $accno = $c->param('accno') || $c->get_defaults->{clearing};
+    my $fromdate = $c->param('fromdate') || '';
+    my $todate = $c->param('todate') || '';
+    my $arap = $c->param('arap') || '';
+    
+    return $c->render(json => { success => 0, error => 'Transaction ID required' }) 
+        unless $trans_id;
+    
+    eval {
+        # Get GL transaction details
+        my $gl_query = q{
+            SELECT gl.reference, ac.transdate, c.accno, c.description as account_description, 
+                   gl.description, ac.source, ac.memo, ac.fx_transaction, gl.curr,
+                   CASE WHEN ac.amount < 0 THEN ABS(ac.amount) ELSE 0 END as debit,
+                   CASE WHEN ac.amount > 0 THEN ac.amount ELSE 0 END as credit
+            FROM acc_trans ac
+            JOIN chart c ON (c.id = ac.chart_id)
+            JOIN gl ON gl.id = ac.trans_id
+            WHERE ac.trans_id = ?
+            ORDER BY c.accno
+        };
+        
+        my $gl_transactions = $dbs->query($gl_query, $trans_id)->hashes;
+        
+        # Get chart accounts for GL selection
+        my $chart_accounts = $dbs->query(q{
+            SELECT id, accno || '--' || substr(description,1,30) as descrip
+            FROM chart
+            WHERE charttype='A' AND allow_gl
+            ORDER BY accno
+        })->hashes;
+        
+        # Get the search amount and determine AR/AP based on debit/credit
+        my ($search_debit, $search_credit) = $dbs->query(q{
+            SELECT 
+                CASE WHEN ac.amount < 0 THEN ABS(ac.amount) ELSE 0 END as debit,
+                CASE WHEN ac.amount > 0 THEN ac.amount ELSE 0 END as credit
+            FROM acc_trans ac
+            JOIN gl ON gl.id = ac.trans_id
+            WHERE ac.trans_id = ? AND ac.chart_id = (SELECT id FROM chart WHERE accno = ?)
+            AND NOT COALESCE(fx_transaction, false)
+        }, $trans_id, $accno)->list;
+        
+        my $search_amount = ($search_debit || 0) + ($search_credit || 0);
+        
+        # Auto-determine AR/AP if not set
+        if (!$arap) {
+            $arap = $search_debit > 0 ? 'ap' : 'ar';
+        }
+        
+        $c->render(json => {
+            success => 1,
+            data => {
+                gl_transactions => $gl_transactions,
+                chart_accounts => $chart_accounts,
+                trans_id => $trans_id,
+                accno => $accno,
+                search_amount => $search_amount,
+                arap => $arap,
+                fromdate => $fromdate,
+                todate => $todate
+            }
+        });
+    };
+    
+    if ($@) {
+        $c->render(json => { success => 0, error => "Database error: $@" }, status => 500);
+    }
+});
+# 2. Outstanding Transactions Route
+$api->get('/bank_adjustments/outstanding_transactions' => sub {
+    my $c = shift;
+    return unless my $form = $c->check_perms('bank.adjustments');
+    my $dbs = $c->dbs($c->param('client'));
+    
+    my $arap = $c->param('arap') || 'ar';
+    my $fromdate = $c->param('fromdate') || '';
+    my $todate = $c->param('todate') || '';
+    my $search_amount = $c->param('search_amount') || 0;
+    my $iban = $c->param('iban') || '';
+    
+    eval {
+        # Get outstanding AR/AP transactions
+        my (@bind, $where_clause);
+        if ($fromdate) {
+            $where_clause .= " AND aa.transdate >= ?";
+            push @bind, $fromdate;
+        }
+        if ($todate) {
+            $where_clause .= " AND aa.transdate <= ?";
+            push @bind, $todate;
+        }
+        if ($iban) {
+            $where_clause .= " AND b.iban = ?";
+            push @bind, $iban;
+        }
+        
+        my $vc = $arap eq 'ar' ? 'customer' : 'vendor';
+        my $vc_id_field = $arap eq 'ar' ? 'customer_id' : 'vendor_id';
+        
+        my $transactions_query = qq{
+            SELECT aa.id, aa.invnumber, aa.transdate, aa.description, aa.ordnumber, 
+                   vc.name, aa.curr, aa.amount, aa.paid, aa.amount - aa.paid as due, 
+                   aa.invoice, b.iban
+            FROM $arap aa
+            JOIN $vc vc ON (vc.id = aa.${vc_id_field})
+            LEFT JOIN bank b ON (b.id = aa.${vc_id_field})
+            WHERE aa.amount - aa.paid != 0
+            $where_clause
+            ORDER BY aa.transdate
+        };
+        
+        my $outstanding_transactions = $dbs->query($transactions_query, @bind)->hashes;
+        
+        # Mark transactions that match the search amount
+        for my $trans (@$outstanding_transactions) {
+            $trans->{auto_selected} = (abs($trans->{fxdue} || $trans->{due}) == $search_amount) ? 1 : 0;
+        }
+        
+        $c->render(json => {
+            success => 1,
+            data => {
+                outstanding_transactions => $outstanding_transactions,
+                arap => $arap,
+                search_amount => $search_amount,
+                iban => $iban
+            }
+        });
+    };
+    
+    if ($@) {
+        $c->render(json => { success => 0, error => "Database error: $@" }, status => 500);
+    }
+});
+
+# 3. Booking Confirmation Route
+$api->post('/bank_adjustments/book_selected' => sub {
+    my $c = shift;
+    return unless my $form = $c->check_perms('bank.adjustments');
+    my $dbs = $c->dbs($c->param('client'));
+    my $data = $c->req->json;
+    
+    my $trans_id = $data->{trans_id};
+    my $accno = $data->{accno};
+    my $gl_account_id = $data->{gl_account_id};
+    my $selected_ids = $data->{selected_ids} || '';
+    
+    eval {
+        # Get GL transaction details for display
+        my $gl_query = q{
+            SELECT gl.id, gl.reference, ac.transdate, c.id as acc_id, c.accno, 
+                   c.description as account_description, gl.description, ac.source, ac.memo,
+                   CASE WHEN ac.amount < 0 THEN ABS(ac.amount) ELSE 0 END as debit,
+                   CASE WHEN ac.amount > 0 THEN ac.amount ELSE 0 END as credit
+            FROM acc_trans ac
+            JOIN gl ON gl.id = ac.trans_id
+            JOIN chart c ON (c.id = ac.chart_id)
+            WHERE ac.trans_id = ?
+            ORDER BY c.accno
+        };
+        
+        my $gl_details = $dbs->query($gl_query, $trans_id)->hashes;
+        
+        # Get selected transactions details if any
+        my $selected_transactions = [];
+        if ($selected_ids) {
+            my @ids = split(',', $selected_ids);
+            if (@ids) {
+                my $ids_placeholder = join(',', ('?') x @ids);
+                my $selected_query = qq{
+                    SELECT id, 'ar' as module, invnumber, description, ordnumber, transdate, amount, invoice
+                    FROM ar WHERE id IN ($ids_placeholder)
+                    UNION ALL
+                    SELECT id, 'ap' as module, invnumber, description, ordnumber, transdate, amount, invoice  
+                    FROM ap WHERE id IN ($ids_placeholder)
+                    ORDER BY id
+                };
+                $selected_transactions = $dbs->query($selected_query, @ids, @ids)->hashes;
+            }
+        }
+        
+        # Get GL account details if selected
+        my $gl_account_details = {};
+        if ($gl_account_id) {
+            $gl_account_details = $dbs->query(
+                "SELECT accno, description FROM chart WHERE id = ?", 
+                $gl_account_id
+            )->hash || {};
+        }
+        
+        $c->render(json => {
+            success => 1,
+            data => {
+                gl_details => $gl_details,
+                selected_transactions => $selected_transactions,
+                gl_account_details => $gl_account_details,
+                trans_id => $trans_id,
+                accno => $accno,
+                gl_account_id => $gl_account_id,
+                selected_ids => $selected_ids
+            }
+        });
+    };
+    
+    if ($@) {
+        $c->render(json => { success => 0, error => "Database error: $@" }, status => 500);
+    }
+});
+$api->post('/bank_adjustments/process_adjustment' => sub {
+    my $c = shift;
+    return unless my $form = $c->check_perms('bank.adjustments');
+    my $dbs = $c->dbs($c->param('client'));
+    my $data = $c->req->json;
+    
+    my $trans_id = $data->{trans_id};
+    my $gl_account_id = $data->{gl_account_id};
+    my $accno = $data->{accno};
+    my $selected_ids = $data->{selected_ids} || '';
+    
+    my $clearing_account = $c->get_defaults->{clearing};
+    my $transition_account = $c->get_defaults->{transition};
+    
+    eval {
+        # Start transaction
+        $dbs->begin;
+        
+        # Get clearing and transition account IDs
+        my $clearing_accno_id = $dbs->query(
+            "SELECT id FROM chart WHERE accno = ?", 
+            $clearing_account
+        )->list;
+        
+        my $transition_accno_id = $dbs->query(
+            "SELECT id FROM chart WHERE accno = ?", 
+            $transition_account
+        )->list;
+        
+        # Simple GL account change (no AR/AP transactions selected)
+        if ($gl_account_id && !$selected_ids) {
+            $dbs->query(
+                "UPDATE acc_trans SET chart_id = ? WHERE chart_id = ? AND trans_id = ?",
+                $gl_account_id, $clearing_accno_id, $trans_id
+            );
+            
+            $dbs->commit;
+            $c->render(json => { 
+                success => 1, 
+                message => 'GL account updated successfully',
+                type => 'gl_updated'
+            });
+            return;
+        }
+        
+        # Complex adjustment with AR/AP transactions
+        if ($selected_ids) {
+            my @ids = split(',', $selected_ids);
+            
+            # Get GL transaction details
+            my ($gl_date, $curr, $fxrate) = $dbs->query(
+                "SELECT transdate, curr, COALESCE(exchangerate, 1) FROM gl WHERE id = ?", 
+                $trans_id
+            )->list;
+            
+            $fxrate ||= 1; # Default to 1 if null
+            
+            # Get the adjustment amount available from GL
+            my $adjustment_available = $dbs->query(
+                "SELECT 0 - amount FROM acc_trans WHERE chart_id = ? AND trans_id = ? AND NOT COALESCE(fx_transaction, false)",
+                $clearing_accno_id, $trans_id
+            )->list || 0;
+            
+            # Get AR/AP transactions to be adjusted
+            my $ids_placeholder = join(',', ('?') x @ids);
+            my $query = qq{
+                SELECT id, 'ar' as tbl, invnumber, transdate, amount - paid as fxdue
+                FROM ar
+                WHERE id IN ($ids_placeholder)
+                
+                UNION ALL
+                
+                SELECT id, 'ap' as tbl, invnumber, transdate, amount - paid as fxdue
+                FROM ap
+                WHERE id IN ($ids_placeholder)
+                
+                ORDER BY id
+            };
+            
+            my @rows = $dbs->query($query, @ids, @ids)->hashes;
+            
+            my $adjustment_total = 0;
+            my $arap; # Declare outside the loop so it's available for final GL adjustment
+            
+            # Process each selected AR/AP transaction
+            for my $row (@rows) {
+                $arap = $row->{tbl};
+                my $ml = ($arap eq 'ap') ? 1 : -1; # Multiplier for AP vs AR
+                my $ARAP = uc($arap);
+                
+                # Determine payment date (later of GL date or AR/AP date)
+                my $arap_date = $row->{transdate} || '';
+                my $payment_date;
+                
+                # Compare dates properly using string comparison for YYYY-MM-DD format
+                if (!$gl_date || !$arap_date) {
+                    $payment_date = $gl_date || $arap_date || 'CURRENT_DATE';
+                } elsif ($gl_date ge $arap_date) {
+                    $payment_date = $gl_date;  # gl_date is later or equal
+                } else {
+                    $payment_date = $arap_date; # arap_date is later
+                }
+                
+                # Calculate amount to be adjusted
+                my $amount_to_be_adjusted;
+                if ($adjustment_available * $ml < $row->{fxdue}) {
+                    $amount_to_be_adjusted = $adjustment_available;
+                    $adjustment_available = 0;
+                } else {
+                    $amount_to_be_adjusted = $row->{fxdue};
+                    $adjustment_available -= $row->{fxdue};
+                }
+                
+                # Calculate FX adjustment if needed
+                my $fx_amount_to_be_adjusted = $amount_to_be_adjusted * $fxrate - $amount_to_be_adjusted;
+                my $payment_id = undef;
+                
+                if ($fxrate != 1) {
+                    $payment_id = $dbs->query("SELECT COALESCE(MAX(id), 0) + 1 FROM payment")->list || 1;
+                }
+                
+                # Get the AR/AP account ID
+                my $arap_accno_id = $dbs->query(
+                    "SELECT chart_id FROM acc_trans WHERE trans_id = ? AND chart_id IN (SELECT id FROM chart WHERE link = ?) LIMIT 1",
+                    $row->{id}, "${ARAP}"
+                )->list;
+                
+                if ($arap eq 'ap') {
+                    # AP adjustments
+                    $dbs->query(
+                        "INSERT INTO acc_trans(trans_id, chart_id, transdate, amount, id) VALUES (?, ?, ?, ?, ?)",
+                        $row->{id}, $transition_accno_id, $payment_date, $amount_to_be_adjusted, $payment_id
+                    );
+                    
+                    if ($fx_amount_to_be_adjusted != 0) {
+                        $dbs->query(
+                            "INSERT INTO acc_trans(trans_id, chart_id, fx_transaction, transdate, amount) VALUES (?, ?, ?, ?, ?)",
+                            $row->{id}, $transition_accno_id, 't', $payment_date, $fx_amount_to_be_adjusted
+                        );
+                    }
+                    
+                    $dbs->query(
+                        "INSERT INTO acc_trans(trans_id, chart_id, transdate, amount) VALUES (?, ?, ?, ?)",
+                        $row->{id}, $arap_accno_id, $payment_date, 
+                        ($row->{fxdue} * -1) + (($row->{fxdue} * $fxrate - $row->{fxdue}) * -1)
+                    );
+                } else {
+                    # AR adjustments
+                    $dbs->query(
+                        "INSERT INTO acc_trans(trans_id, chart_id, transdate, amount, id) VALUES (?, ?, ?, ?, ?)",
+                        $row->{id}, $transition_accno_id, $payment_date, $amount_to_be_adjusted * -1, $payment_id
+                    );
+                    
+                    if ($fx_amount_to_be_adjusted != 0) {
+                        $dbs->query(
+                            "INSERT INTO acc_trans(trans_id, chart_id, fx_transaction, transdate, amount) VALUES (?, ?, ?, ?, ?)",
+                            $row->{id}, $transition_accno_id, 't', $payment_date, $fx_amount_to_be_adjusted * -1
+                        );
+                    }
+                    
+                    $dbs->query(
+                        "INSERT INTO acc_trans(trans_id, chart_id, transdate, amount) VALUES (?, ?, ?, ?)",
+                        $row->{id}, $arap_accno_id, $payment_date, 
+                        $row->{fxdue} + ($row->{fxdue} * $fxrate - $row->{fxdue})
+                    );
+                }
+                
+                # Insert payment record if payment_id was generated
+                if ($payment_id) {
+                    $dbs->query(
+                        "INSERT INTO payment (id, trans_id, exchangerate) VALUES (?, ?, ?)",
+                        $payment_id, $row->{id}, $fxrate
+                    );
+                }
+                
+                # Update AR/AP paid amounts and payment date
+                $dbs->query(
+                    "UPDATE $arap SET paid = paid + ?, datepaid = ? WHERE id = ?",
+                    $amount_to_be_adjusted + $fx_amount_to_be_adjusted,
+                    $payment_date, $row->{id}
+                );
+                
+                $adjustment_total += $amount_to_be_adjusted;
+            }
+            
+           
+        # Update GL transaction - move clearing account amount to transition account
+        # Apply AP/AR direction logic to adjustment total
+        if ($arap eq 'ap') {
+            $adjustment_total *= -1;
+        }
+
+        if ($adjustment_total != 0) {
+            # Get the current clearing account amount
+            my $clearing_amount = $dbs->query(
+                "SELECT amount FROM acc_trans WHERE chart_id = ? AND trans_id = ? AND NOT COALESCE(fx_transaction, false)",
+                $clearing_accno_id, $trans_id
+            )->list;
+            
+            if ($adjustment_total == $clearing_amount) {
+                # Full adjustment - simply change the clearing account to transition account
+                $dbs->query(
+                    "UPDATE acc_trans SET chart_id = ? WHERE chart_id = ? AND trans_id = ? AND NOT COALESCE(fx_transaction, false)",
+                    $transition_accno_id, $clearing_accno_id, $trans_id
+                );
+            } else {
+                # Partial adjustment - reduce clearing and add transition
+                $dbs->query(
+                    "UPDATE acc_trans SET amount = amount - ? WHERE chart_id = ? AND trans_id = ? AND NOT COALESCE(fx_transaction, false)",
+                    $adjustment_total, $clearing_accno_id, $trans_id
+                );
+                
+                $dbs->query(
+                    "INSERT INTO acc_trans (trans_id, chart_id, amount, transdate) VALUES (?, ?, ?, ?)",
+                    $trans_id, $transition_accno_id, $adjustment_total, $gl_date
+                );
+            }
+            
+            # Add FX transaction for transition account if needed
+            my $fx_adjustment = $adjustment_total * $fxrate - $adjustment_total;
+            if ($fx_adjustment != 0) {
+                $dbs->query(
+                    "INSERT INTO acc_trans (trans_id, chart_id, amount, transdate, fx_transaction) VALUES (?, ?, ?, ?, ?)",
+                    $trans_id, $transition_accno_id, $fx_adjustment, $gl_date, 't'
+                );
+            }
+        }          
+            $dbs->commit;
+            $c->render(json => { 
+                success => 1, 
+                message => 'Adjustment processed successfully',
+                type => 'adjustment_complete'
+            });
+        }
+    };
+    
+    if ($@) {
+        $dbs->rollback;
+        $c->render(json => { success => 0, error => "Error processing adjustment: $@" }, status => 500);
+    }
+});
+###############################
+####                       ####
 ####        Reports        ####
 ####                       ####
 ###############################
