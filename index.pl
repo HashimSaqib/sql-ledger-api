@@ -283,7 +283,7 @@ get '/logo/:client/' => sub {
 ###############################
 
 my $neoledger_perms =
-'["dashboard", "cash", "cash.recon", "gl", "gl.add", "gl.transactions", "items", "items.part", "items.service", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income", "system", "system.currencies", "system.projects", "system.departments", "system.defaults", "system.chart", "system.chart.list", "system.chart.add", "system.chart.gifi", "system.taxes",  "system.templates", "system.audit", "system.yearend", "system.batch", "import", "import.gl", "import.customer", "import.ar_invoice", "import.ar.transactions", "import.vendor", "import.ap_invoice", "import.ap.transactions", "reports.balance", "customer", "customer.transaction", "customer.invoice", "customer.transaction.return", "customer.invoice.return", "customer.add", "customer.batch", "customer.reminder", "customer.consolidate", "customer.transactions", "customer.search", "customer.history", "vendor", "vendor.transaction", "vendor.invoice", "vendor.transaction.return", "vendor.invoice.return", "vendor.add", "vendor.transactions", "vendor.search", "vendor.history", "reports.alltaxes", "vendor.taxreport", "customer.taxreport", "cash.payments", "cash.receipts", "cash.report.customer", "cash.report.vendor", "system.bank", "import.bank"]';
+'["dashboard", "cash", "cash.recon", "gl", "gl.add", "gl.transactions", "items", "items.part", "items.service", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income", "system", "system.currencies", "system.projects", "system.departments", "system.defaults", "system.chart", "system.chart.list", "system.chart.add", "system.chart.gifi", "system.taxes",  "system.templates", "system.audit", "system.yearend", "system.batch", "import", "import.gl", "import.customer", "import.ar_invoice", "import.ar_transaction", "import.vendor", "import.ap_invoice", "import.ap_transaction", "reports.balance", "customer", "customer.transaction", "customer.invoice", "customer.transaction.return", "customer.invoice.return", "customer.add", "customer.batch", "customer.reminder", "customer.consolidate", "customer.transactions", "customer.search", "customer.history", "vendor", "vendor.transaction", "vendor.invoice", "vendor.transaction.return", "vendor.invoice.return", "vendor.add", "vendor.transactions", "vendor.search", "vendor.history", "reports.alltaxes", "vendor.taxreport", "customer.taxreport", "cash.payments", "cash.receipts", "cash.report.customer", "cash.report.vendor", "system.bank", "import.bank"]';
 
 my $reports_only =
 '["dashboard", "gl", "gl.transactions", "items", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income",  "reports.balance", "customer", "customer.transactions", "customer.search", "customer.history", "vendor", "vendor.search", "vendor.history", "vendor.transactions", "reports.alltaxes", "vendor.taxreport", "customer.taxreport", "cash.report.customer", "cash.report.vendor"]';
@@ -8207,10 +8207,8 @@ $api->post('/bank_adjustments/process_adjustment' => sub {
 $api->get(
     '/reports/trial_balance' => sub {
         my $c = shift;
-        return unless $c->check_perms('reports.trial');
+        return unless my $form = $c->check_perms('reports.trial');
         my $client = $c->param('client');
-
-        my $form = new Form;
 
         my $datefrom = $c->param('fromdate');
         my $dateto   = $c->param('todate');
@@ -8229,12 +8227,11 @@ $api->get(
     '/reports/transactions' => sub {
         my $c = shift;
         return
-          unless ( $c->check_perms('reports.trial')
+          unless my $form =( $c->check_perms('reports.trial')
             || $c->check_perms('reports.income') );
         my $client = $c->param('client');
         my $dbs    = $c->dbs($client);
 
-        my $form = new Form;
         $form->{fromdate}      = $c->param('fromdate')   || '';
         $form->{todate}        = $c->param('todate')     || '';
         $form->{accno}         = $c->param('accno')      || '';
@@ -10074,11 +10071,10 @@ $api->get(
         my $c      = shift;
         my $params = $c->req->params->to_hash;
         my $client = $c->param('client');
-
+        return unless my $form = $c->check_perms('cash.recon');
         $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
 
         # Initialize form and load parameters
-        my $form = new Form;
         $form->{$_} = $params->{$_} for keys %$params;
 
         # Validate required parameters
@@ -10150,6 +10146,7 @@ $api->post(
         my $c      = shift;
         my $data   = $c->req->json;
         my $client = $c->param('client');
+        return unless my $form = $c->check_perms('cash.recon');
 
         # Validate required data
         unless ( $data->{accno} && $data->{transactions} ) {
@@ -10165,7 +10162,6 @@ $api->post(
         $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
 
         # Prepare form data structure
-        my $form = new Form;
         $form->{accno} = $data->{accno};
 
         # If a UI-supplied reconciliation date is provided, use it;
