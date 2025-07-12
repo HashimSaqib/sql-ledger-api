@@ -283,7 +283,7 @@ get '/logo/:client/' => sub {
 ###############################
 
 my $neoledger_perms =
-'["dashboard", "cash", "cash.recon", "gl", "gl.add", "gl.transactions", "items", "items.part", "items.service", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income", "system", "system.currencies", "system.projects", "system.departments", "system.defaults", "system.chart", "system.chart.list", "system.chart.add", "system.chart.gifi", "system.taxes",  "system.templates", "system.audit", "system.yearend", "system.batch", "import", "import.gl", "import.customer", "import.ar_invoice", "import.ar_transaction", "import.vendor", "import.ap_invoice", "import.ap_transaction", "reports.balance", "customer", "customer.transaction", "customer.invoice", "customer.transaction.return", "customer.invoice.return", "customer.add", "customer.batch", "customer.reminder", "customer.consolidate", "customer.transactions", "customer.search", "customer.history", "vendor", "vendor.transaction", "vendor.invoice", "vendor.transaction.return", "vendor.invoice.return", "vendor.add", "vendor.transactions", "vendor.search", "vendor.history", "reports.alltaxes", "vendor.taxreport", "customer.taxreport", "cash.payments", "cash.receipts", "cash.report.customer", "cash.report.vendor", "system.bank", "import.bank"]';
+'["dashboard", "cash", "cash.recon", "gl", "gl.add", "gl.transactions", "items", "items.part", "items.service", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income", "system", "system.currencies", "system.projects", "system.departments", "system.defaults", "system.chart", "system.chart.list", "system.chart.add", "system.chart.gifi", "system.taxes",  "system.templates", "system.audit", "system.yearend", "system.batch", "import", "import.gl", "import.customer", "import.ar_invoice", "import.ar_transaction", "import.vendor", "import.ap_invoice", "import.ap_transaction", "reports.balance", "customer", "customer.transaction", "customer.invoice", "customer.transaction_return", "customer.invoice_return", "customer.add", "customer.batch", "customer.reminder", "customer.consolidate", "customer.transactions", "customer.search", "customer.history", "vendor", "vendor.transaction", "vendor.invoice", "vendor.transaction_return", "vendor.invoice_return", "vendor.add", "vendor.transactions", "vendor.search", "vendor.history", "reports.alltaxes", "vendor.taxreport", "customer.taxreport", "cash.payments", "cash.receipts", "cash.report.customer", "cash.report.vendor", "system.bank", "import.bank"]';
 
 my $reports_only =
 '["dashboard", "gl", "gl.transactions", "items", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income",  "reports.balance", "customer", "customer.transactions", "customer.search", "customer.history", "vendor", "vendor.search", "vendor.history", "vendor.transactions", "reports.alltaxes", "vendor.taxreport", "customer.taxreport", "cash.report.customer", "cash.report.vendor"]';
@@ -4086,9 +4086,11 @@ $api->post(
         # Post the year-end transaction
         if ( AM->post_yearend( $c->slconfig, $form ) ) {
             $dbs->query("DELETE FROM defaults WHERE fldname = 'closedto'");
-            $form->{todate} =~ /^(\d{4})-(\d{2})-(\d{2})$/; 
+            $form->{todate} =~ /^(\d{4})-(\d{2})-(\d{2})$/;
             my $closedto = "$1$2$3";
-            $dbs->query("INSERT INTO defaults (fldname, fldvalue) VALUES ('closedto', '$closedto')");
+            $dbs->query(
+"INSERT INTO defaults (fldname, fldvalue) VALUES ('closedto', '$closedto')"
+            );
             $c->render(
                 json => {
                     status    => 'success',
@@ -5317,7 +5319,7 @@ helper get_accounts => sub {
         service_income => 'AR_amount:IC_income',
         cogs           => 'AP_amount:IC_cogs',
         expense        => 'AP_amount:IC_expense',
-        payment        => 'AR_paid|AP_paid',    
+        payment        => 'AR_paid|AP_paid',
         all            => ''
     );
 
@@ -5325,15 +5327,18 @@ helper get_accounts => sub {
     my %filtered_accounts;
     foreach my $type ( keys %filter_mapping ) {
         my $filter_str = $filter_mapping{$type};
-      my @filtered;
+        my @filtered;
         if ( $type eq 'payment' ) {
             @filtered = grep {
-                defined $_->{link} && ($_->{link} =~ /\bAR_paid\b/ || $_->{link} =~ /\bAP_paid\b/)
+                defined $_->{link}
+                  && ( $_->{link} =~ /\bAR_paid\b/
+                    || $_->{link} =~ /\bAP_paid\b/ )
             } @$accounts;
-        } else {
-            @filtered = grep {
-                defined $_->{link} && $_->{link} =~ /\Q$filter_str\E/
-            } @$accounts;
+        }
+        else {
+            @filtered =
+              grep { defined $_->{link} && $_->{link} =~ /\Q$filter_str\E/ }
+              @$accounts;
         }
         $filtered_accounts{$type} = \@filtered;
     }
@@ -5708,11 +5713,14 @@ $api->get(
         }
         elsif ( $module eq 'import_bank' ) {
             return unless $c->check_perms('import.bank');
-            my $accounts = $c->get_accounts();
-            my $defaults = $c->get_defaults();
+            my $accounts         = $c->get_accounts();
+            my $defaults         = $c->get_defaults();
             my $clearing_account = $defaults->{clearing};
-            my $bank_accounts = $accounts->{payment};
-            $response = { payment_accounts => $bank_accounts, clearing_account => $clearing_account };
+            my $bank_accounts    = $accounts->{payment};
+            $response = {
+                payment_accounts => $bank_accounts,
+                clearing_account => $clearing_account
+            };
         }
 
         # If we got here, it means we have a valid module and passed checks
@@ -6134,9 +6142,12 @@ $api->get(
         my $client = $c->param('client');
         my $vc     = $c->param('vc');
 
-        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+        return
+          unless my $form = $c->check_perms(
+"$vc.transaction,$vc.invoice,$vc.invoice_return,$vc.transaction_return"
+          );
 
-        my $form = new Form;
+        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
 
         $form->{vc} = $vc;
         AA->all_names( $c->slconfig, $form );
@@ -6162,7 +6173,8 @@ $api->get(
         my $vc     = $c->param('vc');
         return
           unless my $form = $c->check_perms(
-            "$vc.transaction,$vc.invoice,$vc.creditinvoice,$vc.debitinvoice");
+"$vc.transaction,$vc.invoice,$vc.invoice_return,$vc.transaction_return"
+          );
         my $id = $c->param('id');
 
         # Validate the type parameter
@@ -6294,7 +6306,8 @@ $api->post(
 
         my @results;
         foreach my $transaction (@$transactions) {
-            my $new_invoice_id = process_invoice( $c, $transaction );
+            return unless my $form = $c->check_perms("$vc.invoice");
+            my $new_invoice_id = process_invoice( $c, $transaction, $form );
             push @results,
               {
                 id      => $new_invoice_id,
@@ -6311,9 +6324,8 @@ $api->post(
 
 $api->post(
     '/import/transaction/:vc/' => sub {
-        my $c  = shift;
-        my $vc = $c->param('vc');
-        return unless my $form = $c->check_perms("$vc.transaction");
+        my $c      = shift;
+        my $vc     = $c->param('vc');
         my $client = $c->param('client');
 
         my $transactions = $c->req->json;
@@ -6326,7 +6338,9 @@ $api->post(
 
         my @results;
         foreach my $transaction (@$transactions) {
-            my $new_transaction_id = process_transaction( $c, $transaction );
+            return unless my $form = $c->check_perms("$vc.transaction");
+            my $new_transaction_id =
+              process_transaction( $c, $transaction, $form );
             push @results,
               {
                 id      => $new_transaction_id,
@@ -6586,7 +6600,7 @@ $api->get(
 );
 
 sub process_transaction {
-    my ( $c, $data ) = @_;
+    my ( $c, $data, $form ) = @_;
 
     my $client = $c->param('client');
     my $vc     = $c->param('vc');
@@ -6594,8 +6608,6 @@ sub process_transaction {
     my $dbs    = $c->dbs($client);
 
     $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
-
-    my $form = Form->new;
 
     $form->{type} = $data->{type};
     $form->{vc}   = $vc eq 'vendor' ? 'vendor' : 'customer';
@@ -6724,7 +6736,7 @@ $api->post(
         my $vc = $c->param('vc');
         return unless my $form = $c->check_perms("$vc.transaction");
 
-        my $transaction_id = process_transaction( $c, $data );
+        my $transaction_id = process_transaction( $c, $data, $form );
 
         $c->render( json => { id => $transaction_id } );
     }
@@ -6934,7 +6946,7 @@ $api->get(
 );
 
 sub process_invoice {
-    my ( $c, $data ) = @_;
+    my ( $c, $data, $form ) = @_;
 
     my $client = $c->param('client');
     my $id     = $c->param('id');
@@ -6945,10 +6957,6 @@ sub process_invoice {
 
     # Configure DB connection
     my $dbs = $c->dbs($client);
-    $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
-
-    # Initialize form
-    my $form = Form->new;
 
     # Set the ID if provided; otherwise it will post as a new invoice
     $form->{id} = $id if $id;
@@ -7052,11 +7060,44 @@ sub process_invoice {
         for my $tax ( @{ $data->{taxes} } ) {
             push @taxaccounts, $tax->{accno};
 
-            # e.g. $form->{"$tax->{accno}_rate"} = $tax->{rate};
             $form->{"$tax->{accno}_rate"} = $tax->{rate};
         }
         $form->{taxaccounts} = join( ' ', @taxaccounts );
         $form->{taxincluded} = $data->{taxincluded};
+    }
+    else {
+        # No valid taxes object, query from database
+        my $transdate = $data->{invDate};
+
+        my $taxes = $dbs->query(
+            q{
+            SELECT c.accno, t.rate, t.chart_id
+            FROM tax t
+            JOIN chart c ON c.id = t.chart_id
+            WHERE t.validto IS NULL 
+               OR t.validto >= ?
+            ORDER BY t.chart_id, t.id DESC
+        },
+            $transdate
+        )->hashes;
+
+        if (@$taxes) {
+            my @taxaccounts;
+            my %seen_charts;
+
+            for my $tax (@$taxes) {
+
+                # Only use the first (most recent) rate for each chart_id
+                next if $seen_charts{ $tax->{chart_id} };
+                $seen_charts{ $tax->{chart_id} } = 1;
+
+                push @taxaccounts, $tax->{accno};
+                $form->{"$tax->{accno}_rate"} = $tax->{rate};
+            }
+
+            $form->{taxaccounts} = join( ' ', @taxaccounts );
+            $form->{taxincluded} = $data->{taxincluded} // 0;
+        }
     }
 
     # Other defaults
@@ -7099,7 +7140,27 @@ $api->post(
             $data = $c->req->json;
         }
 
-        my $new_invoice_id = process_invoice( $c, $data );
+        $data->{vc} eq 'customer' ? $data->{vc} = 'customer' : $data->{vc} =
+          'vendor';
+
+        my $form;
+        if ( $data->{vc} eq 'customer' ) {
+            if ( $data->{type} eq 'credit_invoice' ) {
+                $form = $c->check_perms("customer.invoice_return");
+            }
+            else {
+                $form = $c->check_perms("customer.invoice");
+            }
+        }
+        else {
+            if ( $data->{type} eq 'debit_invoice' ) {
+                $form = $c->check_perms("vendor.invoice_return");
+            }
+            else {
+                $form = $c->check_perms("vendor.invoice");
+            }
+        }
+        my $new_invoice_id = process_invoice( $c, $data, $form );
 
         # Return the newly posted or updated invoice ID
         $c->render( json => { id => $new_invoice_id } );
@@ -7238,7 +7299,7 @@ $api->get(
                 status => 400
             );
         }
-        my $form = new Form;
+        my $form;
         if ( $vc eq 'customer' ) {
             return unless $form = $c->check_perms("customer.taxreport");
         }
@@ -7291,7 +7352,7 @@ $api->get(
         my $c  = shift;
         my $vc = $c->param('vc');
 
-        my $form = new Form;
+        my $form;
         if ( $vc eq 'customer' ) {
             return unless $form = $c->check_perms("cash.receipts");
         }
@@ -7342,7 +7403,7 @@ $api->post(
         my $c    = shift;
         my $vc   = $c->param('vc');
         my $json = $c->req->json;
-        my $form = new Form;
+        my $form;
 
         # Check permissions
         if ( $vc eq 'customer' ) {
@@ -7585,10 +7646,8 @@ $api->get(
             );
         }
 
-        my $form = new Form;
-
         # Check permissions
-        return unless $form = $c->check_perms("cash.report.$vc");
+        return unless my $form = $c->check_perms("cash.report.$vc");
 
         # Core parameters
         $form->{db} = $vc eq 'customer' ? 'ar' : 'ap';
@@ -7647,20 +7706,21 @@ $api->get(
 ####    Bank Adjustments   ####
 ####                       ####
 ###############################
-$api->get('/bank_adjustments/transactions' => sub  {
-    my $c = shift;
-    return unless my $form = $c->check_perms('bank.adjustments');
-    my $dbs = $c->dbs($c->param('client'));
-    my $clearing_account = $c->get_defaults->{clearing};
+$api->get(
+    '/bank_adjustments/transactions' => sub {
+        my $c = shift;
+        return unless my $form = $c->check_perms('bank.adjustments');
+        my $dbs              = $c->dbs( $c->param('client') );
+        my $clearing_account = $c->get_defaults->{clearing};
 
-    eval {
-        # Get account description
-        my $account_desc = $dbs->query( 
-            "SELECT description FROM chart WHERE accno = ?", 
-            $clearing_account 
-        )->list || 'Unknown Account';
+        eval {
+            # Get account description
+            my $account_desc =
+              $dbs->query( "SELECT description FROM chart WHERE accno = ?",
+                $clearing_account )->list
+              || 'Unknown Account';
 
-        my $sql = q{
+            my $sql = q{
             -- Accounts Receivable transactions
             SELECT ac.transdate, ar.invnumber as reference, ar.curr, ac.amount, ac.source, ac.memo,
                    ar.id as trans_id, ar.invoice, ar.description, c.name as company, 'AR' as trans_type
@@ -7691,75 +7751,81 @@ $api->get('/bank_adjustments/transactions' => sub  {
             ORDER BY transdate, reference
         };
 
-        my $results = $dbs->query( 
-            $sql, 
-            $clearing_account, 
-            $clearing_account, 
-            $clearing_account 
-        )->hashes;
+            my $results =
+              $dbs->query( $sql, $clearing_account, $clearing_account,
+                $clearing_account )->hashes;
 
-        # Process results
-        my ( $total_debit, $total_credit ) = ( 0, 0 );
+            # Process results
+            my ( $total_debit, $total_credit ) = ( 0, 0 );
 
-        for my $row (@$results) {
-            $row->{reference_display} = $row->{reference} || '';
+            for my $row (@$results) {
+                $row->{reference_display} = $row->{reference} || '';
 
-            if ( $row->{amount} < 0 ) {
-                $row->{debit}  = abs( $row->{amount} );
-                $row->{credit} = 0;
-                $total_debit += abs( $row->{amount} );
-            } else {
-                $row->{debit}  = 0;
-                $row->{credit} = $row->{amount};
-                $total_credit += $row->{amount};
-            }
-        }
-
-        $c->render(json => {
-            success => 1,
-            data => {
-                transactions => $results,
-                totals => {
-                    debit => $total_debit,
-                    credit => $total_credit
-                },
-                account_info => {
-                    number => $clearing_account,
-                    description => $account_desc
-                },
-                summary => {
-                    total_records => scalar @$results,
-                    total_debit_formatted => $total_debit,
-                    total_credit_formatted => $total_credit
+                if ( $row->{amount} < 0 ) {
+                    $row->{debit}  = abs( $row->{amount} );
+                    $row->{credit} = 0;
+                    $total_debit += abs( $row->{amount} );
+                }
+                else {
+                    $row->{debit}  = 0;
+                    $row->{credit} = $row->{amount};
+                    $total_credit += $row->{amount};
                 }
             }
-        });
-    };
 
-    if ($@) {
-        $c->render(json => {
-            success => 0,
-            error => "Database error: $@"
-        }, status => 500);
+            $c->render(
+                json => {
+                    success => 1,
+                    data    => {
+                        transactions => $results,
+                        totals       => {
+                            debit  => $total_debit,
+                            credit => $total_credit
+                        },
+                        account_info => {
+                            number      => $clearing_account,
+                            description => $account_desc
+                        },
+                        summary => {
+                            total_records          => scalar @$results,
+                            total_debit_formatted  => $total_debit,
+                            total_credit_formatted => $total_credit
+                        }
+                    }
+                }
+            );
+        };
+
+        if ($@) {
+            $c->render(
+                json => {
+                    success => 0,
+                    error   => "Database error: $@"
+                },
+                status => 500
+            );
+        }
     }
-});
-$api->get('/bank_adjustments/transaction_detail' => sub {
-    my $c = shift;
-    return unless my $form = $c->check_perms('bank.adjustments');
-    my $dbs = $c->dbs($c->param('client'));
-    
-    my $trans_id = $c->param('trans_id');
-    my $accno = $c->param('accno') || $c->get_defaults->{clearing};
-    my $fromdate = $c->param('fromdate') || '';
-    my $todate = $c->param('todate') || '';
-    my $arap = $c->param('arap') || '';
-    
-    return $c->render(json => { success => 0, error => 'Transaction ID required' }) 
-        unless $trans_id;
-    
-    eval {
-        # Get GL transaction details
-        my $gl_query = q{
+);
+$api->get(
+    '/bank_adjustments/transaction_detail' => sub {
+        my $c = shift;
+        return unless my $form = $c->check_perms('bank.adjustments');
+        my $dbs = $c->dbs( $c->param('client') );
+
+        my $trans_id = $c->param('trans_id');
+        my $accno    = $c->param('accno')    || $c->get_defaults->{clearing};
+        my $fromdate = $c->param('fromdate') || '';
+        my $todate   = $c->param('todate')   || '';
+        my $arap     = $c->param('arap')     || '';
+
+        return $c->render(
+            json => { success => 0, error => 'Transaction ID required' } )
+          unless $trans_id;
+
+        eval {
+            # Get GL transaction details
+            my $gl_query = q{
             SELECT gl.reference, ac.transdate, c.accno, c.description as account_description, 
                    gl.description, ac.source, ac.memo, ac.fx_transaction, gl.curr,
                    CASE WHEN ac.amount < 0 THEN ABS(ac.amount) ELSE 0 END as debit,
@@ -7770,19 +7836,22 @@ $api->get('/bank_adjustments/transaction_detail' => sub {
             WHERE ac.trans_id = ?
             ORDER BY c.accno
         };
-        
-        my $gl_transactions = $dbs->query($gl_query, $trans_id)->hashes;
-        
-        # Get chart accounts for GL selection
-        my $chart_accounts = $dbs->query(q{
+
+            my $gl_transactions = $dbs->query( $gl_query, $trans_id )->hashes;
+
+            # Get chart accounts for GL selection
+            my $chart_accounts = $dbs->query(
+                q{
             SELECT id, accno || '--' || substr(description,1,30) as descrip
             FROM chart
             WHERE charttype='A' AND allow_gl
             ORDER BY accno
-        })->hashes;
-        
-        # Get the search amount and determine AR/AP based on debit/credit
-        my ($search_debit, $search_credit) = $dbs->query(q{
+        }
+            )->hashes;
+
+            # Get the search amount and determine AR/AP based on debit/credit
+            my ( $search_debit, $search_credit ) = $dbs->query(
+                q{
             SELECT 
                 CASE WHEN ac.amount < 0 THEN ABS(ac.amount) ELSE 0 END as debit,
                 CASE WHEN ac.amount > 0 THEN ac.amount ELSE 0 END as credit
@@ -7790,66 +7859,76 @@ $api->get('/bank_adjustments/transaction_detail' => sub {
             JOIN gl ON gl.id = ac.trans_id
             WHERE ac.trans_id = ? AND ac.chart_id = (SELECT id FROM chart WHERE accno = ?)
             AND NOT COALESCE(fx_transaction, false)
-        }, $trans_id, $accno)->list;
-        
-        my $search_amount = ($search_debit || 0) + ($search_credit || 0);
-        
-        # Auto-determine AR/AP if not set
-        if (!$arap) {
-            $arap = $search_debit > 0 ? 'ap' : 'ar';
-        }
-        
-        $c->render(json => {
-            success => 1,
-            data => {
-                gl_transactions => $gl_transactions,
-                chart_accounts => $chart_accounts,
-                trans_id => $trans_id,
-                accno => $accno,
-                search_amount => $search_amount,
-                arap => $arap,
-                fromdate => $fromdate,
-                todate => $todate
+        }, $trans_id, $accno
+            )->list;
+
+            my $search_amount =
+              ( $search_debit || 0 ) + ( $search_credit || 0 );
+
+            # Auto-determine AR/AP if not set
+            if ( !$arap ) {
+                $arap = $search_debit > 0 ? 'ap' : 'ar';
             }
-        });
-    };
-    
-    if ($@) {
-        $c->render(json => { success => 0, error => "Database error: $@" }, status => 500);
+
+            $c->render(
+                json => {
+                    success => 1,
+                    data    => {
+                        gl_transactions => $gl_transactions,
+                        chart_accounts  => $chart_accounts,
+                        trans_id        => $trans_id,
+                        accno           => $accno,
+                        search_amount   => $search_amount,
+                        arap            => $arap,
+                        fromdate        => $fromdate,
+                        todate          => $todate
+                    }
+                }
+            );
+        };
+
+        if ($@) {
+            $c->render(
+                json   => { success => 0, error => "Database error: $@" },
+                status => 500
+            );
+        }
     }
-});
+);
+
 # 2. Outstanding Transactions Route
-$api->get('/bank_adjustments/outstanding_transactions' => sub {
-    my $c = shift;
-    return unless my $form = $c->check_perms('bank.adjustments');
-    my $dbs = $c->dbs($c->param('client'));
-    
-    my $arap = $c->param('arap') || 'ar';
-    my $fromdate = $c->param('fromdate') || '';
-    my $todate = $c->param('todate') || '';
-    my $search_amount = $c->param('search_amount') || 0;
-    my $iban = $c->param('iban') || '';
-    
-    eval {
-        # Get outstanding AR/AP transactions
-        my (@bind, $where_clause);
-        if ($fromdate) {
-            $where_clause .= " AND aa.transdate >= ?";
-            push @bind, $fromdate;
-        }
-        if ($todate) {
-            $where_clause .= " AND aa.transdate <= ?";
-            push @bind, $todate;
-        }
-        if ($iban) {
-            $where_clause .= " AND b.iban = ?";
-            push @bind, $iban;
-        }
-        
-        my $vc = $arap eq 'ar' ? 'customer' : 'vendor';
-        my $vc_id_field = $arap eq 'ar' ? 'customer_id' : 'vendor_id';
-        
-        my $transactions_query = qq{
+$api->get(
+    '/bank_adjustments/outstanding_transactions' => sub {
+        my $c = shift;
+        return unless my $form = $c->check_perms('bank.adjustments');
+        my $dbs = $c->dbs( $c->param('client') );
+
+        my $arap          = $c->param('arap')          || 'ar';
+        my $fromdate      = $c->param('fromdate')      || '';
+        my $todate        = $c->param('todate')        || '';
+        my $search_amount = $c->param('search_amount') || 0;
+        my $iban          = $c->param('iban')          || '';
+
+        eval {
+            # Get outstanding AR/AP transactions
+            my ( @bind, $where_clause );
+            if ($fromdate) {
+                $where_clause .= " AND aa.transdate >= ?";
+                push @bind, $fromdate;
+            }
+            if ($todate) {
+                $where_clause .= " AND aa.transdate <= ?";
+                push @bind, $todate;
+            }
+            if ($iban) {
+                $where_clause .= " AND b.iban = ?";
+                push @bind, $iban;
+            }
+
+            my $vc          = $arap eq 'ar' ? 'customer'    : 'vendor';
+            my $vc_id_field = $arap eq 'ar' ? 'customer_id' : 'vendor_id';
+
+            my $transactions_query = qq{
             SELECT aa.id, aa.invnumber, aa.transdate, aa.description, aa.ordnumber, 
                    vc.name, aa.curr, aa.amount, aa.paid, aa.amount - aa.paid as due, 
                    aa.invoice, b.iban
@@ -7860,45 +7939,56 @@ $api->get('/bank_adjustments/outstanding_transactions' => sub {
             $where_clause
             ORDER BY aa.transdate
         };
-        
-        my $outstanding_transactions = $dbs->query($transactions_query, @bind)->hashes;
-        
-        # Mark transactions that match the search amount
-        for my $trans (@$outstanding_transactions) {
-            $trans->{auto_selected} = (abs($trans->{fxdue} || $trans->{due}) == $search_amount) ? 1 : 0;
-        }
-        
-        $c->render(json => {
-            success => 1,
-            data => {
-                outstanding_transactions => $outstanding_transactions,
-                arap => $arap,
-                search_amount => $search_amount,
-                iban => $iban
+
+            my $outstanding_transactions =
+              $dbs->query( $transactions_query, @bind )->hashes;
+
+            # Mark transactions that match the search amount
+            for my $trans (@$outstanding_transactions) {
+                $trans->{auto_selected} =
+                  ( abs( $trans->{fxdue} || $trans->{due} ) == $search_amount )
+                  ? 1
+                  : 0;
             }
-        });
-    };
-    
-    if ($@) {
-        $c->render(json => { success => 0, error => "Database error: $@" }, status => 500);
+
+            $c->render(
+                json => {
+                    success => 1,
+                    data    => {
+                        outstanding_transactions => $outstanding_transactions,
+                        arap                     => $arap,
+                        search_amount            => $search_amount,
+                        iban                     => $iban
+                    }
+                }
+            );
+        };
+
+        if ($@) {
+            $c->render(
+                json   => { success => 0, error => "Database error: $@" },
+                status => 500
+            );
+        }
     }
-});
+);
 
 # 3. Booking Confirmation Route
-$api->post('/bank_adjustments/book_selected' => sub {
-    my $c = shift;
-    return unless my $form = $c->check_perms('bank.adjustments');
-    my $dbs = $c->dbs($c->param('client'));
-    my $data = $c->req->json;
-    
-    my $trans_id = $data->{trans_id};
-    my $accno = $data->{accno};
-    my $gl_account_id = $data->{gl_account_id};
-    my $selected_ids = $data->{selected_ids} || '';
-    
-    eval {
-        # Get GL transaction details for display
-        my $gl_query = q{
+$api->post(
+    '/bank_adjustments/book_selected' => sub {
+        my $c = shift;
+        return unless my $form = $c->check_perms('bank.adjustments');
+        my $dbs  = $c->dbs( $c->param('client') );
+        my $data = $c->req->json;
+
+        my $trans_id      = $data->{trans_id};
+        my $accno         = $data->{accno};
+        my $gl_account_id = $data->{gl_account_id};
+        my $selected_ids  = $data->{selected_ids} || '';
+
+        eval {
+            # Get GL transaction details for display
+            my $gl_query = q{
             SELECT gl.id, gl.reference, ac.transdate, c.id as acc_id, c.accno, 
                    c.description as account_description, gl.description, ac.source, ac.memo,
                    CASE WHEN ac.amount < 0 THEN ABS(ac.amount) ELSE 0 END as debit,
@@ -7909,16 +7999,16 @@ $api->post('/bank_adjustments/book_selected' => sub {
             WHERE ac.trans_id = ?
             ORDER BY c.accno
         };
-        
-        my $gl_details = $dbs->query($gl_query, $trans_id)->hashes;
-        
-        # Get selected transactions details if any
-        my $selected_transactions = [];
-        if ($selected_ids) {
-            my @ids = split(',', $selected_ids);
-            if (@ids) {
-                my $ids_placeholder = join(',', ('?') x @ids);
-                my $selected_query = qq{
+
+            my $gl_details = $dbs->query( $gl_query, $trans_id )->hashes;
+
+            # Get selected transactions details if any
+            my $selected_transactions = [];
+            if ($selected_ids) {
+                my @ids = split( ',', $selected_ids );
+                if (@ids) {
+                    my $ids_placeholder = join( ',', ('?') x @ids );
+                    my $selected_query  = qq{
                     SELECT id, 'ar' as module, invnumber, description, ordnumber, transdate, amount, invoice
                     FROM ar WHERE id IN ($ids_placeholder)
                     UNION ALL
@@ -7926,103 +8016,111 @@ $api->post('/bank_adjustments/book_selected' => sub {
                     FROM ap WHERE id IN ($ids_placeholder)
                     ORDER BY id
                 };
-                $selected_transactions = $dbs->query($selected_query, @ids, @ids)->hashes;
+                    $selected_transactions =
+                      $dbs->query( $selected_query, @ids, @ids )->hashes;
+                }
             }
-        }
-        
-        # Get GL account details if selected
-        my $gl_account_details = {};
-        if ($gl_account_id) {
-            $gl_account_details = $dbs->query(
-                "SELECT accno, description FROM chart WHERE id = ?", 
-                $gl_account_id
-            )->hash || {};
-        }
-        
-        $c->render(json => {
-            success => 1,
-            data => {
-                gl_details => $gl_details,
-                selected_transactions => $selected_transactions,
-                gl_account_details => $gl_account_details,
-                trans_id => $trans_id,
-                accno => $accno,
-                gl_account_id => $gl_account_id,
-                selected_ids => $selected_ids
+
+            # Get GL account details if selected
+            my $gl_account_details = {};
+            if ($gl_account_id) {
+                $gl_account_details = $dbs->query(
+                    "SELECT accno, description FROM chart WHERE id = ?",
+                    $gl_account_id )->hash
+                  || {};
             }
-        });
-    };
-    
-    if ($@) {
-        $c->render(json => { success => 0, error => "Database error: $@" }, status => 500);
-    }
-});
-$api->post('/bank_adjustments/process_adjustment' => sub {
-    my $c = shift;
-    return unless my $form = $c->check_perms('bank.adjustments');
-    my $dbs = $c->dbs($c->param('client'));
-    my $data = $c->req->json;
-    
-    my $trans_id = $data->{trans_id};
-    my $gl_account_id = $data->{gl_account_id};
-    my $accno = $data->{accno};
-    my $selected_ids = $data->{selected_ids} || '';
-    
-    my $clearing_account = $c->get_defaults->{clearing};
-    my $transition_account = $c->get_defaults->{transition};
-    
-    eval {
-        # Start transaction
-        $dbs->begin;
-        
-        # Get clearing and transition account IDs
-        my $clearing_accno_id = $dbs->query(
-            "SELECT id FROM chart WHERE accno = ?", 
-            $clearing_account
-        )->list;
-        
-        my $transition_accno_id = $dbs->query(
-            "SELECT id FROM chart WHERE accno = ?", 
-            $transition_account
-        )->list;
-        
-        # Simple GL account change (no AR/AP transactions selected)
-        if ($gl_account_id && !$selected_ids) {
-            $dbs->query(
-                "UPDATE acc_trans SET chart_id = ? WHERE chart_id = ? AND trans_id = ?",
-                $gl_account_id, $clearing_accno_id, $trans_id
+
+            $c->render(
+                json => {
+                    success => 1,
+                    data    => {
+                        gl_details            => $gl_details,
+                        selected_transactions => $selected_transactions,
+                        gl_account_details    => $gl_account_details,
+                        trans_id              => $trans_id,
+                        accno                 => $accno,
+                        gl_account_id         => $gl_account_id,
+                        selected_ids          => $selected_ids
+                    }
+                }
             );
-            
-            $dbs->commit;
-            $c->render(json => { 
-                success => 1, 
-                message => 'GL account updated successfully',
-                type => 'gl_updated'
-            });
-            return;
+        };
+
+        if ($@) {
+            $c->render(
+                json   => { success => 0, error => "Database error: $@" },
+                status => 500
+            );
         }
-        
-        # Complex adjustment with AR/AP transactions
-        if ($selected_ids) {
-            my @ids = split(',', $selected_ids);
-            
-            # Get GL transaction details
-            my ($gl_date, $curr, $fxrate) = $dbs->query(
-                "SELECT transdate, curr, COALESCE(exchangerate, 1) FROM gl WHERE id = ?", 
-                $trans_id
-            )->list;
-            
-            $fxrate ||= 1; # Default to 1 if null
-            
-            # Get the adjustment amount available from GL
-            my $adjustment_available = $dbs->query(
-                "SELECT 0 - amount FROM acc_trans WHERE chart_id = ? AND trans_id = ? AND NOT COALESCE(fx_transaction, false)",
-                $clearing_accno_id, $trans_id
-            )->list || 0;
-            
-            # Get AR/AP transactions to be adjusted
-            my $ids_placeholder = join(',', ('?') x @ids);
-            my $query = qq{
+    }
+);
+$api->post(
+    '/bank_adjustments/process_adjustment' => sub {
+        my $c = shift;
+        return unless my $form = $c->check_perms('bank.adjustments');
+        my $dbs  = $c->dbs( $c->param('client') );
+        my $data = $c->req->json;
+
+        my $trans_id      = $data->{trans_id};
+        my $gl_account_id = $data->{gl_account_id};
+        my $accno         = $data->{accno};
+        my $selected_ids  = $data->{selected_ids} || '';
+
+        my $clearing_account   = $c->get_defaults->{clearing};
+        my $transition_account = $c->get_defaults->{transition};
+
+        eval {
+            # Start transaction
+            $dbs->begin;
+
+            # Get clearing and transition account IDs
+            my $clearing_accno_id =
+              $dbs->query( "SELECT id FROM chart WHERE accno = ?",
+                $clearing_account )->list;
+
+            my $transition_accno_id =
+              $dbs->query( "SELECT id FROM chart WHERE accno = ?",
+                $transition_account )->list;
+
+            # Simple GL account change (no AR/AP transactions selected)
+            if ( $gl_account_id && !$selected_ids ) {
+                $dbs->query(
+"UPDATE acc_trans SET chart_id = ? WHERE chart_id = ? AND trans_id = ?",
+                    $gl_account_id, $clearing_accno_id, $trans_id );
+
+                $dbs->commit;
+                $c->render(
+                    json => {
+                        success => 1,
+                        message => 'GL account updated successfully',
+                        type    => 'gl_updated'
+                    }
+                );
+                return;
+            }
+
+            # Complex adjustment with AR/AP transactions
+            if ($selected_ids) {
+                my @ids = split( ',', $selected_ids );
+
+                # Get GL transaction details
+                my ( $gl_date, $curr, $fxrate ) = $dbs->query(
+"SELECT transdate, curr, COALESCE(exchangerate, 1) FROM gl WHERE id = ?",
+                    $trans_id
+                )->list;
+
+                $fxrate ||= 1;    # Default to 1 if null
+
+                # Get the adjustment amount available from GL
+                my $adjustment_available = $dbs->query(
+"SELECT 0 - amount FROM acc_trans WHERE chart_id = ? AND trans_id = ? AND NOT COALESCE(fx_transaction, false)",
+                    $clearing_accno_id, $trans_id
+                  )->list
+                  || 0;
+
+                # Get AR/AP transactions to be adjusted
+                my $ids_placeholder = join( ',', ('?') x @ids );
+                my $query           = qq{
                 SELECT id, 'ar' as tbl, invnumber, transdate, amount - paid as fxdue
                 FROM ar
                 WHERE id IN ($ids_placeholder)
@@ -8035,169 +8133,214 @@ $api->post('/bank_adjustments/process_adjustment' => sub {
                 
                 ORDER BY id
             };
-            
-            my @rows = $dbs->query($query, @ids, @ids)->hashes;
-            
-            my $adjustment_total = 0;
-            my $arap; # Declare outside the loop so it's available for final GL adjustment
-            
-            # Process each selected AR/AP transaction
-            for my $row (@rows) {
-                $arap = $row->{tbl};
-                my $ml = ($arap eq 'ap') ? 1 : -1; # Multiplier for AP vs AR
-                my $ARAP = uc($arap);
-                
-                # Determine payment date (later of GL date or AR/AP date)
-                my $arap_date = $row->{transdate} || '';
-                my $payment_date;
-                
-                # Compare dates properly using string comparison for YYYY-MM-DD format
-                if (!$gl_date || !$arap_date) {
-                    $payment_date = $gl_date || $arap_date || 'CURRENT_DATE';
-                } elsif ($gl_date ge $arap_date) {
-                    $payment_date = $gl_date;  # gl_date is later or equal
-                } else {
-                    $payment_date = $arap_date; # arap_date is later
-                }
-                
-                # Calculate amount to be adjusted
-                my $amount_to_be_adjusted;
-                if ($adjustment_available * $ml < $row->{fxdue}) {
-                    $amount_to_be_adjusted = $adjustment_available;
-                    $adjustment_available = 0;
-                } else {
-                    $amount_to_be_adjusted = $row->{fxdue};
-                    $adjustment_available -= $row->{fxdue};
-                }
-                
-                # Calculate FX adjustment if needed
-                my $fx_amount_to_be_adjusted = $amount_to_be_adjusted * $fxrate - $amount_to_be_adjusted;
-                my $payment_id = undef;
-                
-                if ($fxrate != 1) {
-                    $payment_id = $dbs->query("SELECT COALESCE(MAX(id), 0) + 1 FROM payment")->list || 1;
-                }
-                
-                # Get the AR/AP account ID
-                my $arap_accno_id = $dbs->query(
-                    "SELECT chart_id FROM acc_trans WHERE trans_id = ? AND chart_id IN (SELECT id FROM chart WHERE link = ?) LIMIT 1",
-                    $row->{id}, "${ARAP}"
-                )->list;
-                
-                if ($arap eq 'ap') {
-                    # AP adjustments
-                    $dbs->query(
-                        "INSERT INTO acc_trans(trans_id, chart_id, transdate, amount, id) VALUES (?, ?, ?, ?, ?)",
-                        $row->{id}, $transition_accno_id, $payment_date, $amount_to_be_adjusted, $payment_id
-                    );
-                    
-                    if ($fx_amount_to_be_adjusted != 0) {
-                        $dbs->query(
-                            "INSERT INTO acc_trans(trans_id, chart_id, fx_transaction, transdate, amount) VALUES (?, ?, ?, ?, ?)",
-                            $row->{id}, $transition_accno_id, 't', $payment_date, $fx_amount_to_be_adjusted
-                        );
-                    }
-                    
-                    $dbs->query(
-                        "INSERT INTO acc_trans(trans_id, chart_id, transdate, amount) VALUES (?, ?, ?, ?)",
-                        $row->{id}, $arap_accno_id, $payment_date, 
-                        ($row->{fxdue} * -1) + (($row->{fxdue} * $fxrate - $row->{fxdue}) * -1)
-                    );
-                } else {
-                    # AR adjustments
-                    $dbs->query(
-                        "INSERT INTO acc_trans(trans_id, chart_id, transdate, amount, id) VALUES (?, ?, ?, ?, ?)",
-                        $row->{id}, $transition_accno_id, $payment_date, $amount_to_be_adjusted * -1, $payment_id
-                    );
-                    
-                    if ($fx_amount_to_be_adjusted != 0) {
-                        $dbs->query(
-                            "INSERT INTO acc_trans(trans_id, chart_id, fx_transaction, transdate, amount) VALUES (?, ?, ?, ?, ?)",
-                            $row->{id}, $transition_accno_id, 't', $payment_date, $fx_amount_to_be_adjusted * -1
-                        );
-                    }
-                    
-                    $dbs->query(
-                        "INSERT INTO acc_trans(trans_id, chart_id, transdate, amount) VALUES (?, ?, ?, ?)",
-                        $row->{id}, $arap_accno_id, $payment_date, 
-                        $row->{fxdue} + ($row->{fxdue} * $fxrate - $row->{fxdue})
-                    );
-                }
-                
-                # Insert payment record if payment_id was generated
-                if ($payment_id) {
-                    $dbs->query(
-                        "INSERT INTO payment (id, trans_id, exchangerate) VALUES (?, ?, ?)",
-                        $payment_id, $row->{id}, $fxrate
-                    );
-                }
-                
-                # Update AR/AP paid amounts and payment date
-                $dbs->query(
-                    "UPDATE $arap SET paid = paid + ?, datepaid = ? WHERE id = ?",
-                    $amount_to_be_adjusted + $fx_amount_to_be_adjusted,
-                    $payment_date, $row->{id}
-                );
-                
-                $adjustment_total += $amount_to_be_adjusted;
-            }
-            
-           
-        # Update GL transaction - move clearing account amount to transition account
-        # Apply AP/AR direction logic to adjustment total
-        if ($arap eq 'ap') {
-            $adjustment_total *= -1;
-        }
 
-        if ($adjustment_total != 0) {
-            # Get the current clearing account amount
-            my $clearing_amount = $dbs->query(
-                "SELECT amount FROM acc_trans WHERE chart_id = ? AND trans_id = ? AND NOT COALESCE(fx_transaction, false)",
-                $clearing_accno_id, $trans_id
-            )->list;
-            
-            if ($adjustment_total == $clearing_amount) {
-                # Full adjustment - simply change the clearing account to transition account
-                $dbs->query(
-                    "UPDATE acc_trans SET chart_id = ? WHERE chart_id = ? AND trans_id = ? AND NOT COALESCE(fx_transaction, false)",
-                    $transition_accno_id, $clearing_accno_id, $trans_id
-                );
-            } else {
-                # Partial adjustment - reduce clearing and add transition
-                $dbs->query(
-                    "UPDATE acc_trans SET amount = amount - ? WHERE chart_id = ? AND trans_id = ? AND NOT COALESCE(fx_transaction, false)",
-                    $adjustment_total, $clearing_accno_id, $trans_id
-                );
-                
-                $dbs->query(
-                    "INSERT INTO acc_trans (trans_id, chart_id, amount, transdate) VALUES (?, ?, ?, ?)",
-                    $trans_id, $transition_accno_id, $adjustment_total, $gl_date
+                my @rows = $dbs->query( $query, @ids, @ids )->hashes;
+
+                my $adjustment_total = 0;
+                my $arap
+                  ; # Declare outside the loop so it's available for final GL adjustment
+
+                # Process each selected AR/AP transaction
+                for my $row (@rows) {
+                    $arap = $row->{tbl};
+                    my $ml =
+                      ( $arap eq 'ap' ) ? 1 : -1;    # Multiplier for AP vs AR
+                    my $ARAP = uc($arap);
+
+                    # Determine payment date (later of GL date or AR/AP date)
+                    my $arap_date = $row->{transdate} || '';
+                    my $payment_date;
+
+          # Compare dates properly using string comparison for YYYY-MM-DD format
+                    if ( !$gl_date || !$arap_date ) {
+                        $payment_date =
+                          $gl_date || $arap_date || 'CURRENT_DATE';
+                    }
+                    elsif ( $gl_date ge $arap_date ) {
+                        $payment_date = $gl_date;    # gl_date is later or equal
+                    }
+                    else {
+                        $payment_date = $arap_date;    # arap_date is later
+                    }
+
+                    # Calculate amount to be adjusted
+                    my $amount_to_be_adjusted;
+                    if ( $adjustment_available * $ml < $row->{fxdue} ) {
+                        $amount_to_be_adjusted = $adjustment_available;
+                        $adjustment_available  = 0;
+                    }
+                    else {
+                        $amount_to_be_adjusted = $row->{fxdue};
+                        $adjustment_available -= $row->{fxdue};
+                    }
+
+                    # Calculate FX adjustment if needed
+                    my $fx_amount_to_be_adjusted =
+                      $amount_to_be_adjusted * $fxrate - $amount_to_be_adjusted;
+                    my $payment_id = undef;
+
+                    if ( $fxrate != 1 ) {
+                        $payment_id = $dbs->query(
+                            "SELECT COALESCE(MAX(id), 0) + 1 FROM payment")
+                          ->list || 1;
+                    }
+
+                    # Get the AR/AP account ID
+                    my $arap_accno_id = $dbs->query(
+"SELECT chart_id FROM acc_trans WHERE trans_id = ? AND chart_id IN (SELECT id FROM chart WHERE link = ?) LIMIT 1",
+                        $row->{id}, "${ARAP}"
+                    )->list;
+
+                    if ( $arap eq 'ap' ) {
+
+                        # AP adjustments
+                        $dbs->query(
+"INSERT INTO acc_trans(trans_id, chart_id, transdate, amount, id) VALUES (?, ?, ?, ?, ?)",
+                            $row->{id},    $transition_accno_id,
+                            $payment_date, $amount_to_be_adjusted,
+                            $payment_id
+                        );
+
+                        if ( $fx_amount_to_be_adjusted != 0 ) {
+                            $dbs->query(
+"INSERT INTO acc_trans(trans_id, chart_id, fx_transaction, transdate, amount) VALUES (?, ?, ?, ?, ?)",
+                                $row->{id},
+                                $transition_accno_id,
+                                't',
+                                $payment_date,
+                                $fx_amount_to_be_adjusted
+                            );
+                        }
+
+                        $dbs->query(
+"INSERT INTO acc_trans(trans_id, chart_id, transdate, amount) VALUES (?, ?, ?, ?)",
+                            $row->{id},
+                            $arap_accno_id,
+                            $payment_date,
+                            ( $row->{fxdue} * -1 ) + (
+                                ( $row->{fxdue} * $fxrate - $row->{fxdue} ) * -1
+                            )
+                        );
+                    }
+                    else {
+                        # AR adjustments
+                        $dbs->query(
+"INSERT INTO acc_trans(trans_id, chart_id, transdate, amount, id) VALUES (?, ?, ?, ?, ?)",
+                            $row->{id},
+                            $transition_accno_id,
+                            $payment_date,
+                            $amount_to_be_adjusted * -1,
+                            $payment_id
+                        );
+
+                        if ( $fx_amount_to_be_adjusted != 0 ) {
+                            $dbs->query(
+"INSERT INTO acc_trans(trans_id, chart_id, fx_transaction, transdate, amount) VALUES (?, ?, ?, ?, ?)",
+                                $row->{id},
+                                $transition_accno_id,
+                                't',
+                                $payment_date,
+                                $fx_amount_to_be_adjusted * -1
+                            );
+                        }
+
+                        $dbs->query(
+"INSERT INTO acc_trans(trans_id, chart_id, transdate, amount) VALUES (?, ?, ?, ?)",
+                            $row->{id},
+                            $arap_accno_id,
+                            $payment_date,
+                            $row->{fxdue} +
+                              ( $row->{fxdue} * $fxrate - $row->{fxdue} )
+                        );
+                    }
+
+                    # Insert payment record if payment_id was generated
+                    if ($payment_id) {
+                        $dbs->query(
+"INSERT INTO payment (id, trans_id, exchangerate) VALUES (?, ?, ?)",
+                            $payment_id, $row->{id}, $fxrate );
+                    }
+
+                    # Update AR/AP paid amounts and payment date
+                    $dbs->query(
+"UPDATE $arap SET paid = paid + ?, datepaid = ? WHERE id = ?",
+                        $amount_to_be_adjusted + $fx_amount_to_be_adjusted,
+                        $payment_date,
+                        $row->{id}
+                    );
+
+                    $adjustment_total += $amount_to_be_adjusted;
+                }
+
+    # Update GL transaction - move clearing account amount to transition account
+    # Apply AP/AR direction logic to adjustment total
+                if ( $arap eq 'ap' ) {
+                    $adjustment_total *= -1;
+                }
+
+                if ( $adjustment_total != 0 ) {
+
+                    # Get the current clearing account amount
+                    my $clearing_amount = $dbs->query(
+"SELECT amount FROM acc_trans WHERE chart_id = ? AND trans_id = ? AND NOT COALESCE(fx_transaction, false)",
+                        $clearing_accno_id, $trans_id
+                    )->list;
+
+                    if ( $adjustment_total == $clearing_amount ) {
+
+    # Full adjustment - simply change the clearing account to transition account
+                        $dbs->query(
+"UPDATE acc_trans SET chart_id = ? WHERE chart_id = ? AND trans_id = ? AND NOT COALESCE(fx_transaction, false)",
+                            $transition_accno_id, $clearing_accno_id,
+                            $trans_id );
+                    }
+                    else {
+                       # Partial adjustment - reduce clearing and add transition
+                        $dbs->query(
+"UPDATE acc_trans SET amount = amount - ? WHERE chart_id = ? AND trans_id = ? AND NOT COALESCE(fx_transaction, false)",
+                            $adjustment_total, $clearing_accno_id, $trans_id );
+
+                        $dbs->query(
+"INSERT INTO acc_trans (trans_id, chart_id, amount, transdate) VALUES (?, ?, ?, ?)",
+                            $trans_id, $transition_accno_id, $adjustment_total,
+                            $gl_date );
+                    }
+
+                    # Add FX transaction for transition account if needed
+                    my $fx_adjustment =
+                      $adjustment_total * $fxrate - $adjustment_total;
+                    if ( $fx_adjustment != 0 ) {
+                        $dbs->query(
+"INSERT INTO acc_trans (trans_id, chart_id, amount, transdate, fx_transaction) VALUES (?, ?, ?, ?, ?)",
+                            $trans_id,
+                            $transition_accno_id,
+                            $fx_adjustment,
+                            $gl_date,
+                            't'
+                        );
+                    }
+                }
+                $dbs->commit;
+                $c->render(
+                    json => {
+                        success => 1,
+                        message => 'Adjustment processed successfully',
+                        type    => 'adjustment_complete'
+                    }
                 );
             }
-            
-            # Add FX transaction for transition account if needed
-            my $fx_adjustment = $adjustment_total * $fxrate - $adjustment_total;
-            if ($fx_adjustment != 0) {
-                $dbs->query(
-                    "INSERT INTO acc_trans (trans_id, chart_id, amount, transdate, fx_transaction) VALUES (?, ?, ?, ?, ?)",
-                    $trans_id, $transition_accno_id, $fx_adjustment, $gl_date, 't'
-                );
-            }
-        }          
-            $dbs->commit;
-            $c->render(json => { 
-                success => 1, 
-                message => 'Adjustment processed successfully',
-                type => 'adjustment_complete'
-            });
+        };
+
+        if ($@) {
+            $dbs->rollback;
+            $c->render(
+                json =>
+                  { success => 0, error => "Error processing adjustment: $@" },
+                status => 500
+            );
         }
-    };
-    
-    if ($@) {
-        $dbs->rollback;
-        $c->render(json => { success => 0, error => "Error processing adjustment: $@" }, status => 500);
     }
-});
+);
 ###############################
 ####                       ####
 ####        Reports        ####
@@ -8227,8 +8370,8 @@ $api->get(
     '/reports/transactions' => sub {
         my $c = shift;
         return
-          unless my $form =( $c->check_perms('reports.trial')
-            || $c->check_perms('reports.income') );
+          unless my $form = ( $c->check_perms('reports.trial')
+              || $c->check_perms('reports.income') );
         my $client = $c->param('client');
         my $dbs    = $c->dbs($client);
 
@@ -9183,855 +9326,6 @@ $api->get(
     }
 );
 
-###############################
-####                       ####
-####    Invoice Loading    ####
-####                       ####
-###############################
-my $openai_endpoint = "https://api.openai.com/v1/chat/completions";
-my $openai_api_key  = '';
-
-$api->post(
-    '/upload_invoice' => sub {
-        my $c = shift;
-        warn "Starting upload_invoice handler";
-
-        my $client = $c->param('client');
-        my $dbs    = $c->dbs($client);
-
-        # Get AP accounts
-        my @accounts =
-          $dbs->query("SELECT * FROM chart WHERE link ILIKE '%AP_amount%'")
-          ->hashes;
-        my $accounts_string =
-          join( ", ", map { "$_->{accno}: $_->{description}" } @accounts );
-        warn($accounts_string);
-
-        my $ua = Mojo::UserAgent->new;
-
-        # Get the single uploaded file
-        my $file = $c->req->upload('files');
-        unless ($file) {
-            warn "No file uploaded";
-            return $c->render(
-                json   => { success => \0, message => 'No file uploaded.' },
-                status => 400
-            );
-        }
-
-        # Process filename
-        my $original_filename = $file->filename;
-        my $content_type      = $file->headers->content_type;
-        my $filename          = lc($original_filename);
-        $filename =~ s/\s+/_/g;               # Replace spaces with underscores
-        $filename =~ s/[^a-zA-Z0-9._-]//g;    # Remove special characters
-
-        # Save and process file
-        my $upload_path = $c->app->home->rel_file("public/$filename");
-        $file->move_to($upload_path);
-        my $share_link = $c->upload_to_nextcloud( $upload_path, $filename );
-        warn "Saved $filename to $upload_path";
-
-        # Convert to base64
-        open my $fh, '<', $upload_path
-          or die "Could not open file '$upload_path': $!";
-        binmode $fh;
-        my $image_data = do { local $/; <$fh> };
-        close $fh;
-        my $base64_image = encode_base64($image_data);
-        my $data_uri     = "data:image/png;base64,$base64_image";
-
-        my $system_prompt =
-"You are an AI assistant specialized in analyzing invoices. Your task is to extract key information from the provided invoice and return it in a structured JSON format. Use the following chart of accounts to map line items , make sure these are accurate: $accounts_string . Make sure your response is UTF-8 ENCODED";
-
-        my $user_prompt =
-"Please analyze this invoice and provide the following information in JSON format:
-            - vendor: information about the vendor
-                - name: Name of vendor
-                - phonenumber: Phonenumber of vendor
-                - email: vendor email
-                - iban: vendor IBAN
-                - website: vendor website
-                - address1: vendor address1
-                - address2: vendor address2
-                - city: vendor city
-                - country: vendor country
-                - postal_code: vendor postal code
-            - invDate: Invoice date (format should be yyy-mm-dd)
-            - lineitems: An array of objects, each containing:
-              - accno: chart accno this item should be logged in according to our accounts array
-              - description: Item description
-              - price: Item price
-            - subtotal: Subtotal amount
-            - total: Total amount
-            - taxes: An array of objects, each containing:
-              - rate: Tax rate
-              - amount: Tax amount
-
-            Ensure all numeric values are represented as numbers, not strings. If any information is not available, use null for that field.";
-
-        # Make API request
-        my $gpt_tx = $ua->post(
-            $openai_endpoint => {
-                'Authorization' => "Bearer $openai_api_key",
-                'Content-Type'  => 'application/json'
-            } => json => {
-                model    => "gpt-4o",
-                messages => [
-                    {
-                        role    => "system",
-                        content => $system_prompt
-                    },
-                    {
-                        role    => "user",
-                        content => [
-                            {
-                                type => "text",
-                                text => $user_prompt
-                            },
-                            {
-                                type      => "image_url",
-                                image_url => {
-                                    url => $data_uri
-                                }
-                            }
-                        ]
-                    }
-                ],
-                max_tokens      => 4096,
-                response_format => { type => "json_object" }
-            }
-        );
-
-        if ( my $err = $gpt_tx->error ) {
-            warn "Analysis failed: " . ( $err->{message} || $err->{code} );
-            return $c->render(
-                json => {
-                    success => \0,
-                    error   => "Analysis failed: "
-                      . ( $err->{message} || $err->{code} )
-                },
-                status => 500
-            );
-        }
-
-        # Process response
-        my $raw_body     = $gpt_tx->res->body;
-        my $decoded_body = Encode::encode_utf8($raw_body);
-        my $analysis     = decode_json($decoded_body);
-
-        eval {
-            my $text = $analysis->{choices}[0]{message}{content};
-            $text =~ s/```json\n//;    # Remove any JSON code block markers
-            $text =~ s/\n```$//;
-
-            my $invoice_data = decode_json($text);
-            my $vendor_id = &loadVendor( $c, $invoice_data->{vendor}, $client );
-            $invoice_data->{vendor_id} = $vendor_id;
-
-            return $c->render( json => $invoice_data );
-        };
-
-        if ($@) {
-            warn "Failed to process GPT response: $@";
-            return $c->render(
-                json => {
-                    success => \0,
-                    error   => "Failed to process GPT response: $@"
-                },
-                status => 500
-            );
-        }
-    }
-);
-
-sub loadVendor {
-    my ( $c, $vendorData, $client ) = @_;
-
-    my $dbs = $c->dbs($client);
-
-    # Search for an existing vendor by name, phone, or email
-    my $vendor = $dbs->query(
-"SELECT * FROM vendor WHERE name ILIKE '%' || ? || '%' OR phone ILIKE '%' || ? || '%' OR email = ?",
-        $vendorData->{name}, $vendorData->{phone}, $vendorData->{email} )->hash;
-
-    # If vendor doesn't exist, create a new one
-    if ( !$vendor ) {
-        warn("VENDOR NOT FOUND");
-        my $form = new Form;
-        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
-        $form->{db}               = 'vendor';
-        $form->{name}             = $vendorData->{name}        || '';
-        $form->{phone}            = $vendorData->{phonenumber} || '';
-        $form->{email}            = $vendorData->{email}       || '';
-        $form->{website}          = $vendorData->{website}     || '';
-        $form->{address1}         = $vendorData->{address1}    || '';
-        $form->{address2}         = $vendorData->{address2}    || '';
-        $form->{city}             = $vendorData->{city}        || '';
-        $form->{state}            = $vendorData->{state}       || '';
-        $form->{zipcode}          = $vendorData->{postal_code} || '';
-        $form->{country}          = $vendorData->{country}     || '';
-        $form->{iban}             = $vendorData->{iban}        || '';
-        CT->save( $c->slconfig, $form );
-    }
-
-    $vendor = $dbs->query(
-"SELECT * FROM vendor WHERE name ILIKE '%' || ? || '%' OR phone ILIKE '%' || ? || '%' OR email = ?",
-        $vendorData->{name}, $vendorData->{phone}, $vendorData->{email} )->hash;
-
-    # Return the completed form object
-    return $vendor->{id};
-}
-
-# Helper to upload a file to Nextcloud and create a share link
-helper upload_to_nextcloud => sub {
-    my ( $c, $local_file_path, $remote_filename ) = @_;
-
-    my $nextcloud_url  = '';
-    my $nextcloud_user = '';
-    my $nextcloud_pw   = '';
-
-    # Initialize Mojo::UserAgent for making HTTP requests
-    my $ua = Mojo::UserAgent->new;
-
-    # WebDAV URL for file upload
-    my $remote_file_url = $nextcloud_url . $remote_filename;
-
-    # Read the file content as binary
-    open my $fh, '<', $local_file_path
-      or do {
-        warn "Could not open file '$local_file_path': $!";
-        return undef;
-      };
-    binmode $fh;
-    my $file_content = do { local $/; <$fh> };
-    close $fh;
-
-    # Determine the Content-Type based on the file extension
-    my $mime_type = 'application/octet-stream';    # Default MIME type
-    if ( $remote_filename =~ /\.png$/i ) {
-        $mime_type = 'image/png';
-    }
-    elsif ( $remote_filename =~ /\.jpg$/i || $remote_filename =~ /\.jpeg$/i ) {
-        $mime_type = 'image/jpeg';
-    }
-
-    # Add more MIME types as needed
-
-    # Step 1: Upload the file to Nextcloud using PUT with raw binary data
-    my $upload_tx = $ua->put(
-        $remote_file_url => {
-            Authorization => 'Basic '
-              . MIME::Base64::encode( "$nextcloud_user:$nextcloud_pw", '' ),
-            'Content-Type'   => $mime_type,
-            'Content-Length' => length($file_content),
-        } => $file_content
-    );
-
-    # Check if the upload was successful
-    if ( !$upload_tx->result->is_success ) {
-        warn( "File upload failed: " . $upload_tx->result->message );
-        return undef;
-    }
-    warn("File uploaded to Nextcloud at: $remote_file_url");
-
-    # Step 2: Create a shareable link
-    my $share_api_url = '';
-    my $share_tx      = $ua->post(
-        $share_api_url => {
-            Authorization => 'Basic '
-              . MIME::Base64::encode( "$nextcloud_user:$nextcloud_pw", '' ),
-            'OCS-APIREQUEST' => 'true',
-            'Content-Type'   => 'application/x-www-form-urlencoded',
-        } => form => {
-            path        => '/' . $remote_filename,
-            shareType   => 3,                        # Public link
-            permissions => 1,                        # Read-only
-        }
-    );
-
-    # Check if the share link was successfully created
-    if ( $share_tx->result->is_success ) {
-
-        # Parse the XML response from Nextcloud
-        use XML::Simple;
-        my $xml = XML::Simple::XMLin(
-            $share_tx->result->body,
-            ForceArray => 0,
-            KeyAttr    => []
-        );
-        if ( $xml->{ocs}->{meta}->{status} eq 'ok' ) {
-            my $share_url = $xml->{ocs}->{data}->{url};
-            warn("Share link created: $share_url");
-            return $share_url;    # Return the share URL for further use
-        }
-        else {
-            warn( "Failed to create share link: "
-                  . $xml->{ocs}->{meta}->{status} );
-            return undef;
-        }
-    }
-    else {
-        warn( "Failed to create share link: " . $share_tx->result->message );
-        return undef;
-    }
-};
-$api->get(
-    '/get_files' => { id => undef } => sub {
-        my $c = shift;
-
-        # Nextcloud configuration
-        my $nextcloud_url  = '';
-        my $nextcloud_user = '';
-        my $nextcloud_pw   = '';
-
-        # Initialize Mojo::UserAgent for making HTTP requests
-        my $ua = Mojo::UserAgent->new;
-
-        # XML data for the PROPFIND request body to get file properties
-        my $propfind_xml = <<'XML';
-<?xml version="1.0" encoding="UTF-8" ?>
-<d:propfind xmlns:d="DAV:">
-  <d:prop>
-    <d:displayname />
-    <d:getcontentlength />
-    <d:getlastmodified />
-    <d:resourcetype />
-  </d:prop>
-</d:propfind>
-XML
-
-        # Build the PROPFIND transaction
-        my $tx = $ua->build_tx(
-            'PROPFIND' => $nextcloud_url => {
-                Authorization => 'Basic '
-                  . MIME::Base64::encode( "$nextcloud_user:$nextcloud_pw", '' ),
-                Depth => '1',    # Depth: 1 to list only immediate files/folders
-                'Content-Type' => 'application/xml',
-            },
-            $propfind_xml
-        );
-
-        # Send the request
-        my $res = $ua->start($tx)->result;
-
-        # Check if the request was successful
-        if ( !$res->is_success ) {
-            $c->render(
-                json   => { error => "Failed to list files: " . $res->message },
-                status => 500
-            );
-            return;
-        }
-
-        # Parse the XML response
-        my $xml = XML::Simple::XMLin(
-            $res->body,
-            ForceArray => [ 'd:response', 'd:propstat' ],
-            KeyAttr    => []
-        );
-
-        # Extract file information from the XML
-        my @files;
-        for my $response ( @{ $xml->{'d:response'} } ) {
-            my $filename;
-            my $size = 0;
-            my $modified;
-            my $is_dir = 0;
-
-         # Iterate through each d:propstat entry to find the relevant properties
-            for my $propstat ( @{ $response->{'d:propstat'} } ) {
-
-                # Only process if the status is "200 OK"
-                next
-                  unless $propstat->{'d:status'}
-                  && $propstat->{'d:status'} eq 'HTTP/1.1 200 OK';
-
-                my $prop = $propstat->{'d:prop'};
-                $filename = $prop->{'d:displayname'}
-                  if $prop->{'d:displayname'};
-                $size     = $prop->{'d:getcontentlength'} // 0;
-                $modified = $prop->{'d:getlastmodified'}
-                  if $prop->{'d:getlastmodified'};
-                $is_dir =
-                  exists $prop->{'d:resourcetype'}{'d:collection'} ? 1 : 0;
-            }
-
-            # Skip entries that don't have a filename
-            next unless $filename;
-
-            # Append file info to the list
-            push @files,
-              {
-                filename => $filename,
-                size     => $size,
-                modified => $modified,
-                is_dir   => $is_dir,
-              };
-        }
-
-        # Render the file list as a JSON response
-        $c->render( json => { files => \@files } );
-    }
-);
-
-$api->get(
-    '/process_files' => sub {
-        my $c      = shift;
-        my $client = $c->param('client');
-        my $dbs    = $c->dbs($client);
-
-        # Nextcloud configuration
-        my $nextcloud_url  = "";
-        my $nextcloud_user = '';
-        my $nextcloud_pw   = '';
-
-        # Initialize Mojo::UserAgent for making HTTP requests
-        my $ua = Mojo::UserAgent->new;
-
-        # XML data for the PROPFIND request body to get file properties
-        my $propfind_xml = <<'XML';
-<?xml version="1.0" encoding="UTF-8" ?>
-<d:propfind xmlns:d="DAV:">
-  <d:prop>
-    <d:displayname />
-    <d:getcontentlength />
-    <d:getlastmodified />
-    <d:resourcetype />
-  </d:prop>
-</d:propfind>
-XML
-
-        # Retrieve all processed filenames from the database
-        my $existing_files_rs = $dbs->query('SELECT filename FROM files');
-        my %processed_files =
-          map { $_->{filename} => 1 } @{ $existing_files_rs->hashes };
-
-        # Build the PROPFIND transaction
-        my $tx = $ua->build_tx(
-            'PROPFIND' => $nextcloud_url => {
-                Authorization => 'Basic '
-                  . MIME::Base64::encode( "$nextcloud_user:$nextcloud_pw", '' ),
-                Depth => '1',    # Depth: 1 to list only immediate files/folders
-                'Content-Type' => 'application/xml',
-            },
-            $propfind_xml
-        );
-
-        # Send the request
-        my $res = $ua->start($tx)->result;
-
-        # Check if the request was successful
-        if ( !$res->is_success ) {
-            $c->render(
-                json   => { error => "Failed to list files: " . $res->message },
-                status => 500
-            );
-            return;
-        }
-
-        # Parse the XML response
-        my $xml = XML::Simple::XMLin(
-            $res->body,
-            ForceArray => [ 'd:response', 'd:propstat' ],
-            KeyAttr    => []
-        );
-
-        # Extract file information from the XML
-        my @files;
-        for my $response ( @{ $xml->{'d:response'} } ) {
-            my $filename;
-            my $size = 0;
-            my $modified;
-            my $is_dir = 0;
-
-         # Iterate through each d:propstat entry to find the relevant properties
-            for my $propstat ( @{ $response->{'d:propstat'} } ) {
-
-                # Only process if the status is "200 OK"
-                next
-                  unless $propstat->{'d:status'}
-                  && $propstat->{'d:status'} eq 'HTTP/1.1 200 OK';
-
-                my $prop = $propstat->{'d:prop'};
-                $filename = $prop->{'d:displayname'}
-                  if $prop->{'d:displayname'};
-                $size     = $prop->{'d:getcontentlength'} // 0;
-                $modified = $prop->{'d:getlastmodified'}
-                  if $prop->{'d:getlastmodified'};
-                $is_dir =
-                  exists $prop->{'d:resourcetype'}{'d:collection'} ? 1 : 0;
-            }
-
-            next unless $filename && !$is_dir;
-
-            # Append file info to the list
-            push @files,
-              {
-                filename => $filename,
-                size     => $size,
-                modified => $modified,
-                is_dir   => $is_dir,
-              };
-        }
-
-        # Initialize an array to hold files processed
-        my @processed_files;
-
-        # Iterate over each file and download it if it's new
-        for my $file (@files) {
-
-            # Skip the file if it has already been processed
-            if ( exists $processed_files{ $file->{filename} } ) {
-                push @processed_files,
-                  {
-                    filename => $file->{filename},
-                    status   => 'Skipped (already processed)',
-                  };
-                next;
-            }
-
-            my $file_url = $nextcloud_url . $file->{filename};
-            my $file_tx  = $ua->build_tx(
-                'GET' => $file_url => {
-                    Authorization => 'Basic '
-                      . MIME::Base64::encode(
-                        "$nextcloud_user:$nextcloud_pw", ''
-                      ),
-                }
-            );
-
-            my $file_res = $ua->start($file_tx)->result;
-
-            if ( $file_res->is_success ) {
-                my $file_content = $file_res->body;
-
-                my $upload_path =
-                  $c->app->home->rel_file("public/$file->{filename}");
-
-                # Ensure the public directory exists
-                my $public_dir = $c->app->home->rel_file("public");
-                unless ( -d $public_dir ) {
-                    mkdir $public_dir or do {
-                        push @processed_files,
-                          {
-                            filename => $file->{filename},
-                            status   => 'Failed to create public directory',
-                            error    => $!,
-                          };
-                        next;
-                    };
-                }
-
-                my $path = File::Spec->rel2abs($upload_path);
-                open my $fh, '>', $path
-                  or do {
-                    push @processed_files,
-                      {
-                        filename => $file->{filename},
-                        status   => "Cannot open '$path' for writing: $!",
-                      };
-                    next;
-                  };
-                binmode $fh;
-                print $fh $file_content;
-                close $fh;
-
-                # Convert modified time to epoch
-                my $modified_epoch = Time::Piece->strptime( $file->{modified},
-                    '%a, %d %b %Y %H:%M:%S %Z' )->epoch;
-
-                # Convert epoch to date/time string
-                my $timestamp_str = strftime( "%Y-%m-%d %H:%M:%S",
-                    localtime( $modified_epoch || time ) );
-                my $file_id;
-
-                # Insert file metadata into the database
-                eval {
-                    $file_id = $dbs->query(
-'INSERT INTO files (filename, timestamp) VALUES (?, ?) RETURNING id',
-                        $file->{filename}, $timestamp_str
-                    )->hash->{id};
-                };
-                if ($@) {
-                    push @processed_files,
-                      {
-                        filename => $file->{filename},
-                        status   => 'Failed to insert into database',
-                        error    => $@,
-                      };
-                    next;
-                }
-
-                # Step 2: Create a shareable link
-                my $share_api_url = '';
-                my $share_tx      = $ua->post(
-                    $share_api_url => {
-                        Authorization => 'Basic '
-                          . MIME::Base64::encode(
-                            "$nextcloud_user:$nextcloud_pw", ''
-                          ),
-                        'OCS-APIREQUEST' => 'true',
-                        'Content-Type'   => 'application/x-www-form-urlencoded',
-                    } => form => {
-                        path        => '//' . $file->{filename},
-                        shareType   => 3,                          # user link
-                        permissions => 1,                          # Read-only
-
-                    }
-                );
-                warn( Dumper $share_tx );
-
-                # Check if the share link was successfully created
-                my $share_url;
-                if ($share_tx) {
-                    my $xml = XML::Simple::XMLin(
-                        $share_tx->res->body,
-                        ForceArray => 0,
-                        KeyAttr    => []
-                    );
-
-                    if ( $xml->{meta}->{status} eq 'ok' ) {
-                        $share_url = $xml->{data}->{url};
-                        warn("Share link created: $share_url");
-                    }
-                    else {
-                        warn( "Failed to create share link: "
-                              . $xml->{meta}->{status} );
-                    }
-                }
-                else {
-                    warn("IS NOT SUCCESS");
-                }
-
-                my $invoice_data = $c->ai_invoice( $file->{filename} );
-
-                my $created_inv = &create_invoice( $c, $invoice_data, $client );
-                $dbs->query(
-"UPDATE files SET reference = ?, module = ?, processed = ?, link = ? WHERE id = ?",
-                    $created_inv->{invnumber}, "ap", 1, $share_url, $file_id
-                );
-
-                push @processed_files,
-                  {
-                    filename => $file->{filename},
-                    status   => 'Downloaded and stored successfully',
-                  };
-            }
-            else {
-                push @processed_files,
-                  {
-                    filename => $file->{filename},
-                    status   => 'Failed to download',
-                    error    => $file_res->message,
-                  };
-            }
-        }
-
-        # Render the status of processed files
-        $c->render( json => { processed_files => \@processed_files } );
-    }
-);
-
-# Define the ai_invoice helper
-helper ai_invoice => sub {
-    my ( $c, $filename ) = @_;
-
-    my $dbs = $c->dbs("");
-    my $ua  = Mojo::UserAgent->new;
-
-    # Get AP accounts
-    my @accounts =
-      $dbs->query("SELECT * FROM chart WHERE link ILIKE '%AP_amount%'")->hashes;
-    my $accounts_string =
-      join( ", ", map { "$_->{accno}: $_->{description}" } @accounts );
-    $c->app->log->debug("Accounts: $accounts_string");
-
-    # Locate the file in the public directory
-    my $upload_path = File::Spec->catfile( $c->app->home, "public", $filename );
-    unless ( -e $upload_path ) {
-        $c->app->log->warn("File '$filename' not found in public directory");
-        return {
-            success => \0,
-            message => 'File not found.'
-        };
-    }
-
-    $c->app->log->debug("Processing file: $upload_path");
-
-    # Convert to base64
-    open my $fh, '<', $upload_path or do {
-        my $error = "Could not open file '$upload_path': $!";
-        $c->app->log->warn($error);
-        return {
-            success => \0,
-            message => "Could not open file: $!"
-        };
-    };
-    binmode $fh;
-    my $image_data = do { local $/; <$fh> };
-    close $fh;
-    my $base64_image = encode_base64( $image_data, '' );    # Remove line breaks
-    my $data_uri     = "data:image/png;base64,$base64_image";
-
-    # Prepare GPT-4 Vision request
-    my $system_prompt =
-"You are an AI assistant specialized in analyzing invoices. Your task is to extract key information from the provided invoice and return it in a structured JSON format. Use the following chart of accounts to map line items , make sure these are accurate: $accounts_string . Make sure your response is UTF-8 ENCODED";
-
-    my $user_prompt =
-"Please analyze this invoice and provide the following information in JSON format:
-            - vendor: information about the vendor
-                - name: Name of vendor
-                - phonenumber: Phonenumber of vendor
-                - email: vendor email
-                - iban: vendor IBAN
-                - website: vendor website
-                - address1: vendor address1
-                - address2: vendor address2
-                - city: vendor city
-                - country: vendor country
-                - postal_code: vendor postal code
-            - invDate: Invoice date (format should be yyy-mm-dd)
-            - lineitems: An array of objects, each containing:
-              - accno: chart accno this item should be logged in according to our accounts array
-              - description: Item description
-              - price: Item price
-            - subtotal: Subtotal amount
-            - total: Total amount
-            - taxes: An array of objects, each containing:
-              - rate: Tax rate
-              - amount: Tax amount
-
-            Ensure all numeric values are represented as numbers, not strings. If any information is not available, use null for that field.";
-
-    # Make API request
-    my $gpt_tx = $ua->post(
-        $openai_endpoint => {
-            'Authorization' => "Bearer $openai_api_key",
-            'Content-Type'  => 'application/json'
-        } => json => {
-            model    => "gpt-4o",
-            messages => [
-                {
-                    role    => "system",
-                    content => $system_prompt
-                },
-                {
-                    role    => "user",
-                    content => [
-                        {
-                            type => "text",
-                            text => $user_prompt
-                        },
-                        {
-                            type      => "image_url",
-                            image_url => {
-                                url => $data_uri
-                            }
-                        }
-                    ]
-                }
-            ],
-            max_tokens      => 4096,
-            response_format => { type => "json_object" }
-        }
-    );
-
-    if ( my $err = $gpt_tx->error ) {
-        warn "Analysis failed: " . ( $err->{message} || $err->{code} );
-        return $c->render(
-            json => {
-                success => \0,
-                error   => "Analysis failed: "
-                  . ( $err->{message} || $err->{code} )
-            },
-            status => 500
-        );
-    }
-
-    # Process response
-    my $raw_body     = $gpt_tx->res->body;
-    my $decoded_body = Encode::encode_utf8($raw_body);
-    my $analysis     = decode_json($decoded_body);
-    my $invoice_data;
-    eval {
-        my $text = $analysis->{choices}[0]{message}{content};
-        $text =~ s/```json\n//;
-        $text =~ s/\n```$//;
-
-        $invoice_data = decode_json($text);
-        my $vendor_id = &loadVendor( $c, $invoice_data->{vendor}, "" );
-        $invoice_data->{vendor_id} = $vendor_id;
-        return $invoice_data;
-    };
-    return $invoice_data;
-    if ($@) {
-        my $error         = $@;
-        my $error_message = "Failed to process GPT response: $error";
-        $c->app->log->warn($error_message);
-        return {
-            success => \0,
-            error   => $error_message
-        };
-    }
-
-};
-
-sub create_invoice {
-    my ( $c, $data, $client ) = @_;
-
-    # Configure the database connection
-    $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
-    my $dbs = $c->dbs("");
-
-    # Prepare form data
-    my $form = new Form;
-    $form->{type} = "transaction";
-    $form->{vc}   = "vendor";
-
-    # Basic invoice details
-    $form->{invnumber}   = $data->{invNumber}   || '';
-    $form->{description} = $data->{description} || '';
-    $form->{transdate}   = $data->{invDate}     || '';
-    $form->{duedate}     = $data->{dueDate}     || '';
-    $form->{vendor_id}   = $data->{vendor_id}   || '';
-    $form->{currency}    = "USD";
-    $form->{AP}          = "2100";
-    $form->{notes}       = $data->{notes}    || '';
-    $form->{intnotes}    = $data->{intnotes} || '';
-
-    # Other invoice details
-    $form->{ordnumber}     = $data->{ordNumber}     || '';
-    $form->{ponumber}      = $data->{poNumber}      || '';
-    $form->{shippingpoint} = $data->{shippingPoint} || '';
-    $form->{shipvia}       = $data->{shipVia}       || '';
-    $form->{waybill}       = $data->{wayBill}       || '';
-
-    # Line items
-    my $lineitems = $data->{lineitems} || [];
-    $form->{rowcount} = scalar @$lineitems;
-    for my $i ( 1 .. $form->{rowcount} ) {
-        my $line = $lineitems->[ $i - 1 ];
-        $form->{"AP_amount_$i"}   = $line->{accno};
-        $form->{"description_$i"} = $line->{description};
-        $form->{"amount_$i"}      = $line->{price};
-    }
-
-    $form->{taxincluded}   = 0;
-    $form->{department_id} = undef;
-    $form->{employee_id}   = undef;
-    $form->{language_code} = '';
-    $form->{precision}     = $data->{currency}->{prec} || 2;
-    my $auto_inv =
-      $dbs->query( 'SELECT fldvalue FROM defaults WHERE fldname = ?',
-        "auto_invoice" )->hash;
-    my $auto_invoice = $auto_inv->{fldvalue} // '0';
-
-    # Post the invoice
-    AA->post_transaction( $c->slconfig, $form );
-    return $form;
-
-}
 #########################
 ####                 ####
 ####       Cash      ####
@@ -10047,7 +9341,7 @@ $api->get(
         $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
 
         # Initialize form and retrieve payment accounts
-        my $form = new Form;
+        return unless my $form = $c->check_perms('cash.recon');
         RC->paymentaccounts( $c->slconfig, $form );
 
         # Check if any accounts were found
