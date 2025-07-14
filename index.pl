@@ -8520,7 +8520,7 @@ $api->get(
 
         if ( $form->{usetemplate} eq 'Y' ) {
             my $account_map = {
-                I => { ml => 1 },
+                I => { ml =>  1 },
                 E => { ml => -1 },
             };
 
@@ -9706,29 +9706,28 @@ sub build_invoice {
             $form->{"$tax->{accno}_taxnumber"}   = $tax->{taxnumber};
         }
         $form->{taxaccounts} = join( ' ', @taxaccounts );
-        my $ln = 1;
-        for my $l ( @{ $form->{invoice_details} } ) {
-
-            # Compulsory for tax calculation
-            $form->{"id_$ln"}        = $l->{id};
-            $form->{"qty_$ln"}       = $l->{qty}         // 0;
-            $form->{"sellprice_$ln"} = $l->{fxsellprice} // $l->{sellprice}
-              // 0;
-            $form->{"discount_$ln"}     = $l->{discount}     // 0;
-            $form->{"taxaccounts_$ln"}  = $l->{taxaccounts}  // '';
-            $form->{"partnumber_$ln"}   = $l->{partnumber}   // '';
-            $form->{"description_$ln"}  = $l->{description}  // '';
-            $form->{"unit_$ln"}         = $l->{unit}         // '';
-            $form->{"deliverydate_$ln"} = $l->{deliverydate} // '';
-            $form->{"package_$ln"}      = $l->{package}      // '';
-            $form->{"assembly_$ln"}     = $l->{assembly}     // 0;
-            $form->{"kit_$ln"}          = $l->{kit}          // '';
-            $form->{"pricematrix_$ln"}  = $l->{pricematrix}  // '';
-
-            $ln++;
-        }
-        $form->{rowcount} = $ln;
     }
+    my $ln = 1;
+    for my $l ( @{ $form->{invoice_details} } ) {
+
+        $form->{"id_$ln"}           = $l->{id};
+        $form->{"qty_$ln"}          = $l->{qty}         // 0;
+        $form->{"sellprice_$ln"}    = $l->{fxsellprice} // $l->{sellprice} // 0;
+        $form->{"discount_$ln"}     = $l->{discount}     // 0;
+        $form->{"taxaccounts_$ln"}  = $l->{taxaccounts}  // '';
+        $form->{"partnumber_$ln"}   = $l->{partnumber}   // '';
+        $form->{"description_$ln"}  = $l->{description}  // '';
+        $form->{"unit_$ln"}         = $l->{unit}         // '';
+        $form->{"deliverydate_$ln"} = $l->{deliverydate} // '';
+        $form->{"package_$ln"}      = $l->{package}      // '';
+        $form->{"assembly_$ln"}     = $l->{assembly}     // 0;
+        $form->{"kit_$ln"}          = $l->{kit}          // '';
+        $form->{"pricematrix_$ln"}  = $l->{pricematrix}  // '';
+        $form->{"itemnotes_$ln"}    = $l->{itemnotes}    // '';
+
+        $ln++;
+    }
+    $form->{rowcount} = $ln;
 
     if ( $invoice_type eq 'AR' ) {
         IS->invoice_details( $c->slconfig, $form );
@@ -9818,7 +9817,6 @@ sub build_invoice {
     $form->{display_credit}        = $display_credit;
     $form->{display_credit_before} = $display_credit_before;
     $form->{credit_before}         = $credit_before;
-
     return $form;
 }
 $api->get(
