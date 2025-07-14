@@ -111,3 +111,7 @@ CREATE TRIGGER oe_update_updated_trigger
     BEFORE UPDATE ON oe
     FOR EACH ROW
     EXECUTE FUNCTION update_updated_column();
+
+ALTER TABLE bank ADD COLUMN qriban TEXT, ADD COLUMN strdbkginf TEXT, ADD COLUMN invdescriptionqr TEXT;
+
+INSERT INTO db_updates (version, last_update) VALUES ('001', 'Bank QR');

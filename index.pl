@@ -3333,6 +3333,43 @@ sub decode_base64_files {
     return \@uploads;
 }
 
+helper dump_file => sub {
+    my ( $c, $object, $filename ) = @_;
+
+    # Use Data::Dumper to create a readable dump of the object
+    use Data::Dumper;
+    local $Data::Dumper::Indent   = 1;
+    local $Data::Dumper::Sortkeys = 1;
+    local $Data::Dumper::Terse    = 0;
+
+    # Create the dump content
+    my $dump_content = Dumper($object);
+
+    # Use the provided filename or default to 'dump.txt'
+    $filename ||= 'dump.txt';
+
+    # Write the dump to file
+    eval {
+        open( my $fh, '>', $filename )
+          or die "Cannot open file '$filename' for writing: $!";
+        print $fh $dump_content;
+        close($fh);
+        1;
+    } or do {
+        my $error = $@ || 'Unknown error';
+        return {
+            success => 0,
+            error   => "Failed to write dump file: $error"
+        };
+    };
+
+    return {
+        success  => 1,
+        message  => "Object dumped to '$filename' successfully",
+        filename => $filename
+    };
+};
+
 sub calc_line_tax {
     my ( $dbs, $date, $amount, $accno ) = @_;
 
@@ -3915,7 +3952,7 @@ $api->post(
         warn( Dumper $form );
 
         $form->{optional} =
-"company address tel fax companyemail companywebsite yearend weightunit businessnumber closedto revtrans audittrail method cdt namesbynumber xelatex typeofcontact roundchange referenceurl annualinterest latepaymentfee restockingcharge checkinventory hideaccounts linetax forcewarehouse glnumber sinumber sonumber vinumber batchnumber vouchernumber ponumber sqnumber rfqnumber partnumber projectnumber employeenumber customernumber vendornumber lock_glnumber lock_sinumber lock_sonumber lock_ponumber lock_sqnumber lock_rfqnumber lock_employeenumber lock_customernumber lock_vendornumber clearing transition";
+"company address address1 address2 city state zip country tel fax companyemail companywebsite yearend weightunit businessnumber closedto revtrans audittrail method cdt namesbynumber xelatex typeofcontact roundchange referenceurl annualinterest latepaymentfee restockingcharge checkinventory hideaccounts linetax forcewarehouse glnumber sinumber sonumber vinumber batchnumber vouchernumber ponumber sqnumber rfqnumber partnumber projectnumber employeenumber customernumber vendornumber lock_glnumber lock_sinumber lock_sonumber lock_ponumber lock_sqnumber lock_rfqnumber lock_employeenumber lock_customernumber lock_vendornumber clearing transition";
 
         # Save the defaults
         my $result = AM->save_defaults( $c->slconfig, $form );
@@ -9642,100 +9679,62 @@ sub build_invoice {
     else {
         IR->retrieve_invoice( $c->slconfig, $form );
     }
-    $form->{invdate}        = $form->{transdate};
-    $form->{invdescription} = $form->{description};
     AA->company_details( $c->slconfig, $form );
+    my $taxes__query = $dbs->query(
+        q{
+            SELECT c.accno, c.description, t.taxnumber, t.rate, t.chart_id
+            FROM tax t
+            JOIN chart c ON c.id = t.chart_id
+            WHERE t.validto IS NULL 
+               OR t.validto >= ?
+            ORDER BY t.chart_id, t.id DESC
+        },
+        $form->{invdate}
+    )->hashes;
 
-    # Precompute common values and config
-    my $default_date = $form->{transdate} || '';
-    my $precision    = $form->{precision} || 2;
+    if (@$taxes__query) {
+        my @taxaccounts;
+        my %seen_charts;
+        for my $tax (@$taxes__query) {
 
-    my (
-        @items,      @numbers,       @descriptions, @deliverydates,
-        @qtys,       @units,         @makes,        @models,
-        @sellprices, @discountrates, @linetotals,   @itemnotes
-    );
+            # Only use the first (most recent) rate for each chart_id
+            next if $seen_charts{ $tax->{chart_id} };
+            $seen_charts{ $tax->{chart_id} } = 1;
+            push @taxaccounts, $tax->{accno};
+            $form->{"$tax->{accno}_rate"}        = $tax->{rate};
+            $form->{"$tax->{accno}_description"} = $tax->{description};
+            $form->{"$tax->{accno}_taxnumber"}   = $tax->{taxnumber};
+        }
+        $form->{taxaccounts} = join( ' ', @taxaccounts );
+        my $ln = 1;
+        for my $l ( @{ $form->{invoice_details} } ) {
 
-    my $item_count = scalar( @{ $form->{invoice_details} } );
-    for my $arrayref (
-        \@items,      \@numbers,       \@descriptions, \@deliverydates,
-        \@qtys,       \@units,         \@makes,        \@models,
-        \@sellprices, \@discountrates, \@linetotals,   \@itemnotes
-      )
-    {
-        $#$arrayref = $item_count - 1;
+            # Compulsory for tax calculation
+            $form->{"id_$ln"}        = $l->{id};
+            $form->{"qty_$ln"}       = $l->{qty}         // 0;
+            $form->{"sellprice_$ln"} = $l->{fxsellprice} // $l->{sellprice}
+              // 0;
+            $form->{"discount_$ln"}     = $l->{discount}     // 0;
+            $form->{"taxaccounts_$ln"}  = $l->{taxaccounts}  // '';
+            $form->{"partnumber_$ln"}   = $l->{partnumber}   // '';
+            $form->{"description_$ln"}  = $l->{description}  // '';
+            $form->{"unit_$ln"}         = $l->{unit}         // '';
+            $form->{"deliverydate_$ln"} = $l->{deliverydate} // '';
+            $form->{"package_$ln"}      = $l->{package}      // '';
+            $form->{"assembly_$ln"}     = $l->{assembly}     // 0;
+            $form->{"kit_$ln"}          = $l->{kit}          // '';
+            $form->{"pricematrix_$ln"}  = $l->{pricematrix}  // '';
+
+            $ln++;
+        }
+        $form->{rowcount} = $ln;
     }
 
-    my $subtotal = 0;
-    my $i        = 1;
-    foreach my $item ( @{ $form->{invoice_details} } ) {
-
-        # Precompute values once
-        my $qty      = $item->{qty}         || 0;
-        my $price    = $item->{fxsellprice} || $item->{sellprice} || 0;
-        my $discount = $item->{discount}    || 0;
-
-        # Calculate line total once
-        my $linetotal = $qty * $price * ( 1 - $discount );
-        $subtotal += $linetotal;
-
-        my $formatted_qty   = $form->format_amount( $c->slconfig, $qty );
-        my $formatted_price = $form->format_amount( $c->slconfig, $price );
-        my $formatted_linetotal =
-          $form->format_amount( $c->slconfig, $linetotal );
-
-        my $idx = $i - 1;
-        $items[$idx]         = $i;
-        $numbers[$idx]       = $item->{partnumber}  || '';
-        $descriptions[$idx]  = $item->{description} || '';
-        $deliverydates[$idx] = $default_date;
-        $qtys[$idx]          = $formatted_qty;
-        $units[$idx]         = $item->{unit}  || '';
-        $makes[$idx]         = $item->{make}  || '';
-        $models[$idx]        = $item->{model} || '';
-        $sellprices[$idx]    = $formatted_price;
-        $discountrates[$idx] = $discount ? $discount * 100 : '0';
-        $linetotals[$idx]    = $formatted_linetotal;
-        $itemnotes[$idx]     = $item->{itemnotes} || '';
-
-        $i++;
+    if ( $invoice_type eq 'AR' ) {
+        IS->invoice_details( $c->slconfig, $form );
     }
-
-    # Flatten tax data into parallel arrays.
-    my ( @taxdescriptions, @taxbases, @taxrates, @taxamounts );
-    my $taxtotal = 0;
-    foreach my $t ( @{ $form->{acc_trans}{ $arap_key . '_tax' } } ) {
-        my $tax_amt = $t->{amount} || 0;
-        $taxtotal += $tax_amt;
-
-        push @taxdescriptions, ( $t->{description} =~ s/%//gr || '' );
-
-        push @taxbases,
-          $form->format_amount( $c->slconfig, $form->{netamount} || 0 );
-        push @taxrates, ( $t->{description} =~ /(\d+)%/ ? $1 : 0 );
-        push @taxamounts, $form->format_amount( $c->slconfig, $tax_amt );
-    }
-
-    # Determine multiplier for payments if needed:
-    my $ml = (
-        $form->{type} && ( $form->{type} eq 'credit_invoice'
-            || $form->{type} eq 'debit_invoice' )
-    ) ? -1 : 1;
-    $ml *= -1 if $form->{vc} eq 'customer';
-
-    # Flatten payment data into parallel arrays.
-    my ( @paymentdates, @paymentaccounts, @paymentsources, @paymentamounts );
-    my $paid_sum = 0;
-    foreach my $pay ( @{ $form->{acc_trans}{ $arap_key . '_paid' } } ) {
-        my $payment_amount = ( $pay->{amount} || 0 ) * $ml;
-
-        push @paymentdates,    ( $pay->{transdate}   || '' );
-        push @paymentaccounts, ( $pay->{description} || '' );
-        push @paymentsources,  ( $pay->{source}      || '' );
-        push @paymentamounts,
-          $form->format_amount( $c->slconfig, $payment_amount );
-
-        $paid_sum += $payment_amount;
+    else {
+        IR->invoice_details( $c->slconfig, $form );
     }
 
     my $credit_remaining = $dbs->query(
@@ -9744,8 +9743,9 @@ sub build_invoice {
           WHERE a.amount != a.paid
           AND $form->{vc}_id = $form->{"$form->{vc}_id"}|
     )->hash;
-    my $credit        = -$credit_remaining->{sum};
-    my $credit_before = $credit + $subtotal;
+    my $credit = -$credit_remaining->{sum};
+    my $credit_before =
+      $credit + $form->parse_amount( $c->slconfig, $form->{subtotal} );
     $credit        = sprintf( "%.2f", $credit );
     $credit_before = sprintf( "%.2f", $credit_before );
 
@@ -9758,12 +9758,6 @@ sub build_invoice {
         $credit_before = 0;
     }
 
-    sub round {
-        my ( $number, $precision ) = @_;
-        my $factor = 10**$precision;
-        return int( $number * $factor + 0.5 ) / $factor;
-    }
-
     # Format the credit values
     my $display_credit = $form->format_amount( $c->slconfig, abs $credit );
     $display_credit = "($display_credit)" if $credit > 0;
@@ -9773,9 +9767,6 @@ sub build_invoice {
       $form->format_amount( $c->slconfig, abs $credit_before );
     $display_credit_before = "($display_credit_before)" if $credit_before > 0;
     $display_credit_before = "0"                        if $credit_before == 0;
-
-    my $paid  = $paid_sum;
-    my $total = ( $subtotal + $taxtotal ) - $paid;
 
     my @f =
       qw(email name address1 address2 city state zipcode country contact phone fax);
@@ -9823,59 +9814,10 @@ sub build_invoice {
         }
     }
 
-    my $num2text;
-    if ( $form->{language_code} ne "" ) {
-        $num2text = new CP $form->{language_code};
-    }
-    else {
-        $num2text = new CP $c->slconfig->{countrycode};
-    }
-    $num2text->init;
-
-    # Totals
-    $form->{subtotal} = $form->format_amount( $c->slconfig, $subtotal );
-    $form->{paid}     = $form->format_amount( $c->slconfig, $paid );
-    $form->{invtotal} = $form->format_amount( $c->slconfig, $total );
-    $form->{total}    = $form->format_amount( $c->slconfig, $total );
     $form->{credit}                = $credit;
     $form->{display_credit}        = $display_credit;
     $form->{display_credit_before} = $display_credit_before;
     $form->{credit_before}         = $credit_before;
-    $form->{due}         = $form->format_amount( $c->slconfig, $total );
-    $form->{text_amount} = $num2text->num2text($total);
-    $form->{decimal}     = $form->{decimal}  || '00';
-    $form->{currency}    = $form->{currency} || '';
-    $form->{notes}       = $form->{notes}    || '';
-    $form->{terms}       = $form->{terms}    || '0';
-
-    # ---- PARALLEL ARRAYS FOR LINE ITEMS ----
-    $form->{runningnumber} = \@items;
-    $form->{number}        = \@numbers;
-    $form->{description}   = \@descriptions;
-    $form->{deliverydate}  = \@deliverydates;
-    $form->{qty}           = \@qtys;
-    $form->{unit}          = \@units;
-    $form->{make}          = \@makes;
-    $form->{model}         = \@models;
-    $form->{sellprice}     = \@sellprices;
-    $form->{discountrate}  = \@discountrates;
-    $form->{linetotal}     = \@linetotals;
-    $form->{itemnotes}     = \@itemnotes;
-
-    # ---- PARALLEL ARRAYS FOR TAXES ----
-    $form->{taxdescription} = \@taxdescriptions;
-    $form->{taxbase}        = \@taxbases;
-    $form->{taxrate}        = \@taxrates;
-    $form->{tax}            = \@taxamounts;
-
-    # ---- PARALLEL ARRAYS FOR PAYMENTS ----
-    $form->{paymentdate}    = \@paymentdates;
-    $form->{paymentaccount} = \@paymentaccounts;
-    $form->{paymentsource}  = \@paymentsources;
-    $form->{payment}        = \@paymentamounts;
-
-    # This indicates there's at least 1 payment
-    $form->{paid_1} = @paymentamounts ? 1 : "";
 
     return $form;
 }

@@ -1933,6 +1933,24 @@ sub format_string {
 
 }
 
+sub string_abbreviate {
+	my ($self, $string, $max_length) = @_;
+
+	if (length($string) > $max_length) {
+		$string = substr($string, 0, $max_length - 3);
+		$string = $string . "...";
+	}
+
+	return $string;
+}
+
+sub string_replace {
+  	my ($self, $string, $search_string, $replace_string) = @_;
+  	
+	$string =~ s/$search_string/$replace_string/ig;
+	
+	return $string;
+}
 
 sub pad {
   my ($self, $str, $chr, $align, $width, $display) = @_;
