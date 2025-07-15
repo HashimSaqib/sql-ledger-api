@@ -9712,8 +9712,10 @@ sub build_invoice {
 
         $form->{"id_$ln"}           = $l->{id};
         $form->{"qty_$ln"}          = $l->{qty}         // 0;
-        $form->{"sellprice_$ln"}    = $l->{fxsellprice} // $l->{sellprice} // 0;
-        $form->{"discount_$ln"}     = $l->{discount}     // 0;
+        $form->{"sellprice_$ln"}    = $l->{sellprice} // 0;
+        $form->{"fxsellprice_$ln"}  = $l->{fxsellprice} // 0;
+        $form->{"discount_$ln"}     = $l->{discount} * 100 // 0;
+        $form->{"discountrate_$ln"} = $l->{discountrate} // 0;
         $form->{"taxaccounts_$ln"}  = $l->{taxaccounts}  // '';
         $form->{"partnumber_$ln"}   = $l->{partnumber}   // '';
         $form->{"description_$ln"}  = $l->{description}  // '';
