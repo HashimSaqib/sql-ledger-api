@@ -1597,12 +1597,13 @@ sub save_preferences {
 sub save_defaults {
   my ($self, $myconfig, $form) = @_;
 
-  for (qw(IC IC_income IC_expense fxgainloss cashovershort)) { ($form->{$_}) = split /--/, $form->{$_} }
   $form->{inventory_accno} = $form->{IC};
   $form->{income_accno} = $form->{IC_income};
   $form->{expense_accno} = $form->{IC_expense};
   $form->{fxgainloss_accno} = $form->{fxgainloss};
   $form->{cashovershort_accno} = $form->{cashovershort};
+  $form->{ar_accno} = $form->{AR};
+  $form->{ap_accno} = $form->{AP};
   
   # connect to database
   my $dbh = $form->dbconnect_noauto($myconfig);
@@ -1620,11 +1621,9 @@ sub save_defaults {
   $sth->execute('version', $form->{dbversion}) || $form->dberror;
   $sth->finish;
   
-  for (qw(inventory income expense fxgainloss cashovershort)) {
+  for (qw(inventory income expense fxgainloss cashovershort ar ap)) {
     $query = qq|INSERT INTO defaults (fldname, fldvalue)
-                VALUES ('${_}_accno_id', (SELECT id
-		                FROM chart
-				WHERE accno = '$form->{"${_}_accno"}'))|;
+                VALUES ('${_}_accno_id', '$form->{"${_}_accno"}')|;
     $dbh->do($query) || $form->dberror($query);
   }
  
@@ -1668,6 +1667,8 @@ sub defaultaccounts {
   $form->{defaults}{IC_cogs} = $form->{expense_accno_id};
   $form->{defaults}{fxgainloss} = $form->{fxgainloss_accno_id};
   $form->{defaults}{cashovershort} = $form->{cashovershort_accno_id};
+  $form->{defaults}{AR} = $form->{ar_accno_id};
+  $form->{defaults}{AP} = $form->{ap_accno_id};
   
   $query = qq|SELECT c.id, c.accno, c.description, c.link,
               l.description AS translation

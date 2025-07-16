@@ -3860,95 +3860,294 @@ $api->get(
         my $c      = shift;
         my $client = $c->param('client');
         return unless my $form = $c->check_perms("system.defaults");
-
         my $dbs = $c->dbs($client);
 
-        AM->defaultaccounts( $c->slconfig, $form );
-
-        # Build arrays for "select$key" instead of a string
-        foreach my $key ( keys %{ $form->{accno} } ) {
-            my @select_array;
-
-            foreach my $accno ( sort keys %{ $form->{accno}{$key} } ) {
-                my $acc_entry = {
-                    accno       => $accno,
-                    description => $form->{accno}{$key}{$accno}{description},
-                    id          => $form->{accno}{$key}{$accno}{id},
-                };
-
-                # Check if this is the default selection
-                if ( $form->{accno}{$key}{$accno}{id} ==
-                    $form->{defaults}{$key} )
-                {
-                    # Instead of a string, store the chosen entry as a hash
-                    $form->{$key} = {
-                        accno       => $accno,
-                        description =>
-                          $form->{accno}{$key}{$accno}{description},
-                        id => $form->{accno}{$key}{$accno}{id},
-                    };
-                }
-
-                push @select_array, $acc_entry;
-            }
-
-            # Assign the array to $form->{"select$key"}
-            $form->{$key} = \@select_array;
-        }
-
-        # Remove raw data we no longer need
-        for (qw(accno defaults)) {
-            delete $form->{$_};
-        }
+        my $form = $c->get_defaults();
 
         # Query to check if linetaxamount is greater than 0 in any row
         my $lock_linetax_query = $dbs->query(
 "SELECT EXISTS (SELECT 1 FROM acc_trans WHERE linetaxamount <> 0) AS locklinetax"
         );
-
         my $lock_linetax_result = $lock_linetax_query->hash;
-        $form->{locklinetax} = $lock_linetax_result->{locklinetax} ? \1 : \0;
+        $form->{locklinetax} = $lock_linetax_result->{locklinetax} ? 1 : 0;
+        use JSON;
 
-        my %checked;
-        $checked{cash}          = "checked" if $form->{method} eq 'cash';
-        $checked{namesbynumber} = "checked" if $form->{namesbynumber};
-        $checked{company}       = "checked" unless $form->{typeofcontact};
-        $checked{person}      = "checked" if $form->{typeofcontact} eq 'person';
-        $checked{roundchange} = "checked" if $form->{roundchange};
-
-        for (qw(cdt checkinventory hideaccounts linetax forcewarehouse xelatex))
-        {
-            $checked{$_} = "checked" if $form->{$_};
+  # Helper function to convert various boolean representations to proper boolean
+        sub to_boolean {
+            my $value = shift;
+            return JSON::true
+              if ( $value
+                && ( $value eq "checked" || $value eq "1" || $value == 1 ) );
+            return JSON::false;
         }
 
-        for (
-            qw(glnumber sinumber sonumber ponumber sqnumber rfqnumber employeenumber customernumber vendornumber)
-          )
-        {
-            $checked{"lock_$_"} = "checked" if $form->{"lock_$_"};
-        }
+        my $all_accounts = $c->get_accounts();
 
-        # Combine form data and checked settings.
-        my %form_data = ( %{$form}, checked => \%checked );
+        # Build the restructured response
+        my %restructured_response = (
+            company_info => {
+                name    => $form->{company} || "",
+                address => {
+                    complete => $form->{address}  || "",
+                    line1    => $form->{address1} || "",
+                    line2    => $form->{address2} || "",
+                    city     => $form->{city}     || "",
+                    state    => $form->{state}    || "",
+                    zip      => $form->{zip}      || "",
+                    country  => $form->{country}  || ""
+                },
+                contact => {
+                    phone   => $form->{tel}            || "",
+                    fax     => $form->{fax}            || "",
+                    email   => $form->{companyemail}   || "",
+                    website => $form->{companywebsite} || ""
+                },
+                business_number => $form->{businessnumber} || "",
+                reference_url   => $form->{referenceurl}   || ""
+            },
 
-        $c->render( json => \%form_data );
+            settings => {
+
+                # Financial Settings
+                precision          => $form->{precision}        || "",
+                annual_interest    => $form->{annualinterest}   || "",
+                late_payment_fee   => $form->{latepaymentfee}   || "",
+                restocking_charge  => $form->{restockingcharge} || "",
+                round_change       => $form->{roundchange}      || "",
+                weight_unit        => $form->{weightunit}       || "",
+                clearing_account   => $form->{clearing}         || "",
+                transition_account => $form->{transition}       || "",
+
+                # System Settings (converted to proper booleans)
+                reporting_method_cash =>
+                  to_boolean( $form->{method} eq 'cash' ),
+                check_inventory      => to_boolean( $form->{checkinventory} ),
+                force_warehouse      => to_boolean( $form->{forcewarehouse} ),
+                hide_closed_accounts => to_boolean( $form->{hideaccounts} ),
+                line_tax             => to_boolean( $form->{linetax} ),
+                sort_names_by_number => to_boolean( $form->{namesbynumber} ),
+                xe_latex             => to_boolean( $form->{xelatex} ),
+                type_of_contact      => $form->{typeofcontact} || ""
+            },
+
+            account_defaults => {
+                inventory_account_id    => $form->{inventory_accno_id} || undef,
+                income_account_id       => $form->{income_accno_id}    || undef,
+                expense_account_id      => $form->{expense_accno_id}   || undef,
+                fx_gain_loss_account_id => $form->{fxgainloss_accno_id}
+                  || undef,
+                cash_over_short_account_id => $form->{cashovershort_accno_id}
+                  || undef,
+                ar_account_id => $form->{ar_accno_id} || undef,
+                ap_account_id => $form->{ap_accno_id} || undef
+            },
+
+            number_sequences => {
+                gl_reference => {
+                    pattern => $form->{glnumber} || "",
+                    locked  => to_boolean( $form->{lock_glnumber} )
+                },
+                sales_invoice => {
+                    pattern => $form->{sinumber} || "",
+                    locked  => to_boolean( $form->{lock_sinumber} )
+                },
+                sales_order => {
+                    pattern => $form->{sonumber} || "",
+                    locked  => to_boolean( $form->{lock_sonumber} )
+                },
+                vendor_invoice => {
+                    pattern => $form->{vinumber} || "",
+                    locked  => JSON::false    # No lock field found for vinumber
+                },
+                batch => {
+                    pattern => $form->{batchnumber} || "",
+                    locked  => JSON::false # No lock field found for batchnumber
+                },
+                voucher => {
+                    pattern => $form->{vouchernumber} || "",
+                    locked  =>
+                      JSON::false    # No lock field found for vouchernumber
+                },
+                purchase_order => {
+                    pattern => $form->{ponumber} || "",
+                    locked  => to_boolean( $form->{lock_ponumber} )
+                },
+                sales_quotation => {
+                    pattern => $form->{sqnumber} || "",
+                    locked  => to_boolean( $form->{lock_sqnumber} )
+                },
+                rfq => {
+                    pattern => $form->{rfqnumber} || "",
+                    locked  => to_boolean( $form->{lock_rfqnumber} )
+                },
+                customer => {
+                    pattern => $form->{customernumber} || "",
+                    locked  => to_boolean( $form->{lock_customernumber} )
+                },
+                vendor => {
+                    pattern => $form->{vendornumber} || "",
+                    locked  => to_boolean( $form->{lock_vendornumber} )
+                },
+                employee => {
+                    pattern => $form->{employeenumber} || "",
+                    locked  => to_boolean( $form->{lock_employeenumber} )
+                },
+                part => {
+                    pattern => $form->{partnumber} || "",
+                    locked  => JSON::false  # No lock field found for partnumber
+                },
+                project => {
+                    pattern => $form->{projectnumber} || "",
+                    locked  =>
+                      JSON::false    # No lock field found for projectnumber
+                }
+            },
+
+            all_accounts => $all_accounts->{all}
+        );
+
+        $c->render( json => \%restructured_response );
     }
 );
-
 $api->post(
     '/system/companydefaults' => sub {
         my $c = shift;
         return unless my $form = $c->check_perms("system.defaults");
         my $client = $c->param('client');
 
-        # Get form data from JSON request body
         my $json_data = $c->req->json;
         warn( Dumper $json_data );
 
-        # Transfer JSON data to form object
-        foreach my $key ( keys %$json_data ) {
-            $form->{$key} = $json_data->{$key};
+        my $mapped_data = {};
+
+        if ( $json_data->{company_info} ) {
+            $mapped_data->{company} = $json_data->{company_info}->{name};
+            $mapped_data->{businessnumber} =
+              $json_data->{company_info}->{business_number};
+            $mapped_data->{referenceurl} =
+              $json_data->{company_info}->{reference_url};
+
+            if ( $json_data->{company_info}->{address} ) {
+                $mapped_data->{address} =
+                  $json_data->{company_info}->{address}->{address};
+                $mapped_data->{address1} =
+                  $json_data->{company_info}->{address}->{line1};
+                $mapped_data->{address2} =
+                  $json_data->{company_info}->{address}->{line2};
+                $mapped_data->{city} =
+                  $json_data->{company_info}->{address}->{city};
+                $mapped_data->{state} =
+                  $json_data->{company_info}->{address}->{state};
+                $mapped_data->{zip} =
+                  $json_data->{company_info}->{address}->{zip};
+                $mapped_data->{country} =
+                  $json_data->{company_info}->{address}->{country};
+            }
+
+            if ( $json_data->{company_info}->{contact} ) {
+                $mapped_data->{tel} =
+                  $json_data->{company_info}->{contact}->{phone};
+                $mapped_data->{fax} =
+                  $json_data->{company_info}->{contact}->{fax};
+                $mapped_data->{companyemail} =
+                  $json_data->{company_info}->{contact}->{email};
+                $mapped_data->{companywebsite} =
+                  $json_data->{company_info}->{contact}->{website};
+            }
         }
+
+        if ( $json_data->{settings} ) {
+            $mapped_data->{precision} = $json_data->{settings}->{precision};
+            $mapped_data->{annualinterest} =
+              $json_data->{settings}->{annual_interest};
+            $mapped_data->{latepaymentfee} =
+              $json_data->{settings}->{late_payment_fee};
+            $mapped_data->{restockingcharge} =
+              $json_data->{settings}->{restocking_charge};
+            $mapped_data->{roundchange} =
+              $json_data->{settings}->{round_change};
+            $mapped_data->{weightunit} = $json_data->{settings}->{weight_unit};
+            $mapped_data->{clearing} =
+              $json_data->{settings}->{clearing_account};
+            $mapped_data->{transition} =
+              $json_data->{settings}->{transition_account};
+            $mapped_data->{method} =
+              $json_data->{settings}->{reporting_method_cash};
+            $mapped_data->{checkinventory} =
+              $json_data->{settings}->{check_inventory};
+            $mapped_data->{forcewarehouse} =
+              $json_data->{settings}->{force_warehouse};
+            $mapped_data->{hideaccounts} =
+              $json_data->{settings}->{hide_closed_accounts};
+            $mapped_data->{linetax} = $json_data->{settings}->{line_tax};
+            $mapped_data->{namesbynumber} =
+              $json_data->{settings}->{sort_names_by_number};
+            $mapped_data->{xelatex} = $json_data->{settings}->{xe_latex};
+            $mapped_data->{typeofcontact} =
+              $json_data->{settings}->{type_of_contact};
+        }
+
+ # Map account defaults (these appear to be ID values only in the old structure)
+        if ( $json_data->{account_defaults} ) {
+            $mapped_data->{IC} =
+              $json_data->{account_defaults}->{inventory_account_id};
+            $mapped_data->{IC_income} =
+              $json_data->{account_defaults}->{income_account_id};
+            $mapped_data->{IC_expense} =
+              $json_data->{account_defaults}->{expense_account_id};
+            $mapped_data->{fxgainloss} =
+              $json_data->{account_defaults}->{fx_gain_loss_account_id};
+            $mapped_data->{cashovershort} =
+              $json_data->{account_defaults}->{cash_over_short_account_id};
+            $mapped_data->{AR} =
+              $json_data->{account_defaults}->{ar_account_id};
+            $mapped_data->{AP} =
+              $json_data->{account_defaults}->{ap_account_id};
+        }
+
+        # Map number sequences
+        if ( $json_data->{number_sequences} ) {
+            my $sequences = $json_data->{number_sequences};
+
+            # Map patterns
+            $mapped_data->{glnumber} = $sequences->{gl_reference}->{pattern};
+            $mapped_data->{sinumber} = $sequences->{sales_invoice}->{pattern};
+            $mapped_data->{sonumber} = $sequences->{sales_order}->{pattern};
+            $mapped_data->{vinumber} = $sequences->{vendor_invoice}->{pattern};
+            $mapped_data->{batchnumber}   = $sequences->{batch}->{pattern};
+            $mapped_data->{vouchernumber} = $sequences->{voucher}->{pattern};
+            $mapped_data->{ponumber} = $sequences->{purchase_order}->{pattern};
+            $mapped_data->{sqnumber} = $sequences->{sales_quotation}->{pattern};
+            $mapped_data->{rfqnumber}      = $sequences->{rfq}->{pattern};
+            $mapped_data->{partnumber}     = $sequences->{part}->{pattern};
+            $mapped_data->{projectnumber}  = $sequences->{project}->{pattern};
+            $mapped_data->{employeenumber} = $sequences->{employee}->{pattern};
+            $mapped_data->{customernumber} = $sequences->{customer}->{pattern};
+            $mapped_data->{vendornumber}   = $sequences->{vendor}->{pattern};
+
+            # Map locked flags
+            $mapped_data->{lock_glnumber} =
+              $sequences->{gl_reference}->{locked};
+            $mapped_data->{lock_sinumber} =
+              $sequences->{sales_invoice}->{locked};
+            $mapped_data->{lock_sonumber} = $sequences->{sales_order}->{locked};
+            $mapped_data->{lock_ponumber} =
+              $sequences->{purchase_order}->{locked};
+            $mapped_data->{lock_sqnumber} =
+              $sequences->{sales_quotation}->{locked};
+            $mapped_data->{lock_rfqnumber} = $sequences->{rfq}->{locked};
+            $mapped_data->{lock_employeenumber} =
+              $sequences->{employee}->{locked};
+            $mapped_data->{lock_customernumber} =
+              $sequences->{customer}->{locked};
+            $mapped_data->{lock_vendornumber} = $sequences->{vendor}->{locked};
+        }
+
+        # Transfer mapped data to form object
+        foreach my $key ( keys %$mapped_data ) {
+            $form->{$key} = $mapped_data->{$key};
+        }
+
         warn( Dumper $form );
 
         $form->{optional} =
@@ -3956,7 +4155,6 @@ $api->post(
 
         # Save the defaults
         my $result = AM->save_defaults( $c->slconfig, $form );
-
         if ($result) {
             $c->render(
                 json => {
@@ -5337,7 +5535,7 @@ helper get_accounts => sub {
     my ($c)    = @_;
     my $client = $c->param('client');
     my $form   = Form->new;
-    my $module = $c->param('module');
+    my $module = $c->param('module') || '';
     $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
 
     # Fetch all accounts
@@ -5522,6 +5720,7 @@ $api->get(
                 revtrans     => $defaults->{revtrans},
                 closedto     => $formatted_closedto,
                 connection   => $connection,
+                record => $defaults->{ar_accno_id}
             };
         }
 
@@ -5548,6 +5747,7 @@ $api->get(
                 revtrans     => $defaults->{revtrans},
                 closedto     => $formatted_closedto,
                 connection   => $connection,
+                record => $defaults->{ap_accno_id}
             };
         }
 
@@ -8520,7 +8720,7 @@ $api->get(
 
         if ( $form->{usetemplate} eq 'Y' ) {
             my $account_map = {
-                I => { ml =>  1 },
+                I => { ml => 1 },
                 E => { ml => -1 },
             };
 
@@ -9711,21 +9911,21 @@ sub build_invoice {
     for my $l ( @{ $form->{invoice_details} } ) {
 
         $form->{"id_$ln"}           = $l->{id};
-        $form->{"qty_$ln"}          = $l->{qty}         // 0;
-        $form->{"sellprice_$ln"}    = $l->{sellprice} // 0;
-        $form->{"fxsellprice_$ln"}  = $l->{fxsellprice} // 0;
+        $form->{"qty_$ln"}          = $l->{qty}            // 0;
+        $form->{"sellprice_$ln"}    = $l->{sellprice}      // 0;
+        $form->{"fxsellprice_$ln"}  = $l->{fxsellprice}    // 0;
         $form->{"discount_$ln"}     = $l->{discount} * 100 // 0;
-        $form->{"discountrate_$ln"} = $l->{discountrate} // 0;
-        $form->{"taxaccounts_$ln"}  = $l->{taxaccounts}  // '';
-        $form->{"partnumber_$ln"}   = $l->{partnumber}   // '';
-        $form->{"description_$ln"}  = $l->{description}  // '';
-        $form->{"unit_$ln"}         = $l->{unit}         // '';
-        $form->{"deliverydate_$ln"} = $l->{deliverydate} // '';
-        $form->{"package_$ln"}      = $l->{package}      // '';
-        $form->{"assembly_$ln"}     = $l->{assembly}     // 0;
-        $form->{"kit_$ln"}          = $l->{kit}          // '';
-        $form->{"pricematrix_$ln"}  = $l->{pricematrix}  // '';
-        $form->{"itemnotes_$ln"}    = $l->{itemnotes}    // '';
+        $form->{"discountrate_$ln"} = $l->{discountrate}   // 0;
+        $form->{"taxaccounts_$ln"}  = $l->{taxaccounts}    // '';
+        $form->{"partnumber_$ln"}   = $l->{partnumber}     // '';
+        $form->{"description_$ln"}  = $l->{description}    // '';
+        $form->{"unit_$ln"}         = $l->{unit}           // '';
+        $form->{"deliverydate_$ln"} = $l->{deliverydate}   // '';
+        $form->{"package_$ln"}      = $l->{package}        // '';
+        $form->{"assembly_$ln"}     = $l->{assembly}       // 0;
+        $form->{"kit_$ln"}          = $l->{kit}            // '';
+        $form->{"pricematrix_$ln"}  = $l->{pricematrix}    // '';
+        $form->{"itemnotes_$ln"}    = $l->{itemnotes}      // '';
 
         $ln++;
     }
