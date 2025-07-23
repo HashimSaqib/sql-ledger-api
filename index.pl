@@ -194,7 +194,7 @@ helper validate_date => sub {
     }
     return 1;    # return true if the date is valid
 };
-plugin 'Minion::Admin' => { return_to => '/minion' };
+#plugin 'Minion::Admin' => { return_to => '/minion' };
 
 # Database Updates on Startup
 app->hook(
