@@ -194,7 +194,8 @@ helper validate_date => sub {
     }
     return 1;    # return true if the date is valid
 };
-plugin 'Minion::Admin' => { return_to => '/minion' };
+
+#plugin 'Minion::Admin' => { return_to => '/minion' };
 
 # Database Updates on Startup
 app->hook(
@@ -258,6 +259,11 @@ app->hook(
         };
     }
 );
+
+if ( $ENV{AI_PLUGIN} && -d './neo_ai_plugin' ) {
+    use neo_ai_plugin::AIPlugin;
+    app->plugin('AIPlugin');
+}
 
 my $r       = app->routes;
 my $central = $r->under('/');
@@ -3197,7 +3203,7 @@ $api->post(
         else {
             $data = $c->req->json;
             if ( ref $data->{files} eq 'ARRAY' ) {
-                $data->{files} = decode_base64_files( $data->{files} );
+                $data->{files} = $c->decode_base64_files( $data->{files} );
             }
         }
 
@@ -3229,7 +3235,7 @@ $api->put(
         else {
             $data = $c->req->json;
             if ( ref $data->{files} eq 'ARRAY' ) {
-                $data->{files} = decode_base64_files( $data->{files} );
+                $data->{files} = $c->decode_base64_files( $data->{files} );
             }
         }
 
@@ -3298,8 +3304,8 @@ sub handle_multipart_request {
     return $data;
 }
 
-sub decode_base64_files {
-    my ($file_array) = @_;
+helper decode_base64_files => sub {
+    my ( $c, $file_array ) = @_;
     return [] unless ref $file_array eq 'ARRAY';
     use File::Temp qw(tempfile);
     my @uploads;
@@ -3331,7 +3337,7 @@ sub decode_base64_files {
     }
 
     return \@uploads;
-}
+};
 
 helper dump_file => sub {
     my ( $c, $object, $filename ) = @_;
@@ -3862,7 +3868,7 @@ $api->get(
         return unless my $form = $c->check_perms("system.defaults");
         my $dbs = $c->dbs($client);
 
-        my $form = $c->get_defaults();
+        $form = $c->get_defaults();
 
         # Query to check if linetaxamount is greater than 0 in any row
         my $lock_linetax_query = $dbs->query(
@@ -3881,7 +3887,7 @@ $api->get(
             return JSON::false;
         }
 
-        my $all_accounts = $c->get_accounts();
+        my $all_accounts = $c->get_accounts($client);
 
         # Build the restructured response
         my %restructured_response = (
@@ -4214,7 +4220,7 @@ $api->get(
         my $client = $c->param('client');
         return unless my $form = $c->check_perms("system.yearend");
 
-        my $all_accounts = $c->get_accounts();
+        my $all_accounts = $c->get_accounts($client);
 
         # Filter accounts with category 'Q' and charttype 'A'
         my @yearend_accounts =
@@ -5424,7 +5430,7 @@ helper get_defaults => sub {
 
 helper get_projects => sub {
     my $c        = shift;
-    my $client   = $c->param('client');
+    my $client   = shift // $c->param('client');
     my $dbs      = $c->dbs($client);
     my $projects = $dbs->query("SELECT * FROM project")->hashes;
 
@@ -5440,9 +5446,9 @@ helper get_projects => sub {
 };
 
 helper get_departments => sub {
-    my ( $c, $role ) = @_;
-    my $client = $c->param('client');
-    my $dbs    = $c->dbs($client);
+    my ( $c, $role, $client ) = @_;
+    $client = $client // $c->param('client');
+    my $dbs = $c->dbs($client);
 
     my $query = "SELECT * FROM department";
 
@@ -5466,8 +5472,8 @@ helper get_departments => sub {
 };
 
 helper get_vc => sub {
-    my ( $c, $vc ) = @_;
-    my $client = $c->param('client');
+    my ( $c, $vc, $client ) = @_;
+    $client = $client // $c->param('client');
     $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
     my $form = new Form;
     $form->{vc} = $vc;
@@ -5484,8 +5490,8 @@ helper get_vc => sub {
 };
 
 helper get_currencies => sub {
-    my $c      = shift;
-    my $client = $c->param('client');
+    my ( $c, $client ) = @_;
+    $client = $client // $c->param('client');
 
     my $dbs = $c->dbs($client);
 
@@ -5532,8 +5538,8 @@ helper get_gifi => sub {
 };
 
 helper get_accounts => sub {
-    my ($c)    = @_;
-    my $client = $c->param('client');
+    my ( $c, $client ) = @_;
+    $client = $client // $c->param('client');
     my $form   = Form->new;
     my $module = $c->param('module') || '';
     $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
@@ -5655,14 +5661,14 @@ $api->get(
          ORDER BY c.accno"
         )->hashes;
 
-        my $accounts           = $c->get_accounts;
-        my $currencies         = $c->get_currencies;
-        my $customers          = $c->get_vc('customer');
-        my $vendors            = $c->get_vc('vendor');
-        my $projects           = $c->get_projects;
-        my $gifi               = $c->get_gifi;
+        my $accounts           = $c->get_accounts($client);
+        my $currencies         = $c->get_currencies($client);
+        my $customers          = $c->get_vc( 'customer', $client );
+        my $vendors            = $c->get_vc( 'vendor',   $client );
+        my $projects           = $c->get_projects($client);
+        my $gifi               = $c->get_gifi($client);
         my $defaults           = $c->get_defaults($client);
-        my $parts              = $c->get_items($dbs);
+        my $parts              = $c->get_items( $dbs, $client );
         my $formatted_closedto = $defaults->{closedto};
 
         if (   $formatted_closedto
@@ -5720,7 +5726,7 @@ $api->get(
                 revtrans     => $defaults->{revtrans},
                 closedto     => $formatted_closedto,
                 connection   => $connection,
-                record => $defaults->{ar_accno_id}
+                record       => $defaults->{ar_accno_id}
             };
         }
 
@@ -5747,7 +5753,7 @@ $api->get(
                 revtrans     => $defaults->{revtrans},
                 closedto     => $formatted_closedto,
                 connection   => $connection,
-                record => $defaults->{ap_accno_id}
+                record       => $defaults->{ap_accno_id}
             };
         }
 
@@ -5950,7 +5956,7 @@ $api->get(
         }
         elsif ( $module eq 'import_bank' ) {
             return unless $c->check_perms('import.bank');
-            my $accounts         = $c->get_accounts();
+            my $accounts         = $accounts->{all};
             my $defaults         = $c->get_defaults();
             my $clearing_account = $defaults->{clearing};
             my $bank_accounts    = $accounts->{payment};
@@ -6577,7 +6583,7 @@ $api->post(
         foreach my $transaction (@$transactions) {
             return unless my $form = $c->check_perms("$vc.transaction");
             my $new_transaction_id =
-              process_transaction( $c, $transaction, $form );
+              $c->process_transaction( $transaction, $form, $client );
             push @results,
               {
                 id      => $new_transaction_id,
@@ -6814,6 +6820,7 @@ $api->get(
             exchangerate     => $form->{exchangerate},
             department_id    => $form->{department_id},
             id               => $form->{id},
+            pending          => $form->{approved} ? '0' : '1',
             recordAccount    => $form->{acc_trans}{$transaction_type}[0],
             paymentmethod_id => $form->{paymentmethod_id},
             $vc_id_field     => $form->{$vc_id_field},
@@ -6836,13 +6843,17 @@ $api->get(
     }
 );
 
-sub process_transaction {
-    my ( $c, $data, $form ) = @_;
+helper process_transaction => sub {
+    my ( $c, $data, $form, $client ) = @_;
 
-    my $client = $c->param('client');
-    my $vc     = $c->param('vc');
-    my $id     = $c->param('id');
-    my $dbs    = $c->dbs($client);
+    if ( !$client ) {
+        $client = $c->param('client');
+    }
+
+    my $vc = $data->{vc} || $c->param('vc');
+    $vc = $data->{vc} if $data->{vc};
+    my $id  = $c->param('id');
+    my $dbs = $c->dbs($client);
 
     $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
 
@@ -6857,6 +6868,7 @@ sub process_transaction {
     $form->{duedate}      = $data->{dueDate};
     $form->{exchangerate} = $data->{exchangerate} || 1;
     $form->{department}   = $data->{department}   || '';
+    $form->{pending}      = $data->{pending} eq '0' ? undef : 1;
 
     # Handle vendor/customer specific fields
     if ( $vc eq 'vendor' ) {
@@ -6920,8 +6932,6 @@ sub process_transaction {
             $dbs->query( "SELECT id FROM chart WHERE accno = ?", $accno )
               ->into( my $id );
             $form->{"paymentmethod_$i"} = "0--$id" if defined $id;
-            warn($accno);
-            warn($id);
         }
     }
 
@@ -6933,9 +6943,6 @@ sub process_transaction {
             $form->{"tax_$tax->{accno}"} = $tax->{amount};
             my $accno = $tax->{accno};
 
-            # Validate and store tax rate
-            my $rate = $tax->{rate};
-            $form->{"${accno}_rate"}    = $rate;
             $form->{"calctax_${accno}"} = 1;
         }
         $form->{taxaccounts} = join( ' ', @taxaccounts );
@@ -6946,12 +6953,12 @@ sub process_transaction {
 
     if ( $data->{files} && ref $data->{files} eq 'ARRAY' ) {
         $form->{files}  = $data->{files};
-        $form->{client} = $c->param('client');
+        $form->{client} = $client;
         FM->upload_files( $dbs, $c, $form, $vc );
     }
 
     return $form->{id};
-}
+};
 
 $api->post(
     '/arap/transaction/:vc/:id' => { id => undef } => sub {
@@ -6966,14 +6973,14 @@ $api->post(
         else {
             $data = $c->req->json;
             if ( ref $data->{files} eq 'ARRAY' ) {
-                $data->{files} = decode_base64_files( $data->{files} );
+                $data->{files} = $c->decode_base64_files( $data->{files} );
             }
         }
 
         my $vc = $c->param('vc');
         return unless my $form = $c->check_perms("$vc.transaction");
 
-        my $transaction_id = process_transaction( $c, $data, $form );
+        my $transaction_id = $c->process_transaction( $data, $form, $client );
 
         $c->render( json => { id => $transaction_id } );
     }
@@ -7183,11 +7190,17 @@ $api->get(
 );
 
 sub process_invoice {
-    my ( $c, $data, $form ) = @_;
+    my ( $c, $data, $form, $client ) = @_;
 
-    my $client = $c->param('client');
-    my $id     = $c->param('id');
-    my $vc     = $c->param('vc');
+    if ( $c->param('client') ) {
+        $client = $c->param('client');
+    }
+    my $dbs = $c->dbs($client);
+    my $id  = $c->param('id');
+    my $vc  = $c->param('vc');
+    $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+
+    $vc = $data->{vc} if $data->{vc};
 
     # Determine if this should be AR or AP
     my $invoice_type = ( $vc eq 'vendor' ) ? 'AP' : 'AR';
@@ -7342,8 +7355,6 @@ sub process_invoice {
     $form->{language_code} = '';
     $form->{precision}     = $data->{selectedCurrency}->{prec} || 2;
 
-    warn Dumper($form);
-
     # Finally, post invoice to LedgerSMB
     if ( $invoice_type eq 'AR' ) {
         IS->post_invoice( $c->slconfig, $form );
@@ -7353,8 +7364,8 @@ sub process_invoice {
     }
 
     if ( $data->{files} && ref $data->{files} eq 'ARRAY' ) {
-        $form->{files}  = decode_base64_files( $data->{files} );
-        $form->{client} = $c->param('client');
+        $form->{files}  = $c->decode_base64_files( $data->{files} );
+        $form->{client} = $client;
         FM->upload_files( $dbs, $c, $form, $vc );
     }
 
@@ -7397,7 +7408,7 @@ $api->post(
                 $form = $c->check_perms("vendor.invoice");
             }
         }
-        my $new_invoice_id = process_invoice( $c, $data, $form );
+        my $new_invoice_id = process_invoice( $c, $data, $form, $client );
 
         # Return the newly posted or updated invoice ID
         $c->render( json => { id => $new_invoice_id } );
