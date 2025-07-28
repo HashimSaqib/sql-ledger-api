@@ -308,7 +308,8 @@ sub post_transaction {
 	      bank_id = (SELECT id FROM chart WHERE accno = '$paymentaccno'),
 	      paymentmethod_id = $paymentmethod_id,
 	      language_code = '$form->{language_code}',
-        linetax = $form->{linetax}
+        linetax = $form->{linetax},
+        approved = '$approved'
 	      WHERE id = $form->{id}|;
   $dbh->do($query) || $form->dberror($query);
 
@@ -702,6 +703,12 @@ sub delete_transaction {
     for (qw(recurring recurringemail recurringprint)) {
       if ($form->{$id}) {
 	$query = qq|DELETE FROM $_ WHERE id = $form->{$id}|;
+	$dbh->do($query) || $form->dberror($query);
+      }
+    }
+    for (qw(ai_processing)) {
+      if ($form->{$id}) {
+	$query = qq|DELETE FROM $_ WHERE reference_id = $form->{$id}|;
 	$dbh->do($query) || $form->dberror($query);
       }
     }

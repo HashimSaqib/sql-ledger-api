@@ -6,6 +6,7 @@
 /spool/*
 /images/*
 /files/*
+/neo_ai_plugin/*
 hypnotoad.pid
 .env
 .conf

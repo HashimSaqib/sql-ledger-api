@@ -3319,7 +3319,7 @@ sub create_links {
     $query = qq|SELECT a.invnumber, a.transdate,
                 a.${vc}_id, a.datepaid, a.duedate, a.ordnumber,
 		a.taxincluded, a.curr AS currency, a.notes, a.intnotes,
-		a.terms, a.cashdiscount, a.discountterms,
+		a.terms, a.cashdiscount, a.discountterms, a.approved,
 		c.name AS $vc, c.${vc}number, a.department_id,
 		d.description AS department,
 		a.amount AS oldinvtotal, a.paid AS oldtotalpaid,
