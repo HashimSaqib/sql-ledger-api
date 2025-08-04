@@ -7,6 +7,7 @@
 /images/*
 /files/*
 /neo_ai_plugin/*
+/neo_ai_plugin_test/
 hypnotoad.pid
 .env
 .conf

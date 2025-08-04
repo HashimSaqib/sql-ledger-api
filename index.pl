@@ -7201,6 +7201,7 @@ sub process_invoice {
     $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
 
     $vc = $data->{vc} if $data->{vc};
+    $form->{vc} = $vc;
 
     # Determine if this should be AR or AP
     my $invoice_type = ( $vc eq 'vendor' ) ? 'AP' : 'AR';
@@ -7373,8 +7374,8 @@ sub process_invoice {
 }
 $api->post(
     '/arap/invoice/:vc/:id' => { id => undef } => sub {
-        my $c      = shift;
-        my $vc     = $c->param('vc');
+        my $c  = shift;
+        my $vc = $c->param('vc');
         my $id     = $c->param('id');
         my $client = $c->param('client');
 
@@ -7383,13 +7384,12 @@ $api->post(
 
         if ( $content_type =~ m!multipart/form-data!i ) {
             $data = handle_multipart_request($c);
+            $data->{vc} = $vc;
         }
         else {
             $data = $c->req->json;
+            $data->{vc} = $vc;
         }
-
-        $data->{vc} eq 'customer' ? $data->{vc} = 'customer' : $data->{vc} =
-          'vendor';
 
         my $form;
         if ( $data->{vc} eq 'customer' ) {
