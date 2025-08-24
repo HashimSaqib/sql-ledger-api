@@ -3189,6 +3189,8 @@ $api->get(
 
         my $files = FM->get_files( $dbs, $c, $form );
 
+        my $offset_account_id = $dbs->query("SELECT offset_account_id FROM gl WHERE id = ?", $form->{id})->list;    
+        my $offset_accno = $dbs->query("SELECT accno FROM chart WHERE id = ?", $offset_account_id)->list;
         my $response = {
             id            => $form->{id},
             reference     => $form->{reference},
@@ -3204,7 +3206,8 @@ $api->get(
             exchangeRate  => $form->{exchangerate},
             employeeId    => $form->{employee_id},
             lines         => \@lines,
-            files         => $files
+            files         => $files,
+            offset_accno  => $offset_accno
         };
 
         $c->render( status => 200, json => $response );
@@ -3507,9 +3510,28 @@ sub api_gl_transaction {
     $form->{defaultcurrency} = $default_currency;
     $form->{login}           = $data->{login};
 
-    my $total_debit  = 0;
-    my $total_credit = 0;
-    my $i            = 1;
+    my $total_debit       = 0;
+    my $total_credit      = 0;
+    my $i                 = 1;
+    my $offset_accno      = $data->{offset_accno};
+    my $offset_account_id = undef;
+
+    # Validate offset account if provided
+    if ($offset_accno) {
+        my $offset_acc_result =
+          $dbs->query( "SELECT id from chart WHERE accno = ?", $offset_accno );
+        unless ( $offset_acc_result->rows ) {
+            return (
+                400,
+                {
+                    message =>
+"Offset account with the accno $offset_accno does not exist."
+                }
+            );
+        }
+        $offset_account_id = $offset_acc_result->hash->{id};
+    }
+
     foreach my $line ( @{ $data->{lines} } ) {
 
         my $acc_id =
@@ -3543,6 +3565,38 @@ sub api_gl_transaction {
               calc_line_tax( $dbs, $transdate, $amount, $line->{taxAccount} );
             $form->{"linetaxamount_$i"} = $tax_amount;
         }
+
+# Add offset line if offset_accno is provided and this line has a debit or credit amount
+        if (
+            $offset_accno
+            && (   ( $line->{debit} && $line->{debit} > 0 )
+                || ( $line->{credit} && $line->{credit} > 0 ) )
+          )
+        {
+            $i++;
+            my $amount = $line->{debit} || $line->{credit};
+
+            if ( $line->{debit} && $line->{debit} > 0 ) {
+
+                # Original line has debit, so offset line gets credit
+                $form->{"debit_$i"}  = 0;
+                $form->{"credit_$i"} = $amount;
+            }
+            else {
+                # Original line has credit, so offset line gets debit
+                $form->{"debit_$i"}  = $amount;
+                $form->{"credit_$i"} = 0;
+            }
+
+            $form->{"accno_$i"}         = $offset_accno;
+            $form->{"tax_$i"}           = 0;
+            $form->{"linetaxamount_$i"} = 0;
+            $form->{"cleared_$i"}       = $line->{cleared};
+            $form->{"memo_$i"}          = $line->{memo};
+            $form->{"source_$i"}        = $line->{source};
+            $form->{"projectnumber_$i"} = $line->{project};
+        }
+
         $i++;
     }
 
@@ -3560,13 +3614,18 @@ sub api_gl_transaction {
     # Adjust row count based on the counter
     $form->{rowcount} = $i - 1;
 
-    # Call the function to add the transaction
+    # seperate calls with dbh is needed to account for import
     if ($dbh) {
         $id = GL->post_transaction( $c->slconfig, $form, $dbs );
         $dbh->commit;
     }
     else {
         $id = GL->post_transaction( $c->slconfig, $form );
+    }
+
+    if ($form->{id}) {
+        my $update_sql = "UPDATE gl SET offset_account_id = ? WHERE id = ?";
+        $dbs->query( $update_sql, $offset_account_id, $form->{id} );
     }
 
     if ( $data->{files} && ref $data->{files} eq 'ARRAY' ) {
@@ -3587,6 +3646,7 @@ sub api_gl_transaction {
         transdate    => $form->{transdate},
         employeeId   => $form->{employee_id},
         department   => $form->{department},
+        offset_accno => $offset_accno,
         lines        => []
     };
 
