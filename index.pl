@@ -1216,7 +1216,7 @@ $central->post(
         my $sql_dir   = "sql/";
         my @sql_files = (
             "${sql_dir}Pg-tables.sql",    "${sql_dir}Pg-indices.sql",
-            "${sql_dir}Pg-functions.sql", "${sql_dir}Pg-neoledger.sql"
+            "${sql_dir}Pg-functions.sql", "api_pg_upgrade.sql"
         );
         foreach my $sql_file (@sql_files) {
             run_sql_file( $dataset, $sql_file );
@@ -2088,9 +2088,10 @@ $central->get(
 sub run_startup_database_updates {
     my ($app) = @_;
 
-    # First, update the central database itself
+    # First, update the central database itself - only from centraldb folder
     eval {
-        my $result = process_startup_updates( 'centraldb', $app );
+        my $result =
+          process_startup_updates( 'centraldb', $app, 1 );  # 1 = centraldb only
         if ( $result->{updated} ) {
             $app->log->info(
 "Updated centraldb to version $result->{new_version}: $result->{update_applied}"
@@ -2107,7 +2108,7 @@ sub run_startup_database_updates {
         die $error;    # Stop on any error
     };
 
-    # Get all datasets from central database
+    # Get all datasets from central database that exist in the dataset table
     my $central_dbh = DBI->connect( "dbi:Pg:dbname=centraldb;host=localhost",
         $postgres_user, $postgres_password, { AutoCommit => 1 } )
       or die "Failed to connect to central database: $DBI::errstr";
@@ -2132,7 +2133,8 @@ sub run_startup_database_updates {
 
     for my $dataset (@datasets) {
         eval {
-            my $result = process_startup_updates( $dataset, $app );
+            my $result = process_startup_updates( $dataset, $app, 0 )
+              ;    # 0 = dataset-specific only
             if ( $result->{updated} ) {
                 $updated_count++;
                 $app->log->info(
@@ -2156,7 +2158,7 @@ sub run_startup_database_updates {
 }
 
 sub process_startup_updates {
-    my ( $dataset, $app ) = @_;
+    my ( $dataset, $app, $is_centraldb ) = @_;
 
     my $dbh = DBI->connect( "dbi:Pg:dbname=$dataset;host=localhost",
         $postgres_user, $postgres_password, { AutoCommit => 1 } )
@@ -2204,20 +2206,41 @@ sub process_startup_updates {
     while (1) {
         my $next_version = sprintf( "%03d", int($final_version) + 1 );
 
-# Look for next update file - check both generic and database-specific directories
-        my @search_dirs = ( "db_updates/", "db_updates/$dataset/" );
+        # Determine which directories to search based on database type
+        my @search_dirs;
+        if ($is_centraldb) {
+
+            # For centraldb, only check the centraldb-specific folder
+            @search_dirs = ("db_updates/centraldb/");
+        }
+        else {
+ # For other datasets, check the root db_updates folder (but not subdirectories)
+            @search_dirs = ("db_updates/");
+        }
 
         my $update_file;
         my $file_path;
 
-        # Search in order of preference: database-specific first, then generic
+        # Search in the specified directories
         for my $updates_dir (@search_dirs) {
             next unless -d $updates_dir;
 
             opendir( my $dh, $updates_dir )
               or die "Cannot open $updates_dir directory: $!";
-            my @update_files =
-              grep { /^${next_version}-.*\.sql$/ } readdir($dh);
+
+            my @update_files;
+            if ($is_centraldb) {
+
+                # For centraldb, look for files directly in the centraldb folder
+                @update_files =
+                  grep { /^${next_version}-.*\.sql$/ } readdir($dh);
+            }
+            else {
+# For other datasets, look for files directly in the root db_updates folder only (not in subdirectories)
+                @update_files =
+                  grep { /^${next_version}-.*\.sql$/ && !-d "$updates_dir$_" }
+                  readdir($dh);
+            }
             closedir($dh);
 
             if (@update_files) {
@@ -7374,8 +7397,8 @@ sub process_invoice {
 }
 $api->post(
     '/arap/invoice/:vc/:id' => { id => undef } => sub {
-        my $c  = shift;
-        my $vc = $c->param('vc');
+        my $c      = shift;
+        my $vc     = $c->param('vc');
         my $id     = $c->param('id');
         my $client = $c->param('client');
 

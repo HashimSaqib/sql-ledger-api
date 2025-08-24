@@ -27,4 +27,3 @@ INSERT INTO ai_prompts (name, prompt) VALUES ('ap_transaction', '');
 INSERT INTO ai_prompts (name, prompt) VALUES ('sales_invoice', '');
     
 
-INSERT INTO db_updates (version, last_update) VALUES ('002', 'AI Tables');
