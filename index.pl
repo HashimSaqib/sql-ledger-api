@@ -289,10 +289,10 @@ get '/logo/:client/' => sub {
 ###############################
 
 my $neoledger_perms =
-'["dashboard", "cash", "cash.recon", "gl", "gl.add", "gl.transactions", "items", "items.part", "items.service", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income", "system", "system.currencies", "system.projects", "system.departments", "system.defaults", "system.chart", "system.chart.list", "system.chart.add", "system.chart.gifi", "system.taxes",  "system.templates", "system.audit", "system.yearend", "system.batch", "import", "import.gl", "import.customer", "import.ar_invoice", "import.ar_transaction", "import.vendor", "import.ap_invoice", "import.ap_transaction", "reports.balance", "customer", "customer.transaction", "customer.invoice", "customer.transaction_return", "customer.invoice_return", "customer.add", "customer.batch", "customer.reminder", "customer.consolidate", "customer.transactions", "customer.search", "customer.history", "vendor", "vendor.transaction", "vendor.invoice", "vendor.transaction_return", "vendor.invoice_return", "vendor.add", "vendor.transactions", "vendor.search", "vendor.history", "reports.alltaxes", "vendor.taxreport", "customer.taxreport", "cash.payments", "cash.receipts", "cash.report.customer", "cash.report.vendor", "system.bank", "import.bank"]';
+'["dashboard", "cash", "cash.recon", "gl", "gl.add", "gl.transactions", "items", "items.part", "items.service", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income", "system", "system.currencies", "system.projects", "system.departments", "system.defaults", "system.chart", "system.chart.list", "system.chart.add", "system.chart.gifi", "system.taxes",  "system.templates", "system.audit", "system.yearend", "system.batch", "import", "import.gl", "import.customer", "import.ar_invoice", "import.ar_transaction", "import.vendor", "import.ap_invoice", "import.ap_transaction", "reports.balance", "customer", "customer.transaction", "customer.invoice", "customer.transaction_return", "customer.invoice_return", "customer.add", "customer.batch", "customer.reminder", "customer.consolidate", "customer.transactions", "customer.search", "customer.history", "vendor", "vendor.transaction", "vendor.invoice", "vendor.transaction_return", "vendor.invoice_return", "vendor.add", "vendor.transactions", "vendor.search", "vendor.history", "reports.alltaxes", "vendor.taxreport", "customer.taxreport", "cash.payments", "cash.receipts", "cash.report.customer", "cash.report.vendor", "system.bank", "import.bank", "customer.order", "customer.orders", "customer.quotation", "customer.quotations", "vendor.order", "vendor.orders", "vendor.quotation", "vendor.quotations"]';
 
 my $reports_only =
-'["dashboard", "gl", "gl.transactions", "items", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income",  "reports.balance", "customer", "customer.transactions", "customer.search", "customer.history", "vendor", "vendor.search", "vendor.history", "vendor.transactions", "reports.alltaxes", "vendor.taxreport", "customer.taxreport", "cash.report.customer", "cash.report.vendor"]';
+'["dashboard", "gl", "gl.transactions", "items", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income",  "reports.balance", "customer", "customer.transactions", "customer.search", "customer.history", "vendor", "vendor.search", "vendor.history", "vendor.transactions", "reports.alltaxes", "vendor.taxreport", "customer.taxreport", "cash.report.customer", "cash.report.vendor", "customer.orders", "customer.quotations", "vendor.orders", "vendor.quotations"]';
 helper send_email_central => sub {
     use Email::Sender::Transport::SMTP;
     use Email::Stuffer;
@@ -3189,8 +3189,11 @@ $api->get(
 
         my $files = FM->get_files( $dbs, $c, $form );
 
-        my $offset_account_id = $dbs->query("SELECT offset_account_id FROM gl WHERE id = ?", $form->{id})->list;    
-        my $offset_accno = $dbs->query("SELECT accno FROM chart WHERE id = ?", $offset_account_id)->list;
+        my $offset_account_id =
+          $dbs->query( "SELECT offset_account_id FROM gl WHERE id = ?",
+            $form->{id} )->list;
+        my $offset_accno = $dbs->query( "SELECT accno FROM chart WHERE id = ?",
+            $offset_account_id )->list;
         my $response = {
             id            => $form->{id},
             reference     => $form->{reference},
@@ -3623,7 +3626,7 @@ sub api_gl_transaction {
         $id = GL->post_transaction( $c->slconfig, $form );
     }
 
-    if ($form->{id}) {
+    if ( $form->{id} ) {
         my $update_sql = "UPDATE gl SET offset_account_id = ? WHERE id = ?";
         $dbs->query( $update_sql, $offset_account_id, $form->{id} );
     }
@@ -6128,6 +6131,20 @@ $api->get(
         LIMIT 5;
             }
         }
+        elsif ( $module eq 'oe' ) {
+            my $vc      = $c->param('vc');
+            my $oe_type = $c->param('oe_type');
+            return unless $c->check_perms("$vc.$oe_type");
+            my $quotation = $oe_type eq 'quotation' ? 'true'  : 'false';
+            my $vc_id     = $vc eq 'customer' ? 'customer_id' : 'vendor_id';
+            $sql = qq{
+                SELECT oe.*, vc.name FROM oe oe
+                JOIN $vc vc on oe.$vc_id = vc.id
+                WHERE oe.quotation = $quotation
+                ORDER BY oe.id DESC
+                LIMIT 5;
+                }
+        }
 
         my $transactions = $dbs->query($sql)->hashes;
         $c->render( json => $transactions );
@@ -6167,6 +6184,22 @@ $api->get(
         elsif ( $module eq 'vendor' ) {
             return unless $form = $c->check_perms('vendor.add,vendor.import');
             $number = $form->update_defaults( $c->slconfig, 'vendornumber' );
+        }
+        elsif ( $module eq 'customer_order' ) {
+            return unless $form = $c->check_perms('customer.order');
+            $number = $form->update_defaults( $c->slconfig, 'sonumber' );
+        }
+        elsif ( $module eq 'customer_quotation' ) {
+            return unless $form = $c->check_perms('customer.quotation');
+            $number = $form->update_defaults( $c->slconfig, 'quonumber' );
+        }
+        elsif ( $module eq 'vendor_order' ) {
+            return unless $form = $c->check_perms('vendor.order');
+            $number = $form->update_defaults( $c->slconfig, 'ponumber' );
+        }
+        elsif ( $module eq 'vendor_quotation' ) {
+            return unless $form = $c->check_perms('vendor.quotation');
+            $number = $form->update_defaults( $c->slconfig, 'rfqnumber' );
         }
         $c->render( json => { number => $number } );
     }
@@ -8032,6 +8065,759 @@ $api->get(
         $c->render( json => \@response );
     }
 );
+
+###############################
+####                       ####
+####    Order  Entry       ####
+####                       ####
+###############################
+
+$api->get(
+    '/oe/:type/:vc' => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+        my $type   = $c->param('type');
+        my $vc     = $c->param('vc');
+        return unless my $form = $c->check_perms("$vc.transactions");
+        my $data = $c->req->params->to_hash;
+
+        # Validate type parameter
+        unless ( $type eq 'order' || $type eq 'quotation' ) {
+            return $c->render(
+                json => {
+                    error => 'Invalid type. Must be either order or quotation.'
+                },
+                status => 400
+            );
+        }
+
+        # Validate vc parameter
+        unless ( $vc eq 'vendor' || $vc eq 'customer' ) {
+            return $c->render(
+                json => {
+                    error => 'Invalid vc. Must be either vendor or customer.'
+                },
+                status => 400
+            );
+        }
+
+        # Map internal type based on type and vc combination
+        my $internal_type;
+        if ( $type eq 'order' ) {
+            $internal_type = $vc eq 'customer' ? 'ship_order' : 'receive_order';
+        }
+        elsif ( $type eq 'quotation' ) {
+            $internal_type = "${vc}_quotation";
+        }
+
+        $form->{type}             = $internal_type;
+        $form->{vc}               = $vc;
+        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+
+        # Define available filters for OE transactions
+        my @date_filters = qw(transdatefrom transdateto);
+        my @text_filters =
+          qw(ordnumber quonumber ponumber shipvia waybill notes description memo);
+        my @entity_filters  = qw(department);
+        my @boolean_filters = qw(open closed);
+
+        # Apply the predefined values from $data
+        for my $key ( keys %$data ) {
+            $form->{$key} = $data->{$key} if defined $data->{$key};
+        }
+
+        # Additional validation for date fields if they're not empty
+        for my $filter (@date_filters) {
+            next unless $form->{$filter};
+            if (   $filter =~ /^transdate/
+                && $form->{$filter} !~ /^\d{4}-\d{2}-\d{2}$/ )
+            {
+                return $c->render(
+                    json => {
+                        error =>
+                          "Invalid date format for $filter. Use YYYY-MM-DD."
+                    },
+                    status => 400
+                );
+            }
+        }
+
+        # Handle entity-specific fields
+        if ( my $entity_id = $data->{"${vc}_id"} ) {
+            $form->{"${vc}_id"} = $entity_id;
+        }
+        if ( my $number = $data->{"${vc}number"} ) {
+            $form->{"${vc}number"} = $number;
+        }
+        if ( my $name = $data->{$vc} ) {
+            $form->{$vc} = $name;
+        }
+
+        # Call OE transactions subroutine
+        OE->transactions( $c->slconfig, $form );
+
+        # Check if results exist
+        if (  !defined $form->{OE}
+            || ref $form->{OE} ne 'ARRAY'
+            || !@{ $form->{OE} } )
+        {
+            return $c->render(
+                status => 404,
+                json   => { message => "No orders found" }
+            );
+        }
+
+        # Calculate totals for specific fields
+        my $totals = {
+            amount    => 0,
+            netamount => 0,
+        };
+
+        foreach my $order ( @{ $form->{OE} } ) {
+            $totals->{amount}    += $order->{amount}    || 0;
+            $totals->{netamount} += $order->{netamount} || 0;
+        }
+
+        my $dbs = $c->dbs($client);
+
+        # Return both orders and totals
+        return $c->render(
+            json => {
+                orders => $form->{OE},
+                totals => $totals
+            }
+        );
+    }
+);
+
+$api->get(
+    '/oe/:type/:vc/:id' => sub {
+        my $c       = shift;
+        my $vc      = $c->param('vc');
+        my $oe_type = $c->param('type');
+        my $id      = $c->param('id');
+
+        my $form = $c->check_perms("$vc.$oe_type");
+        $form->{vc} = $vc;
+        $form->{id} = $id;
+        OE->retrieve( $c->slconfig, $form );
+        warn Dumper($form);
+
+        my $arap_key = $vc eq 'vendor'   ? 'AP' : 'AR';
+        my $ml       = $vc eq 'customer' ? -1   : 1;
+
+        # Create payments array
+        my @payments;
+        my $paid_key = $arap_key . '_paid';
+
+        if ( defined $form->{acc_trans}{$paid_key}
+            && ref $form->{acc_trans}{$paid_key} eq 'ARRAY' )
+        {
+            for my $payment_entry ( @{ $form->{acc_trans}{$paid_key} } ) {
+                push @payments,
+                  {
+                    date         => $payment_entry->{transdate},
+                    source       => $payment_entry->{source},
+                    memo         => $payment_entry->{memo},
+                    amount       => $payment_entry->{amount} * $ml,
+                    exchangerate => $payment_entry->{exchangerate},
+                    account      => $payment_entry->{accno}
+                  };
+            }
+        }
+
+      # Build line items (using form_details from the dump, not invoice_details)
+        my @lines;
+        if ( ref $form->{form_details} eq 'ARRAY' ) {
+            @lines = map {
+                {
+                    id          => $_->{id},
+                    partnumber  => $_->{partnumber},
+                    description => $_->{description},
+                    qty         => $_->{qty},
+                    onhand      => $_->{onhand},
+                    unit        => $_->{unit},
+                    price => $_->{sellprice} > 0 ? $_->{sellprice} : $_->{sell},
+                    discount         => $_->{discount} * 100,
+                    taxaccounts      => [ split ' ', $_->{taxaccounts} || '' ],
+                    lineitemdetail   => $_->{lineitemdetail},
+                    itemnotes        => $_->{itemnotes},
+                    ordernumber      => $_->{ordernumber},
+                    serialnumber     => $_->{serialnumber},
+                    customerponumber => $_->{customerponumber},
+                    project_id       => $_->{project_id} || '',
+                    cost             => $_->{cost},
+                    costvendor       => $_->{costvendor},
+                    costvendorid     => $_->{costvendorid},
+                    package          => $_->{package},
+                    volume           => $_->{volume},
+                    weight           => $_->{weight},
+                    netweight        => $_->{netweight},
+                    sku              => $_->{sku},
+                    make             => $_->{make},
+                    model            => $_->{model},
+                }
+            } @{ $form->{form_details} };
+        }
+
+        # Process tax information (if tax data exists in acc_trans)
+        my @taxes;
+        my $tax_key = $arap_key . '_tax';
+        if ( $form->{acc_trans}{$tax_key} ) {
+            @taxes = map {
+                {
+                    accno  => $_->{accno},
+                    amount => $_->{amount},
+                    rate   => $_->{rate},
+                }
+            } @{ $form->{acc_trans}{$tax_key} };
+        }
+
+        # For the vc_field and vc_id_field
+        my ( $vc_field, $vc_id_field ) =
+          $vc eq 'vendor'
+          ? ( 'vendornumber', 'vendor_id' )
+          : ( 'customernumber', 'customer_id' );
+
+        # Get files if FM module is available
+        my $files = [];
+
+       # my $files = FM->get_files( $dbs, $c, $form ) if defined &FM::get_files;
+
+        # Build JSON response
+        my $json_data = {
+
+            # Dynamic fields for vendor or customer
+            $vc_field    => $form->{$vc_field},
+            $vc_id_field => $form->{$vc_id_field},
+
+            # Use correct field names from the dump
+            customer      => $form->{customer},       # For display name
+            shippingpoint => $form->{shippingpoint},
+            shipvia       => $form->{shipvia},
+            waybill       => $form->{waybill},
+            description   => $form->{description},
+            notes         => $form->{notes},
+            intnotes      => $form->{intnotes},
+            ordnumber     => $form->{ordnumber},      # Not invnumber for orders
+            transdate     => $form->{transdate},
+            reqdate       => $form->{reqdate},
+            ponumber      => $form->{ponumber},
+            quonumber     => $form->{quonumber},
+            type          => $oe_type,         # Use the type from URL parameter
+            currency      => $form->{currency},
+            exchangerate  => $form->{"$form->{currency}"},
+            id            => $form->{id},
+            department_id => $form->{department_id},
+            invtotal      => $form->{invtotal},
+            taxincluded   => $form->{taxincluded},
+            terms         => $form->{terms},
+            closed        => $form->{closed},
+            files         => $files,
+            lines         => \@lines,
+            payments      => \@payments,
+        };
+
+        # Add taxes if they exist
+        if (@taxes) {
+            $json_data->{taxes} = \@taxes;
+        }
+
+        # Add shipping information
+        my $shipto = {};
+        foreach my $item (
+            qw(name address1 address2 city state zipcode country contact phone fax email)
+          )
+        {
+            $shipto->{$item} = $form->{"shipto$item"};
+        }
+        $json_data->{shipto} = $shipto;
+
+        $c->render( json => $json_data );
+    }
+);
+
+sub process_order {
+    my ( $c, $data, $form, $client ) = @_;
+
+    if ( $c->param('client') ) {
+        $client = $c->param('client');
+    }
+    my $dbs        = $c->dbs($client);
+    my $id         = $c->param('id');
+    my $vc         = $c->param('vc');
+    my $order_type = $c->param('type') || 'quotation';
+    $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+
+    $vc = $data->{vc} if $data->{vc};
+    $form->{vc} = $vc;
+
+    if ( $order_type eq 'order' ) {
+        $form->{type} =
+          ( $vc eq 'customer' ) ? 'sales_order' : 'purchase_order';
+    }
+    else {
+        $form->{type} = ( $vc eq 'customer' ) ? 'quotation' : 'rfq';
+    }
+
+    # Set the ID if provided
+    $form->{id} = $id if $id;
+
+    # Basic order details
+    $form->{ordnumber}    = $data->{number}      || '';
+    $form->{quonumber}    = $data->{number}      || '';
+    $form->{description}  = $data->{description} || '';
+    $form->{transdate}    = $data->{date};
+    $form->{reqdate}      = $data->{requiredBy};
+    $form->{currency}     = $data->{currency};
+    $form->{curr}         = $data->{currency};
+    $form->{exchangerate} = $data->{exchangerate} || 1;
+    $form->{notes}        = $data->{notes}        || '';
+    $form->{intnotes}     = $data->{intnotes}     || '';
+    $form->{till}         = $data->{till}         || '';
+    $form->{department}   = $data->{department}   || '';
+    $form->{ponumber}     = $data->{ponumber}     || '';
+    $form->{terms}        = $data->{terms}        || 0;
+    $form->{closed}       = $data->{closed}       || 0;
+    $form->{backorder}    = $data->{backorder}    || 0;
+
+    # Set customer/vendor ID
+    if ( $vc eq 'customer' ) {
+        $form->{customer_id} = $data->{customer_id};
+        $form->{customer}    = $data->{customer} || '';
+    }
+    else {
+        $form->{vendor_id} =
+          $data->{selectedVendor}->{id} || $data->{vendor_id};
+        $form->{vendor} = $data->{vendor} || '';
+    }
+
+    # Shipping information
+    $form->{shippingpoint} = $data->{shippingPoint} || '';
+    $form->{shipvia}       = $data->{shipVia}       || '';
+    $form->{waybill}       = $data->{wayBill}       || '';
+
+    # Ship-to address
+    foreach my $item (
+        qw(name address1 address2 city state zipcode country contact phone fax email)
+      )
+    {
+        $form->{"shipto$item"} = $data->{shipto}->{$item} || '';
+    }
+
+    # Build line items
+    $form->{rowcount} = scalar @{ $data->{lines} || [] };
+    for my $i ( 1 .. $form->{rowcount} ) {
+        my $line = $data->{lines}[ $i - 1 ];
+
+        $form->{"id_$i"}          = $line->{number}      || $line->{parts_id};
+        $form->{"description_$i"} = $line->{description} || '';
+        $form->{"qty_$i"}         = $line->{qty}         || 0;
+        $form->{"ship_$i"}        = $line->{ship}        || 0;
+        $form->{"sellprice_$i"}   = $line->{price}       || 0;
+        $form->{"discount_$i"}    = $line->{discount}    || 0;
+        $form->{"unit_$i"}        = $line->{unit}        || '';
+        $form->{"lineitemdetail_$i"} = $line->{lineitemdetail} || 0;
+        $form->{"reqdate_$i"} = $line->{deliverydate} || $line->{reqdate} || '';
+        $form->{"itemnotes_$i"}        = $line->{itemnotes}        || '';
+        $form->{"ordernumber_$i"}      = $line->{ordernumber}      || '';
+        $form->{"serialnumber_$i"}     = $line->{serialnumber}     || '';
+        $form->{"customerponumber_$i"} = $line->{customerponumber} || '';
+        $form->{"costvendor_$i"}       = $line->{costvendor}       || '';
+        $form->{"package_$i"}          = $line->{package}          || '';
+        $form->{"volume_$i"}           = $line->{volume}           || 0;
+        $form->{"netweight_$i"}        = $line->{netweight}        || 0;
+        $form->{"grossweight_$i"} =
+          $line->{grossweight} || $line->{weight} || 0;
+        $form->{"cost_$i"}          = $line->{cost}        || 0;
+        $form->{"projectnumber_$i"} = $line->{project}     || '';
+        $form->{"project_id_$i"}    = $line->{project_id}  || '';
+        $form->{"taxaccounts_$i"}   = $line->{taxaccounts} || '';
+    }
+
+    # Build payments
+    $form->{paidaccounts} = scalar @{ $data->{payments} || [] };
+    for my $payment_idx ( 0 .. $form->{paidaccounts} - 1 ) {
+        my $payment = $data->{payments}[$payment_idx];
+        my $i       = $payment_idx + 1;
+
+        $form->{"datepaid_$i"}     = $payment->{date};
+        $form->{"source_$i"}       = $payment->{source}       || '';
+        $form->{"memo_$i"}         = $payment->{memo}         || '';
+        $form->{"paid_$i"}         = $payment->{amount}       || 0;
+        $form->{"exchangerate_$i"} = $payment->{exchangerate} || 1;
+
+        # Set payment account based on vc type
+        my $payment_field = ( $vc eq 'vendor' ) ? "AP_paid_$i" : "AR_paid_$i";
+        $form->{$payment_field} = $payment->{account} . "--"
+          if $payment->{account};
+
+        # Set payment method if account number provided
+        if ( my $accno = $payment->{account} ) {
+            my $account_id =
+              $dbs->query( "SELECT id FROM chart WHERE accno = ?", $accno )
+              ->into( my $id );
+            $form->{"payment_$i"} = "0--$id" if defined $id;
+        }
+    }
+
+    # Taxes
+    $form->{taxincluded} = $data->{taxincluded} || 0;
+    if ( $data->{taxes} && ref( $data->{taxes} ) eq 'ARRAY' ) {
+        my @taxaccounts;
+        for my $tax ( @{ $data->{taxes} } ) {
+            push @taxaccounts, $tax->{accno};
+            $form->{"$tax->{accno}_rate"} = $tax->{rate} || 0;
+        }
+        $form->{taxaccounts} = join( ' ', @taxaccounts );
+    }
+    else {
+        # Query taxes from database if not provided
+        my $transdate = $data->{date} || $data->{transdate};
+
+        my $taxes = $dbs->query(
+            q{
+            SELECT c.accno, t.rate, t.chart_id
+            FROM tax t
+            JOIN chart c ON c.id = t.chart_id
+            WHERE t.validto IS NULL 
+               OR t.validto >= ?
+            ORDER BY t.chart_id, t.id DESC
+            },
+            $transdate
+        )->hashes;
+
+        if (@$taxes) {
+            my @taxaccounts;
+            my %seen_charts;
+
+            for my $tax (@$taxes) {
+
+                # Only use the first (most recent) rate for each chart_id
+                next if $seen_charts{ $tax->{chart_id} };
+                $seen_charts{ $tax->{chart_id} } = 1;
+
+                push @taxaccounts, $tax->{accno};
+                $form->{"$tax->{accno}_rate"} = $tax->{rate} || 0;
+            }
+
+            $form->{taxaccounts} = join( ' ', @taxaccounts );
+        }
+    }
+
+    # Employee and language settings
+    $form->{employee}      = $data->{employee}      || '';
+    $form->{employee_id}   = $data->{employee_id}   || '';
+    $form->{language_code} = $data->{language_code} || '';
+    $form->{precision} =
+      $data->{selectedCurrency}->{prec} || $data->{precision} || 2;
+
+    # Department and warehouse
+    $form->{department_id} = $data->{department_id} || '';
+    $form->{warehouse}     = $data->{warehouse}     || '';
+    $form->{warehouse_id}  = $data->{warehouse_id}  || '';
+
+    # Save the order
+    OE->save( $c->slconfig, $form );
+
+    # Handle file uploads
+    if ( $data->{files} && ref $data->{files} eq 'ARRAY' ) {
+        $form->{files}  = $c->decode_base64_files( $data->{files} );
+        $form->{client} = $client;
+        FM->upload_files( $dbs, $c, $form, $vc );
+    }
+
+    return $form->{id};
+}
+
+$api->post(
+    '/oe/:type/:vc/:id' => { id => undef } => sub {
+        my $c      = shift;
+        my $vc     = $c->param('vc')   || 'customer';
+        my $type   = $c->param('type') || 'quotation';
+        my $id     = $c->param('id');
+        my $client = $c->param('client');
+
+        my $data;
+        my $content_type = $c->req->headers->content_type || '';
+
+        if ( $content_type =~ m!multipart/form-data!i ) {
+            $data         = handle_multipart_request($c);
+            $data->{vc}   = $vc;
+            $data->{type} = $type;
+        }
+        else {
+            $data         = $c->req->json;
+            $data->{vc}   = $vc;
+            $data->{type} = $type;
+        }
+
+        my $form;
+        if ( $type eq 'quotation' ) {
+            $form = $c->check_perms("$vc.quotation");
+        }
+        else {
+            $form = $c->check_perms("$vc.order");
+        }
+        my $new_order_id = process_order( $c, $data, $form, $client );
+
+        # Return the newly posted or updated invoice ID
+        $c->render( json => { id => $new_order_id } );
+    }
+);
+
+$api->delete(
+    '/oe/:type/:vc/:id' => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+        my $id     = $c->param('id');
+        my $vc     = $c->param('vc');
+        my $type   = $c->param('type');
+        my $form   = new Form;
+
+        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+        if ( $type eq 'quotation' ) {
+            return unless $c->check_perms("$vc.quotation");
+        }
+        else {
+            return unless $c->check_perms("$vc.order");
+        }
+        $form->{id} = $id;
+        OE->delete( $c->slconfig, $form );
+
+        $c->render( status => 204, data => '' );
+    }
+);
+
+sub build_oe {
+    my ( $c, $client, $form, $dbs ) = @_;
+    my $template = $c->param("template");
+    my $format   = $c->param("format");
+
+    # Extract parameters
+    my $client = $c->param('client') || die "Missing client parameter";
+    my $vc     = $c->param('vc')     || die "Missing vc parameter";
+    my $id     = $c->param('id')     || die "Missing invoice id";
+    my $type   = $c->param('type')   || die "Missing type parameter";
+    my $dbs    = $c->dbs($client);
+
+    return unless my $form = $c->check_perms("$type.$vc");
+    $form->{vc} = $vc;
+    $form->{id} = $id;
+
+    # Build invoice and letterhead data
+    OE->retrieve( $c->slconfig, $form );
+    my $i = 1;
+    for my $item ( @{ $form->{form_details} || [] } ) {
+        for my $key ( keys %$item ) {
+            $form->{"${key}_$i"} = $item->{$key};
+        }
+        $i++;
+    }
+    $form->{rowcount} = $i;
+
+    # Process tax data
+    my $taxes_query = $dbs->query(
+        q{
+            SELECT c.accno, c.description, t.taxnumber, t.rate, t.chart_id
+            FROM tax t
+            JOIN chart c ON c.id = t.chart_id
+            WHERE t.validto IS NULL 
+               OR t.validto >= ?
+            ORDER BY t.chart_id, t.id DESC
+        },
+        $form->{transdate}
+    )->hashes;
+
+    my %taxaccounts;
+    my %taxbase;
+    my $tax      = 0;
+    my $taxrate  = 0;
+    my $myconfig = $c->get_defaults();    # Assuming this method exists
+
+    if (@$taxes_query) {
+        my @taxaccounts_list;
+        my %seen_charts;
+
+        for my $tax_item (@$taxes_query) {
+
+            # Only use the first (most recent) rate for each chart_id
+            next if $seen_charts{ $tax_item->{chart_id} };
+            $seen_charts{ $tax_item->{chart_id} } = 1;
+
+            push @taxaccounts_list, $tax_item->{accno};
+            $form->{"$tax_item->{accno}_rate"} = $tax_item->{rate};
+            $form->{"$tax_item->{accno}_description"} =
+              $tax_item->{description};
+            $form->{"$tax_item->{accno}_taxnumber"} = $tax_item->{taxnumber};
+
+            # Initialize tax accounts hash for processing
+            $taxaccounts{ $tax_item->{accno} } = 0;
+            $taxbase{ $tax_item->{accno} }     = 0;
+        }
+        $form->{taxaccounts} = join( ' ', @taxaccounts_list );
+
+        # Process tax calculations
+        for ( sort keys %taxaccounts ) {
+            $taxaccounts{$_} =
+              $form->round_amount( $taxaccounts{$_}, $form->{precision} );
+            $tax += $taxaccounts{$_};
+            $form->{"${_}_taxbaseinclusive"} =
+              $taxbase{$_} + $taxaccounts{$_};
+
+            push(
+                @{ $form->{taxdescription} },
+                $form->string_replace( $form->{"${_}_description"}, "%", "" )
+            );
+
+            $taxrate += $form->{"${_}_rate"};
+
+            push( @{ $form->{xml_taxrate} }, $form->{"${_}_rate"} * 100 );
+            push(
+                @{ $form->{taxrate} },
+                $form->format_amount(
+                    $myconfig,          $form->{"${_}_rate"} * 100,
+                    $form->{precision}, '0.00'
+                )
+            );
+            push( @{ $form->{taxnumber} }, $form->{"${_}_taxnumber"} );
+        }
+    }
+
+    AA->company_details( $c->slconfig, $form );
+    OE->order_details( $c->slconfig, $form );
+
+    my @f =
+      qw(email name address1 address2 city state zipcode country contact phone fax);
+    my $fillshipto = 1;
+
+    # check for shipto
+    foreach my $item (@f) {
+        if ( $form->{"shipto$item"} ) {
+            $fillshipto = 0;
+            last;
+        }
+    }
+
+    if ($fillshipto) {
+        $fillshipto = 0;
+        $fillshipto = 1
+          if $form->{formname} =~
+          /(credit_invoice|purchase_order|request_quotation|bin_list)/;
+        $fillshipto = 1
+          if ( $form->{type} eq 'invoice' && $form->{vc} eq 'vendor' );
+
+        $form->{shiptophone}   = $form->{tel};
+        $form->{shiptofax}     = $form->{fax};
+        $form->{shiptocontact} = $form->{employee};
+
+        if ($fillshipto) {
+            if ( $form->{warehouse} ) {
+                $form->{shiptoname} = $form->{company};
+                for (qw(address1 address2 city state zipcode country)) {
+                    $form->{"shipto$_"} = $form->{"warehouse$_"};
+                }
+            }
+            else {
+                # fill in company address
+                $form->{shiptoname}     = $form->{company};
+                $form->{shiptoaddress1} = $form->{address};
+            }
+        }
+        else {
+            for (@f) { $form->{"shipto$_"} = $form->{$_} }
+            for (qw(phone fax)) {
+                $form->{"shipto$_"} = $form->{"$form->{vc}$_"};
+            }
+        }
+    }
+    return $form;
+}
+
+$api->get(
+    "/print_oe/:type/:vc/:id" => sub {
+        my $c        = shift;
+        my $template = $c->param("template");
+        my $format   = $c->param("format");
+
+        # Extract parameters
+        my $client = $c->param('client') || die "Missing client parameter";
+        my $vc     = $c->param('vc')     || die "Missing vc parameter";
+        my $id     = $c->param('id')     || die "Missing invoice id";
+        my $type   = $c->param('type')   || die "Missing type parameter";
+        my $dbs    = $c->dbs($client);
+
+        return unless my $form = $c->check_perms("$type.$vc");
+        $form                      = build_oe( $c, $client, $form, $dbs );
+        $form->{lastpage}          = 0;
+        $form->{sumcarriedforward} = 0;
+        $form->{templates}         = "templates/$client";
+        $form->{IN}                = "$template.$format";
+
+        # Set input and output based on type
+        if ( $format eq 'tex' ) {
+            $form->{OUT}    = ">tmp/invoice.pdf";
+            $form->{format} = "pdf";
+            $form->{media}  = "screen";
+            $form->{copies} = 1;
+        }
+        elsif ( $format eq 'html' ) {
+            $form->{OUT} = ">tmp/invoice.html";
+        }
+        else {
+            die "Unsupported format: $format";
+        }
+
+        my $userspath = "tmp";
+        my $defaults  = $c->get_defaults();
+
+        # Process based on format
+        if ( $format eq 'tex' ) {
+            my $dvipdf  = "";
+            my $xelatex = $defaults->{xelatex};
+            $form->parse_template( $c->slconfig, $userspath, $dvipdf,
+                $xelatex );
+
+            my $pdf_path = "tmp/invoice.pdf";
+
+            # Read PDF file content
+            open my $fh, '<', $pdf_path or die "Cannot open file $pdf_path: $!";
+            binmode $fh;
+            my $pdf_content = do { local $/; <$fh> };
+            close $fh;
+            unlink $pdf_path or warn "Could not delete $pdf_path: $!";
+
+            # Return PDF as response
+            $c->res->headers->content_type('application/pdf');
+            $c->res->headers->content_disposition(
+                "attachment; filename=\"$id.pdf\"");
+            $c->render( data => $pdf_content );
+        }
+        elsif ( $format eq 'html' ) {
+            $form->parse_template( $c->slconfig, $userspath );
+
+            # Strip the '>' character from the output file path
+            ( my $file_path = $form->{OUT} ) =~ s/^>//;
+
+            # Read the HTML file content
+            open my $fh, '<', $file_path or die "Cannot open $file_path: $!";
+            my $html_content = do { local $/; <$fh> };
+            close $fh;
+            unlink $file_path or warn "Could not delete $file_path: $!";
+
+            # Convert HTML to PDF
+            my $pdf = html_to_pdf($html_content);
+            unless ($pdf) {
+                $c->res->status(500);
+                $c->render( text => "Failed to generate PDF" );
+                return;
+            }
+            $c->res->headers->content_type('application/pdf');
+            $c->render( data => $pdf );
+        }
+    }
+);
+
 ###############################
 ####                       ####
 ####    Bank Adjustments   ####
@@ -10403,11 +11189,6 @@ sub build_transaction {
     # Pass through vendor/customer identifiers.
     $transaction{$vc_field}    = $form->{$vc_field};
     $transaction{$vc_id_field} = $form->{$vc_id_field};
-
-    # Optionally, add discount information if applicable:
-    # $transaction{cd_amount}     = ...;
-    # $transaction{discountterms} = ...;
-    # $transaction{cashdiscount}  = ...;
 
     return \%transaction;
 }
