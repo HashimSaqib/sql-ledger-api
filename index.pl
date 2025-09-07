@@ -5827,8 +5827,6 @@ $api->get(
             my $role        = undef;
             my $departments = $c->get_departments($role);
 
-            my $stations = $c->get_stations($form);
-
             my $stations      = [];
             my $user_stations = [];
             if ($ai_plugin) {
