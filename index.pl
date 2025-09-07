@@ -260,9 +260,11 @@ app->hook(
     }
 );
 
+my $ai_plugin = 0;
 if ( $ENV{AI_PLUGIN} && -d './neo_ai_plugin' ) {
     use neo_ai_plugin::AIPlugin;
     app->plugin('AIPlugin');
+    $ai_plugin = 1;
 }
 
 my $r       = app->routes;
@@ -289,7 +291,7 @@ get '/logo/:client/' => sub {
 ###############################
 
 my $neoledger_perms =
-'["dashboard", "cash", "cash.recon", "gl", "gl.add", "gl.transactions", "items", "items.part", "items.service", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income", "system", "system.currencies", "system.projects", "system.departments", "system.defaults", "system.chart", "system.chart.list", "system.chart.add", "system.chart.gifi", "system.taxes",  "system.templates", "system.audit", "system.yearend", "system.batch", "import", "import.gl", "import.customer", "import.ar_invoice", "import.ar_transaction", "import.vendor", "import.ap_invoice", "import.ap_transaction", "reports.balance", "customer", "customer.transaction", "customer.invoice", "customer.transaction_return", "customer.invoice_return", "customer.add", "customer.batch", "customer.reminder", "customer.consolidate", "customer.transactions", "customer.search", "customer.history", "vendor", "vendor.transaction", "vendor.invoice", "vendor.transaction_return", "vendor.invoice_return", "vendor.add", "vendor.transactions", "vendor.search", "vendor.history", "reports.alltaxes", "vendor.taxreport", "customer.taxreport", "cash.payments", "cash.receipts", "cash.report.customer", "cash.report.vendor", "system.bank", "import.bank", "customer.order", "customer.orders", "customer.quotation", "customer.quotations", "vendor.order", "vendor.orders", "vendor.quotation", "vendor.quotations"]';
+'["dashboard", "cash", "cash.recon", "gl", "gl.add", "gl.transactions", "items", "items.part", "items.service", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income", "system", "system.currencies", "system.projects", "system.departments", "system.defaults", "system.chart", "system.chart.list", "system.chart.add", "system.chart.gifi", "system.taxes",  "system.templates", "system.audit", "system.yearend", "system.batch", "import", "import.gl", "import.customer", "import.ar_invoice", "import.ar_transaction", "import.vendor", "import.ap_invoice", "import.ap_transaction", "reports.balance", "customer", "customer.transaction", "customer.invoice", "customer.transaction_return", "customer.invoice_return", "customer.add", "customer.batch", "customer.reminder", "customer.consolidate", "customer.transactions", "customer.search", "customer.history", "vendor", "vendor.transaction", "vendor.invoice", "vendor.transaction_return", "vendor.invoice_return", "vendor.add", "vendor.transactions", "vendor.search", "vendor.history", "reports.alltaxes", "vendor.taxreport", "customer.taxreport", "cash.payments", "cash.receipts", "cash.report.customer", "cash.report.vendor", "system.bank", "import.bank", "customer.order", "customer.orders", "customer.quotation", "customer.quotations", "vendor.order", "vendor.orders", "vendor.quotation", "vendor.quotations", "stations.manage", "stations.get"]';
 
 my $reports_only =
 '["dashboard", "gl", "gl.transactions", "items", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income",  "reports.balance", "customer", "customer.transactions", "customer.search", "customer.history", "vendor", "vendor.search", "vendor.history", "vendor.transactions", "reports.alltaxes", "vendor.taxreport", "customer.taxreport", "cash.report.customer", "cash.report.vendor", "customer.orders", "customer.quotations", "vendor.orders", "vendor.quotations"]';
@@ -2685,6 +2687,7 @@ helper check_perms => sub {
     $form->{closedto}     = format_date( $defaults->{closedto} ) || '';
     $form->{revtrans}     = $defaults->{revtrans}                || 0;
     $form->{audittrail}   = $defaults->{audittrail}              || 0;
+    $form->{profile_id}   = $profile->{profile_id};
 
     # admin/owner bypass
     my $admin = $central->query(
@@ -3415,7 +3418,7 @@ sub calc_line_tax {
     return 0 unless defined $chart_id;
 
     # Now find the rate effective at or before $date.
-    # We treat NULL validto as “still valid” and sort NULL as the latest.
+    # We treat NULL validto as "still valid" and sort NULL as the latest.
     my ($rate) = $dbs->query(
         q{
           SELECT rate
@@ -5793,8 +5796,6 @@ $api->get(
         elsif ( $module eq 'customer' ) {
             return unless $c->check_perms('customer');
 
-            # Here, do module-specific parameter checks
-            # E.g., return unless $c->check_params('customer_check');
             my $lock        = $c->lock_number( $dbs, 'sinumber' );
             my $role        = 'P';
             my $departments = $c->get_departments($role);
@@ -5820,26 +5821,37 @@ $api->get(
         # VENDOR module
         #-------------
         elsif ( $module eq 'vendor' ) {
-            return unless $c->check_perms('customer');
+            return unless my $form = $c->check_perms('customer');
 
             my $lock        = $c->lock_number( $dbs, 'vinumber' );
             my $role        = undef;
             my $departments = $c->get_departments($role);
 
+            my $stations = $c->get_stations($form);
+
+            my $stations      = [];
+            my $user_stations = [];
+            if ($ai_plugin) {
+                $stations      = $c->get_stations($form);
+                $user_stations = $c->get_user_stations($form);
+            }
+
             $response = {
-                currencies   => $currencies,
-                accounts     => $accounts,
-                tax_accounts => $tax_accounts,
-                customers    => $customers,
-                vendors      => $vendors,
-                linetax      => $line_tax,
-                departments  => $departments,
-                projects     => $projects,
-                locknumber   => $lock,
-                revtrans     => $defaults->{revtrans},
-                closedto     => $formatted_closedto,
-                connection   => $connection,
-                record       => $defaults->{ap_accno_id}
+                currencies    => $currencies,
+                accounts      => $accounts,
+                tax_accounts  => $tax_accounts,
+                customers     => $customers,
+                vendors       => $vendors,
+                linetax       => $line_tax,
+                departments   => $departments,
+                projects      => $projects,
+                locknumber    => $lock,
+                revtrans      => $defaults->{revtrans},
+                closedto      => $formatted_closedto,
+                connection    => $connection,
+                record        => $defaults->{ap_accno_id},
+                stations      => $stations,
+                user_stations => $user_stations
             };
         }
 
@@ -6698,16 +6710,27 @@ $api->post(
         my @results;
         foreach my $transaction (@$transactions) {
             return unless my $form = $c->check_perms("$vc.transaction");
-            my $new_transaction_id =
+            my $result =
               $c->process_transaction( $transaction, $form, $client );
-            push @results,
-              {
-                id      => $new_transaction_id,
-                success => defined($new_transaction_id),
-                error   => defined($new_transaction_id)
-                ? undef
-                : "Failed to process transaction"
-              };
+
+            # Check if process_transaction returned an error
+            if ( ref($result) eq 'HASH' && exists $result->{error} ) {
+                push @results,
+                  {
+                    id         => undef,
+                    success    => 0,
+                    error      => $result->{message},
+                    error_type => $result->{error}
+                  };
+            }
+            else {
+                push @results,
+                  {
+                    id      => $result,
+                    success => 1,
+                    error   => undef
+                  };
+            }
         }
 
         $c->render( json => \@results );
@@ -6917,6 +6940,13 @@ $api->get(
         }
 
         my $files = FM->get_files( $dbs, $c, $form );
+        my $station_id;
+        my $transfer_history;
+        if ( $vc eq 'vendor' && $ai_plugin ) {
+            my $station_info = $c->invoice_station_info( $form->{id} );
+            $station_id       = $station_info->{station_id};
+            $transfer_history = $station_info->{transfer_history};
+        }
 
         # Create the transformed data structure
         my $json_data = {
@@ -6944,6 +6974,8 @@ $api->get(
             payments         => \@payments,
             type             => $doc_type,
             files            => $files,
+            station_id       => $station_id       ? $station_id       : undef,
+            history          => $transfer_history ? $transfer_history : undef,
         };
 
         # Add tax information if present
@@ -6952,15 +6984,13 @@ $api->get(
             $json_data->{taxincluded} = $form->{taxincluded};
         }
 
-        warn( Dumper $form );
-
         # Render the structured response in JSON format
         $c->render( json => $json_data );
     }
 );
 
 helper process_transaction => sub {
-    my ( $c, $data, $form, $client ) = @_;
+    my ( $c, $data, $form, $client, $system ) = @_;
 
     if ( !$client ) {
         $client = $c->param('client');
@@ -6973,8 +7003,9 @@ helper process_transaction => sub {
 
     $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
 
-    $form->{type} = $data->{type};
-    $form->{vc}   = $vc eq 'vendor' ? 'vendor' : 'customer';
+    $form->{type}   = $data->{type};
+    $form->{vc}     = $vc eq 'vendor' ? 'vendor' : 'customer';
+    $form->{client} = $client;
 
     # Basic transaction details
     $form->{id}           = $id if $id;
@@ -7006,10 +7037,12 @@ helper process_transaction => sub {
     $form->{ponumber}  = $data->{poNumber}  || '';
 
     # Line items
+    my $total_amount = 0;
     $form->{rowcount} = scalar @{ $data->{lines} };
     for my $i ( 1 .. $form->{rowcount} ) {
         my $line   = $data->{lines}[ $i - 1 ];
         my $amount = $line->{amount};
+        $total_amount += $amount;
         $form->{"amount_$i"}        = $amount;
         $form->{"description_$i"}   = $line->{description};
         $form->{"tax_$i"}           = $line->{taxAccount};
@@ -7060,12 +7093,30 @@ helper process_transaction => sub {
             my $accno = $tax->{accno};
 
             $form->{"calctax_${accno}"} = 1;
+            $total_amount += $tax->{amount};
         }
         $form->{taxaccounts} = join( ' ', @taxaccounts );
         $form->{taxincluded} = $data->{taxincluded} ? 1 : 0;
     }
+    unless ($system) {
+        if ( $vc eq 'vendor' && $ai_plugin ) {
+            my $access = $c->verify_station_access($form);
+            unless ( $access == 1 ) {
+                return
+                  $access;   # this will return the error object from the helper
+            }
+        }
 
-    AA->post_transaction( $c->slconfig, $form );
+    }
+
+    # Post the transaction
+    eval { AA->post_transaction( $c->slconfig, $form ); } or do {
+        my $error = $@;
+        return {
+            error   => 'post_transaction_failed',
+            message => "Failed to post transaction: $error"
+        };
+    };
 
     if ( $data->{files} && ref $data->{files} eq 'ARRAY' ) {
         $form->{files}  = $data->{files};
@@ -7096,9 +7147,30 @@ $api->post(
         my $vc = $c->param('vc');
         return unless my $form = $c->check_perms("$vc.transaction");
 
-        my $transaction_id = $c->process_transaction( $data, $form, $client );
+        my $result = $c->process_transaction( $data, $form, $client );
 
-        $c->render( json => { id => $transaction_id } );
+        if ( ref($result) eq 'HASH' && exists $result->{error} ) {
+            my $status = 400;
+            if ( $result->{error} eq 'access_denied' ) {
+                $status = 403;
+            }
+            elsif ( $result->{error} eq 'amount_exceeded' ) {
+                $status = 400;
+            }
+            elsif ( $result->{error} eq 'no_amount_rules' ) {
+                $status = 400;
+            }
+            elsif ( $result->{error} eq 'post_transaction_failed' ) {
+                $status = 500;
+            }
+
+            return $c->render(
+                status => $status,
+                json   => $result
+            );
+        }
+
+        $c->render( json => { id => $result } );
     }
 );
 $api->delete(
@@ -7413,10 +7485,10 @@ sub process_invoice {
 
         if ( my $accno = $payment->{account} ) {
             $dbs->query( "SELECT id FROM chart WHERE accno = ?", $accno )
-              ->into( my $id );
-            $form->{"paymentmethod_$i"} = "0--$id" if defined $id;
+              ->into( my $chart_id );
+            $form->{"paymentmethod_$i"} = "0--$chart_id" if defined $chart_id;
             warn($accno);
-            warn($id);
+            warn($chart_id);
         }
     }
 
@@ -11384,6 +11456,7 @@ $api->post(
         }
         else {
             my $error_details = $res->json || { error => $res->message };
+            warn( Dumper $res->json );
             return $c->render(
                 json => {
                     success => 0,
