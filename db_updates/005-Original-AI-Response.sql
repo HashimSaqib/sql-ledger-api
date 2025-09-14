@@ -1,0 +1,1 @@
+ALTER table ai_processing ADD COLUMN original_response JSONB;
