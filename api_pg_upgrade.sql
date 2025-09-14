@@ -128,6 +128,7 @@ CREATE TABLE ai_processing (
     created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     additional_info JSONB,
+    original_response JSONB,
     error_type TEXT
 );
 
