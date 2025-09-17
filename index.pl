@@ -2194,7 +2194,8 @@ sub process_startup_updates {
     }
     else {
         my $version_sth = $dbh->prepare(
-            "SELECT version FROM db_updates ORDER BY updated DESC LIMIT 1");
+"SELECT version FROM db_updates ORDER BY CAST(version AS INTEGER) DESC LIMIT 1"
+        );
         $version_sth->execute();
         ($current_version) = $version_sth->fetchrow_array();
         $version_sth->finish();
@@ -4940,6 +4941,14 @@ $api->post(
             $form->{$key} = $data->{$key} if defined $data->{$key};
         }
         AM->save_department( $c->slconfig, $form );
+        if ( $form->{id} ) {
+            $form->{id} = $form->{id};
+            my $dbs = $c->dbs($client);
+            warn( $form->{id} );
+            warn( $form->{detail} );
+            $dbs->query( "UPDATE department SET detail = ? where id = ?",
+                $data->{detail}, $form->{id} );
+        }
 
         $c->render( json => $form->{ALL} );
     }

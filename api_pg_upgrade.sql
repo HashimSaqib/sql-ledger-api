@@ -203,4 +203,8 @@ CREATE table invoice_station_history (
     FOREIGN KEY (from_station_id) REFERENCES stations(id) ON DELETE CASCADE,
     FOREIGN KEY (to_station_id) REFERENCES stations(id) ON DELETE CASCADE
 );
-INSERT INTO db_updates (version, last_update) VALUES ('004', 'Workstation Plugin');
+
+ALTER table department ADD COLUMN detail TEXT;
+ALTER table project ADD COLUMN detail TEXT;
+
+INSERT INTO db_updates (version, last_update) VALUES ('006', 'Department and Project Detail');
