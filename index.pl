@@ -7002,7 +7002,7 @@ helper process_transaction => sub {
     if ( !$client ) {
         $client = $c->param('client');
     }
-
+    warn( Dumper $data );
     my $vc = $data->{vc} || $c->param('vc');
     $vc = $data->{vc} if $data->{vc};
     my $id  = $c->param('id');
@@ -7046,10 +7046,14 @@ helper process_transaction => sub {
     # Line items
     my $total_amount = 0;
     $form->{rowcount} = scalar @{ $data->{lines} };
+    my %line_tax_accounts;
+    my %tax_totals;
+
     for my $i ( 1 .. $form->{rowcount} ) {
         my $line   = $data->{lines}[ $i - 1 ];
         my $amount = $line->{amount};
         $total_amount += $amount;
+
         $form->{"amount_$i"}        = $amount;
         $form->{"description_$i"}   = $line->{description};
         $form->{"tax_$i"}           = $line->{taxAccount};
@@ -7061,6 +7065,15 @@ helper process_transaction => sub {
             my $tax_amount = calc_line_tax( $dbs, $form->{transdate}, $amount,
                 $line->{taxAccount} );
             $form->{"linetaxamount_$i"} = $tax_amount;
+        }
+
+        # Collect tax account information from line items
+        if ( $line->{taxAccount} ) {
+            $line_tax_accounts{ $line->{taxAccount} } = 1;
+
+            # Accumulate tax totals per account
+            $tax_totals{ $line->{taxAccount} } +=
+              $form->{"linetaxamount_$i"} || 0;
         }
 
         # Project number if exists
@@ -7093,18 +7106,28 @@ helper process_transaction => sub {
 
     # Taxes
     my @taxaccounts;
-    if ( $data->{taxes} && ref( $data->{taxes} ) eq 'ARRAY' ) {
+    if (%line_tax_accounts) {
+
+        @taxaccounts = keys %line_tax_accounts;
+        for my $accno (@taxaccounts) {
+            $form->{"tax_$accno"}       = $tax_totals{$accno};
+            $form->{"calctax_${accno}"} = 1;
+            $total_amount += $tax_totals{$accno};
+        }
+        $form->{taxaccounts} = join( ' ', @taxaccounts );
+    }
+    elsif ( $data->{taxes} && ref( $data->{taxes} ) eq 'ARRAY' ) {
+
         for my $tax ( @{ $data->{taxes} } ) {
             push @taxaccounts, $tax->{accno};
             $form->{"tax_$tax->{accno}"} = $tax->{amount};
             my $accno = $tax->{accno};
-
             $form->{"calctax_${accno}"} = 1;
             $total_amount += $tax->{amount};
         }
         $form->{taxaccounts} = join( ' ', @taxaccounts );
-        $form->{taxincluded} = $data->{taxincluded} ? 1 : 0;
     }
+    $form->{taxincluded} = $data->{taxincluded} ? 1 : 0;
     unless ($system) {
         if ( $vc eq 'vendor' && $ai_plugin ) {
             my $access = $c->verify_station_access($form);
