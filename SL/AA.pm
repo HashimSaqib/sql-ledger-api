@@ -115,7 +115,7 @@ sub post_transaction {
   # deduct tax from amounts if tax included
   for $i (1 .. $form->{rowcount}) {
 
-    if ($amount{fxamount}{$i}) {
+    if ($amount{fxamount}{$i} || $form->{"linetaxamount_$i"}) {
       
       if ($form->{taxincluded}) {
         $amount = ($fxinvamount) ? $fxtax * $amount{fxamount}{$i} / $fxinvamount : 0;
@@ -340,7 +340,6 @@ sub post_transaction {
 
     # insert detail records in acc_trans
     $ref->{amount} = $form->round_amount($ref->{amount}, $form->{precision});
-    if ($ref->{amount}) {
       $ref->{tax_chart_id} *= 1;
       $ref->{linetaxamount} *= 1;
       $query = qq|INSERT INTO acc_trans (trans_id, chart_id, amount, transdate,
@@ -352,13 +351,11 @@ sub post_transaction {
 		  '$ref->{fx_transaction}', $ref->{cleared}, '$approved',
       $ref->{id}, $ref->{tax_chart_id}, $ref->{linetaxamount})|;
       $dbh->do($query) || $form->dberror($query);
-    }
   }
 
   # save taxes
   foreach $ref (@{ $form->{acc_trans}{taxes} }) {
     $ref->{amount} = $form->round_amount($ref->{amount}, $form->{precision});
-    if ($ref->{amount}) {
       $query = qq|INSERT INTO acc_trans (trans_id, chart_id, amount,
 		  transdate, fx_transaction, approved)
 		  VALUES ($form->{id},
@@ -367,7 +364,6 @@ sub post_transaction {
 		  $ref->{amount} * $ml * $arapml, '$ref->{transdate}',
 		  '$ref->{fx_transaction}', '$approved')|;
       $dbh->do($query) || $form->dberror($query);
-    }
   }
 
 
