@@ -7002,7 +7002,7 @@ helper process_transaction => sub {
     if ( !$client ) {
         $client = $c->param('client');
     }
-    warn( Dumper $data );
+    
     my $vc = $data->{vc} || $c->param('vc');
     $vc = $data->{vc} if $data->{vc};
     my $id  = $c->param('id');
@@ -7061,7 +7061,7 @@ helper process_transaction => sub {
         $form->{ $form->{vc} eq 'vendor' ? "AP_amount_$i" : "AR_amount_$i" } =
           $line->{account};
 
-        if ( $line->{taxAccount} && !$line->{linetaxamount} ) {
+        if ( $line->{taxAccount} && !$line->{taxAmount} ) {
             my $tax_amount = calc_line_tax( $dbs, $form->{transdate}, $amount,
                 $line->{taxAccount} );
             $form->{"linetaxamount_$i"} = $tax_amount;
