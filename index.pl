@@ -7002,7 +7002,7 @@ helper process_transaction => sub {
     if ( !$client ) {
         $client = $c->param('client');
     }
-    
+
     my $vc = $data->{vc} || $c->param('vc');
     $vc = $data->{vc} if $data->{vc};
     my $id  = $c->param('id');
@@ -7236,6 +7236,8 @@ $api->get(
         return unless my $form = $c->check_perms("$vc");
         $form->{id} = $id;
         $form->{vc} = $vc;    # 'customer' or 'vendor'
+
+        $form->{type} = 'invoice';
 
         # For AR we use the IS module, for AP we use the IR module
         if ( $invoice_type eq 'AR' ) {
