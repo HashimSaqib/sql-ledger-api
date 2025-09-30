@@ -7237,8 +7237,6 @@ $api->get(
         $form->{id} = $id;
         $form->{vc} = $vc;    # 'customer' or 'vendor'
 
-        $form->{type} = 'invoice';
-
         # For AR we use the IS module, for AP we use the IR module
         if ( $invoice_type eq 'AR' ) {
             IS->retrieve_invoice( $c->slconfig, $form );
@@ -7437,6 +7435,7 @@ sub process_invoice {
     $form->{description} = $data->{description} || '';
 
     $form->{type}         = $data->{type};
+    $form->{type}         = 'invoice';
     $form->{transdate}    = $data->{invDate};
     $form->{duedate}      = $data->{dueDate};
     $form->{currency}     = $data->{currency};
