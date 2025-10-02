@@ -8,7 +8,7 @@
 #======================================================================
 
 package Form;
-
+use open ':encoding(utf-8)'; 
 use DBIx::Simple;
 
 sub new {
