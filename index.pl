@@ -7435,7 +7435,6 @@ sub process_invoice {
     $form->{description} = $data->{description} || '';
 
     $form->{type}         = $data->{type};
-    $form->{type}         = 'invoice';
     $form->{transdate}    = $data->{invDate};
     $form->{duedate}      = $data->{dueDate};
     $form->{currency}     = $data->{currency};
@@ -7448,15 +7447,14 @@ sub process_invoice {
     # Set up AR or AP account from JSON
     # for AR, it's $form->{AR}, for AP, it's $form->{AP}.
     if ( $invoice_type eq 'AR' ) {
-
         # AR fields
-        $form->{AR}          = $data->{recordAccount};
+        $form->{AR}          = "$data->{recordAccount}--A";
         $form->{customer_id} = $data->{customer_id};
     }
     else {
         # AP fields
-        $form->{AP}        = $data->{recordAccount};
-        $form->{vendor_id} = $data->{selectedVendor}->{id};
+        $form->{AP}        = "$data->{recordAccount}--A";
+        $form->{vendor_id} = $data->{vendor_id};
     }
 
     # Additional invoice details
