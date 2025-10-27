@@ -3214,7 +3214,8 @@ $api->get(
             employeeId    => $form->{employee_id},
             lines         => \@lines,
             files         => $files,
-            offset_accno  => $offset_accno
+            offset_accno  => $offset_accno,
+            pending       => $form->{approved} ? 0 : 1
         };
 
         $c->render( status => 200, json => $response );
@@ -3243,7 +3244,7 @@ $api->post(
         $data->{form} = $form;
         my $dbs = $c->dbs($client);
         my ( $status_code, $response_json ) =
-          api_gl_transaction( $c, $dbs, $data );
+          $c->api_gl_transaction( $dbs, $data );
 
         $c->render(
             status => $status_code,
@@ -3288,7 +3289,7 @@ $api->put(
             }
         }
         my ( $status_code, $response_json ) =
-          api_gl_transaction( $c, $dbs, $data, $id );
+          $c->api_gl_transaction( $dbs, $data, $id );
 
         $c->render(
             status => $status_code,
@@ -3437,7 +3438,7 @@ sub calc_line_tax {
     return $amount * $rate;
 }
 
-sub api_gl_transaction {
+helper api_gl_transaction => sub {
     my ( $c, $dbs, $data, $id, $dbh ) = @_;
 
     # Check if 'transdate' is present in the data
@@ -3515,6 +3516,7 @@ sub api_gl_transaction {
     $form->{department}      = $data->{department};
     $form->{transdate}       = $transdate;
     $form->{defaultcurrency} = $default_currency;
+    $form->{pending}         = $data->{pending} ? 1 : 0;
     $form->{login}           = $data->{login};
 
     my $total_debit       = 0;
@@ -3633,6 +3635,25 @@ sub api_gl_transaction {
     if ( $form->{id} ) {
         my $update_sql = "UPDATE gl SET offset_account_id = ? WHERE id = ?";
         $dbs->query( $update_sql, $offset_account_id, $form->{id} );
+
+        my @sources =
+          map { $_->{source} } grep { $_->{source} } @{ $data->{lines} };
+
+        if (@sources) {
+            my $placeholders = join( ", ", ("?") x @sources );
+
+            my ($any_pending) = $dbs->query(
+"SELECT bool_or(pending) FROM bank_transactions WHERE transaction_id IN ($placeholders)",
+                @sources
+            )->list;
+
+            if ($any_pending) {
+                $dbs->query(
+                    "UPDATE acc_trans SET approved = false WHERE trans_id = ?",
+                    $form->{id}
+                );
+            }
+        }
     }
 
     if ( $data->{files} && ref $data->{files} eq 'ARRAY' ) {
@@ -3686,7 +3707,7 @@ sub api_gl_transaction {
     my $status_code = $id ? 200 : 201;    # 200 for update, 201 for create
 
     return ( $status_code, $response_json );
-}
+};
 $api->post(
     '/import/:type' => sub {
         my $c      = shift;
@@ -3724,7 +3745,7 @@ $api->post(
 
                 # Call api_gl_transaction for each item in the array
                 my ( $status_code, $response_json ) =
-                  api_gl_transaction( $c, $dbs, $transaction, $dbh );
+                  $c->api_gl_transaction( $dbs, $transaction, $dbh );
 
                 if ( $status_code >= 200 && $status_code < 300 ) {
                     $success_count++;
@@ -3800,6 +3821,10 @@ $api->delete(
 
         # Delete the entry from the gl table
         $dbs->query( "DELETE FROM gl WHERE id = ?", $id );
+        $dbs->query(
+"UPDATE bank_transactions SET reference_id = null, rule_id = null, module = null WHERE reference_id = ?",
+            $id
+        );
 
         $c->render( status => 204, data => '' );
     }
@@ -6911,6 +6936,8 @@ $api->get(
         # Create payments array
         my @payments;
 
+        warn( Dumper $form );
+
         # Check if payments exist
         if ( defined $form->{acc_trans}{"${transaction_type}_paid"}
             && ref( $form->{acc_trans}{"${transaction_type}_paid"} ) eq
@@ -6974,6 +7001,7 @@ $api->get(
             department_id    => $form->{department_id},
             id               => $form->{id},
             pending          => $form->{approved} ? '0' : '1',
+            dcn              => $form->{dcn},
             recordAccount    => $form->{acc_trans}{$transaction_type}[0],
             paymentmethod_id => $form->{paymentmethod_id},
             $vc_id_field     => $form->{$vc_id_field},
@@ -7002,7 +7030,7 @@ helper process_transaction => sub {
     if ( !$client ) {
         $client = $c->param('client');
     }
-
+    warn( Dumper $data );
     my $vc = $data->{vc} || $c->param('vc');
     $vc = $data->{vc} if $data->{vc};
     my $id  = $c->param('id');
@@ -7042,6 +7070,7 @@ helper process_transaction => sub {
     $form->{intnotes}  = $data->{intnotes}  || '';
     $form->{ordnumber} = $data->{ordNumber} || '';
     $form->{ponumber}  = $data->{poNumber}  || '';
+    $form->{dcn}       = $data->{dcn}       || '';
 
     # Line items
     my $total_amount = 0;
@@ -7141,6 +7170,7 @@ helper process_transaction => sub {
 
     # Post the transaction
     eval { AA->post_transaction( $c->slconfig, $form ); } or do {
+        warn( Dumper $form );
         my $error = $@;
         return {
             error   => 'post_transaction_failed',
@@ -7152,6 +7182,10 @@ helper process_transaction => sub {
         $form->{files}  = $data->{files};
         $form->{client} = $client;
         FM->upload_files( $dbs, $c, $form, $vc );
+    }
+
+    if ($ai_plugin && $vc eq 'vendor' ) {
+        $c->add_payment($form->{id}, $dbs);
     }
 
     return $form->{id};
@@ -7447,6 +7481,7 @@ sub process_invoice {
     # Set up AR or AP account from JSON
     # for AR, it's $form->{AR}, for AP, it's $form->{AP}.
     if ( $invoice_type eq 'AR' ) {
+
         # AR fields
         $form->{AR}          = "$data->{recordAccount}--A";
         $form->{customer_id} = $data->{customer_id};
