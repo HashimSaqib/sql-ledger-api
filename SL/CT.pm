@@ -34,7 +34,7 @@ sub create_links {
 
   if ($form->{id} *= 1) {
     $query = qq|SELECT ct.*,
-                ad.id AS addressid, ad.address1, ad.address2, ad.city,
+                ad.id AS addressid, ad.address1, ad.address2, ad.street, ad.city,
 		ad.state, ad.zipcode, ad.country,
 		b.description AS business, b.id AS business_id, s.*,
                 e.name AS employee, e.id AS employee_id,
@@ -507,11 +507,12 @@ sub save {
     $var = "$form->{addressid}, ";
   }
   
-  $query = qq|INSERT INTO address ($id trans_id, address1, address2,
+  $query = qq|INSERT INTO address ($id trans_id, address1, address2, street,
               city, state, zipcode, country) VALUES ($var
 	      $form->{id},
 	      |.$dbh->quote($form->{address1}).qq|,
 	      |.$dbh->quote($form->{address2}).qq|,
+	      |.$dbh->quote($form->{street}).qq|,
 	      |.$dbh->quote($form->{city}).qq|,
 	      |.$dbh->quote($form->{state}).qq|,
 	      |.$dbh->quote($form->{zipcode}).qq|,

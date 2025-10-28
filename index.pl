@@ -6573,6 +6573,7 @@ $api->get(
     '/arap/list/:vc/:id' => sub {
         my $c      = shift;
         my $client = $c->param('client');
+        my $dbs = $c->dbs($client);
         my $vc     = $c->param('vc');
         return
           unless my $form = $c->check_perms(
@@ -6615,12 +6616,234 @@ $api->get(
         # Add the full address to the form object
         $form->{full_address} = $full_address;
 
+        my $bank_accounts = $dbs->query("SELECT * FROM bank_account WHERE trans_id = ?", $id)->hashes;
+        $form->{bank_accounts} = $bank_accounts;
+
         # Render the form object as JSON
         $c->render( json => {%$form} );
     }
 );
 
 # Used for Customer/Vendor Forms
+
+$api->get(
+    '/bank/:vc' => sub {
+        my $c      = shift;
+        my $vc     = $c->param('vc');
+        return unless my $form = $c->check_perms("$vc.add");
+        my $client = $c->param('client');
+        my $trans_id = $c->param('trans_id');
+
+        unless ($trans_id) {
+            return $c->render(
+                status => 400,
+                json   => { message => "trans_id parameter is required" }
+            );
+        }
+
+        my $dbs = $c->dbs($client);
+        return unless $dbs;
+
+        # Query bank accounts with address information
+        my $results = $dbs->query(
+            q{
+                SELECT 
+                    ba.id,
+                    ba.trans_id,
+                    ba.name,
+                    ba.iban,
+                    ba.bic,
+                    ba.address_id,
+                    ba.dcn,
+                    ba.rvc,
+                    ba.membernumber,
+                    ba.clearingnumber,
+                    ba.qriban,
+                    ba.strdbkginf,
+                    ba.invdescriptionqr,
+                    ba.is_primary,
+                    ba.created_at,
+                    ba.updated_at,
+                    a.address1,
+                    a.address2,
+                    a.city,
+                    a.state,
+                    a.zipcode,
+                    a.country
+                FROM bank_account ba
+                LEFT JOIN address a ON ba.address_id = a.id
+                WHERE ba.trans_id = ?
+                ORDER BY ba.is_primary DESC, ba.id ASC
+            },
+            $trans_id
+        )->hashes;
+
+        $c->render( json => $results );
+    }
+);
+$api->post(
+    '/vc/:vc/bank' => sub {
+        my $c  = shift;
+        my $vc = $c->param('vc');
+        return unless my $form = $c->check_perms("$vc.add");
+        my $client = $c->param('client');
+        my $params = $c->req->json;
+
+        unless ( $params->{trans_id} ) {
+            return $c->render(
+                status => 400,
+                json   => { message => "trans_id is required" }
+            );
+        }
+
+        my $dbs = $c->dbs($client);
+        return unless $dbs;
+
+        my $bank_id    = $params->{id};
+        my $trans_id   = $params->{trans_id};
+        my $is_primary = $params->{is_primary} // 0;
+        my $address_id = $params->{address_id};
+
+        eval {
+            # Handle address if provided
+            if (   $params->{address1}
+                || $params->{address2}
+                || $params->{city}
+                || $params->{state}
+                || $params->{zipcode}
+                || $params->{country} )
+            {
+                if ($address_id) {
+
+                    # Update existing address
+                    $dbs->query(
+                        q{
+                            UPDATE address 
+                            SET address1 = ?, address2 = ?, city = ?, 
+                                state = ?, zipcode = ?, country = ?
+                            WHERE id = ?
+                        },
+                        $params->{address1}, $params->{address2},
+                        $params->{city},     $params->{state},
+                        $params->{zipcode},  $params->{country},
+                        $address_id
+                    );
+                }
+                else {
+                    # Insert new address
+                    my $result = $dbs->query(
+                        q{
+                            INSERT INTO address 
+                                (trans_id, address1, address2, city, state, zipcode, country)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                            RETURNING id
+                        },
+                        $trans_id,           $params->{address1},
+                        $params->{address2}, $params->{city},
+                        $params->{state},    $params->{zipcode},
+                        $params->{country}
+                    )->hash;
+                    $address_id = $result->{id};
+                }
+            }
+
+            # If this account is being set as primary, unset all others
+            if ($is_primary) {
+                $dbs->query(
+                    q{
+                        UPDATE bank_account 
+                        SET is_primary = FALSE 
+                        WHERE trans_id = ? AND id != ?
+                    },
+                    $trans_id, $bank_id // 0
+                );
+            }
+
+            # Update or Insert bank account
+            if ($bank_id) {
+
+                # Update existing bank account
+                $dbs->query(
+                    q{
+                        UPDATE bank_account 
+                        SET name = ?, iban = ?, bic = ?, address_id = ?,
+                            dcn = ?, rvc = ?, membernumber = ?, 
+                            clearingnumber = ?, qriban = ?, strdbkginf = ?,
+                            invdescriptionqr = ?, is_primary = ?,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                    },
+                    $params->{name},
+                    $params->{iban},
+                    $params->{bic},
+                    $address_id,
+                    $params->{dcn},
+                    $params->{rvc},
+                    $params->{membernumber},
+                    $params->{clearingnumber},
+                    $params->{qriban},
+                    $params->{strdbkginf},
+                    $params->{invdescriptionqr},
+                    $is_primary,
+                    $bank_id
+                );
+
+                $c->render(
+                    json => {
+                        success => 1,
+                        message => "Bank account updated successfully",
+                        id      => $bank_id
+                    }
+                );
+            }
+            else {
+                # Insert new bank account
+                my $result = $dbs->query(
+                    q{
+                        INSERT INTO bank_account 
+                            (trans_id, name, iban, bic, address_id, dcn, rvc,
+                             membernumber, clearingnumber, qriban, strdbkginf,
+                             invdescriptionqr, is_primary, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 
+                                CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                        RETURNING id
+                    },
+                    $trans_id,
+                    $params->{name},
+                    $params->{iban},
+                    $params->{bic},
+                    $address_id,
+                    $params->{dcn},
+                    $params->{rvc},
+                    $params->{membernumber},
+                    $params->{clearingnumber},
+                    $params->{qriban},
+                    $params->{strdbkginf},
+                    $params->{invdescriptionqr},
+                    $is_primary
+                )->hash;
+
+                $c->render(
+                    json => {
+                        success => 1,
+                        message => "Bank account created successfully",
+                        id      => $result->{id}
+                    }
+                );
+            }
+        };
+        if ($@) {
+            $c->render(
+                status => 500,
+                json   => {
+                    success => 0,
+                    message => "Failed to save bank account",
+                    error   => "$@"
+                }
+            );
+        }
+    }
+);
 
 $api->get(
     '/arap/:vc/' => sub {
@@ -7005,6 +7228,7 @@ $api->get(
             recordAccount    => $form->{acc_trans}{$transaction_type}[0],
             paymentmethod_id => $form->{paymentmethod_id},
             $vc_id_field     => $form->{$vc_id_field},
+            vc_bank_id       => $form->{vc_bank_id},
             lineitems        => \@line_items,
             payments         => \@payments,
             type             => $doc_type,
@@ -7184,8 +7408,17 @@ helper process_transaction => sub {
         FM->upload_files( $dbs, $c, $form, $vc );
     }
 
-    if ($ai_plugin && $vc eq 'vendor' ) {
-        $c->add_payment($form->{id}, $dbs);
+    if ($data->{vc_bank_id}) {
+        if ($vc eq 'vendor') {
+            $dbs->query("UPDATE ap SET vc_bank_id = ? WHERE id = ?", $data->{vc_bank_id}, $form->{id});
+        }
+        else {
+            $dbs->query("UPDATE ar SET vc_bank_id = ? WHERE id = ?", $data->{vc_bank_id}, $form->{id});
+        }
+    }
+
+    if ( $ai_plugin && $vc eq 'vendor' ) {
+        $c->add_payment( $form->{id}, $dbs );
     }
 
     return $form->{id};
