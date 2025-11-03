@@ -4009,15 +4009,15 @@ $api->get(
             company_info => {
                 name    => $form->{company} || "",
                 address => {
-                    complete => $form->{address}  || "",
-                    street   => $form->{street}   || "",
+                    complete    => $form->{address}     || "",
+                    street      => $form->{street}      || "",
                     post_office => $form->{post_office} || "",
-                    line1    => $form->{address1} || "",
-                    line2    => $form->{address2} || "",
-                    city     => $form->{city}     || "",
-                    state    => $form->{state}    || "",
-                    zip      => $form->{zip}      || "",
-                    country  => $form->{country}  || ""
+                    line1       => $form->{address1}    || "",
+                    line2       => $form->{address2}    || "",
+                    city        => $form->{city}        || "",
+                    state       => $form->{state}       || "",
+                    zip         => $form->{zip}         || "",
+                    country     => $form->{country}     || ""
                 },
                 contact => {
                     phone   => $form->{tel}            || "",
@@ -7262,7 +7262,6 @@ helper process_transaction => sub {
     if ( !$client ) {
         $client = $c->param('client');
     }
-    warn( Dumper $data );
     my $vc = $data->{vc} || $c->param('vc');
     $vc = $data->{vc} if $data->{vc};
     my $id  = $c->param('id');
