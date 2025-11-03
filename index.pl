@@ -4010,6 +4010,8 @@ $api->get(
                 name    => $form->{company} || "",
                 address => {
                     complete => $form->{address}  || "",
+                    street   => $form->{street}   || "",
+                    post_office => $form->{post_office} || "",
                     line1    => $form->{address1} || "",
                     line2    => $form->{address2} || "",
                     city     => $form->{city}     || "",
@@ -4149,6 +4151,10 @@ $api->post(
               $json_data->{company_info}->{reference_url};
 
             if ( $json_data->{company_info}->{address} ) {
+                $mapped_data->{street} =
+                  $json_data->{company_info}->{address}->{street};
+                $mapped_data->{post_office} =
+                  $json_data->{company_info}->{address}->{post_office};
                 $mapped_data->{address} =
                   $json_data->{company_info}->{address}->{address};
                 $mapped_data->{address1} =
@@ -4272,7 +4278,7 @@ $api->post(
         warn( Dumper $form );
 
         $form->{optional} =
-"company address address1 address2 city state zip country tel fax companyemail companywebsite yearend weightunit businessnumber closedto revtrans audittrail method cdt namesbynumber xelatex typeofcontact roundchange referenceurl annualinterest latepaymentfee restockingcharge checkinventory hideaccounts linetax forcewarehouse glnumber sinumber sonumber vinumber batchnumber vouchernumber ponumber sqnumber rfqnumber partnumber projectnumber employeenumber customernumber vendornumber lock_glnumber lock_sinumber lock_sonumber lock_ponumber lock_sqnumber lock_rfqnumber lock_employeenumber lock_customernumber lock_vendornumber clearing transition";
+"company street post_office address address1 address2 city state zip country tel fax companyemail companywebsite yearend weightunit businessnumber closedto revtrans audittrail method cdt namesbynumber xelatex typeofcontact roundchange referenceurl annualinterest latepaymentfee restockingcharge checkinventory hideaccounts linetax forcewarehouse glnumber sinumber sonumber vinumber batchnumber vouchernumber ponumber sqnumber rfqnumber partnumber projectnumber employeenumber customernumber vendornumber lock_glnumber lock_sinumber lock_sonumber lock_ponumber lock_sqnumber lock_rfqnumber lock_employeenumber lock_customernumber lock_vendornumber clearing transition";
 
         # Save the defaults
         my $result = AM->save_defaults( $c->slconfig, $form );
@@ -6573,7 +6579,7 @@ $api->get(
     '/arap/list/:vc/:id' => sub {
         my $c      = shift;
         my $client = $c->param('client');
-        my $dbs = $c->dbs($client);
+        my $dbs    = $c->dbs($client);
         my $vc     = $c->param('vc');
         return
           unless my $form = $c->check_perms(
@@ -6616,7 +6622,9 @@ $api->get(
         # Add the full address to the form object
         $form->{full_address} = $full_address;
 
-        my $bank_accounts = $dbs->query("SELECT * FROM bank_account WHERE trans_id = ?", $id)->hashes;
+        my $bank_accounts =
+          $dbs->query( "SELECT * FROM bank_account WHERE trans_id = ?", $id )
+          ->hashes;
         $form->{bank_accounts} = $bank_accounts;
 
         # Render the form object as JSON
@@ -6628,10 +6636,10 @@ $api->get(
 
 $api->get(
     '/bank/:vc' => sub {
-        my $c      = shift;
-        my $vc     = $c->param('vc');
+        my $c  = shift;
+        my $vc = $c->param('vc');
         return unless my $form = $c->check_perms("$vc.add");
-        my $client = $c->param('client');
+        my $client   = $c->param('client');
         my $trans_id = $c->param('trans_id');
 
         unless ($trans_id) {
@@ -7408,12 +7416,14 @@ helper process_transaction => sub {
         FM->upload_files( $dbs, $c, $form, $vc );
     }
 
-    if ($data->{vc_bank_id}) {
-        if ($vc eq 'vendor') {
-            $dbs->query("UPDATE ap SET vc_bank_id = ? WHERE id = ?", $data->{vc_bank_id}, $form->{id});
+    if ( $data->{vc_bank_id} ) {
+        if ( $vc eq 'vendor' ) {
+            $dbs->query( "UPDATE ap SET vc_bank_id = ? WHERE id = ?",
+                $data->{vc_bank_id}, $form->{id} );
         }
         else {
-            $dbs->query("UPDATE ar SET vc_bank_id = ? WHERE id = ?", $data->{vc_bank_id}, $form->{id});
+            $dbs->query( "UPDATE ar SET vc_bank_id = ? WHERE id = ?",
+                $data->{vc_bank_id}, $form->{id} );
         }
     }
 
