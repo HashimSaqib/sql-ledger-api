@@ -19,5 +19,7 @@ CREATE TABLE bank_account (
 
 ALTER TABLE ar ADD COLUMN vc_bank_id INTEGER;
 ALTER TABLE ap ADD COLUMN vc_bank_id INTEGER;
+ALTER TABLE ap ADD COLUMN executiondate DATE;
+ALTER TABLE ar ADD COLUMN executiondate DATE;
 ALTER TABLE address ADD COLUMN street VARCHAR(255);
 ALTER TABLE address ADD COLUMN post_office VARCHAR(255);

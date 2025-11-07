@@ -257,6 +257,13 @@ sub post_transaction {
   $form->{invnumber} = $form->update_defaults($myconfig, $invnumber) unless $form->{invnumber};
   $form->{duedate} ||= $form->{transdate};
 
+  # set executiondate: empty for AR, default to duedate for AP
+  if ($table eq 'ap') {
+    $form->{executiondate} ||= $form->{duedate};
+  } else {
+    $form->{executiondate} = '';
+  }
+
   for (qw(terms discountterms)) { $form->{$_} *= 1 }
 
   $form->{cashdiscount} = $form->parse_amount($myconfig, $form->{cashdiscount}) / 100;
@@ -291,6 +298,7 @@ sub post_transaction {
 	      taxincluded = '$form->{taxincluded}',
 	      amount = $invamount * $arapml,
 	      duedate = '$form->{duedate}',
+	      executiondate = '$form->{executiondate}',
 	      paid = $paid * $arapml,
 	      datepaid = $datepaid,
 	      netamount = $invnetamount * $arapml,
@@ -853,7 +861,7 @@ sub transactions {
   }
     
   my $query = qq|SELECT a.id, a.invnumber, a.ordnumber, a.transdate,
-                 a.duedate, ($taxfld) * $ml AS tax,
+                 a.duedate, a.executiondate, ($taxfld) * $ml AS tax,
                  a.amount, ($paid) AS paid,
                  a.invoice, a.datepaid, a.terms, a.notes, a.created, a.updated,
                  a.shipvia, a.waybill, a.shippingpoint,

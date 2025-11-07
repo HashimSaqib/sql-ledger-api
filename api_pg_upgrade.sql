@@ -264,7 +264,7 @@ CREATE TABLE payments (
 INSERT INTO db_updates (version, last_update) VALUES ('007', 'Bank Transactions');
 
 CREATE TABLE bank_account (
-    id INTEGER,
+    id SERIAL PRIMARY KEY,
     trans_id INTEGER NOT NULL,  
     name CHARACTER VARYING(64),
     iban CHARACTER VARYING(34),
@@ -285,6 +285,8 @@ CREATE TABLE bank_account (
 
 ALTER TABLE ar ADD COLUMN vc_bank_id INTEGER;
 ALTER TABLE ap ADD COLUMN vc_bank_id INTEGER;
+ALTER TABLE ap ADD column executiondate DATE;
+ALTER TABLE ar ADD column executiondate DATE;
 ALTER TABLE address ADD COLUMN street VARCHAR(255);
 ALTER TABLE address ADD COLUMN post_office VARCHAR(255);
 
