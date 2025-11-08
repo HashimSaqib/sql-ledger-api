@@ -299,7 +299,7 @@ sub post_transaction {
 	      taxincluded = '$form->{taxincluded}',
 	      amount = $invamount * $arapml,
 	      duedate = '$form->{duedate}',
-	      executiondate = '$form->{executiondate}',
+	      executiondate = $executiondate,
 	      paid = $paid * $arapml,
 	      datepaid = $datepaid,
 	      netamount = $invnetamount * $arapml,
