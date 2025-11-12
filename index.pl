@@ -54,6 +54,9 @@ use Archive::Zip      qw( :ERROR_CODES :CONSTANTS );
 use utf8;
 use open qw(:std :utf8);
 use Text::CSV;
+use Digest::HMAC_SHA1 qw(hmac_sha1);
+use MIME::Base64;
+use Imager::QRCode;
 Dotenv->load;
 app->config( hypnotoad => { listen => ['http://*:3000'] } );
 my $base_url          = $ENV{BACKEND_URL};
@@ -616,6 +619,26 @@ $central->post(
             );
         }
 
+        my $enforce_2fa = $ENV{ENFORCE_2FA} // 0;
+
+        if ($enforce_2fa) {
+            my $temp_sessionkey = $central_dbs->query(
+                'INSERT INTO temp_2fa_session (profile_id, temp_sessionkey) 
+                 VALUES (?, encode(gen_random_bytes(32), ?)) 
+                 RETURNING temp_sessionkey',
+                $profile_id, 'hex'
+            )->hash->{temp_sessionkey};
+
+            return $c->render(
+                status => 200,
+                json   => {
+                    requires_2fa_setup => 1,
+                    temp_sessionkey    => $temp_sessionkey,
+                    message            => "2FA setup required"
+                }
+            );
+        }
+
         my $session_key = $central_dbs->query(
 'INSERT INTO session (profile_id, sessionkey) VALUES (?, encode(gen_random_bytes(32), ?)) RETURNING sessionkey',
             $profile_id, 'hex'
@@ -701,6 +724,282 @@ $central->get(
     }
 );
 
+helper generate_totp_secret => sub {
+    my $c      = shift;
+    my $chars  = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+    my $secret = '';
+    for ( 1 .. 32 ) {
+        $secret .= substr( $chars, int( rand(32) ), 1 );
+    }
+    return $secret;
+};
+
+helper generate_totp_code => sub {
+    my ( $c, $secret, $time_step ) = @_;
+    $time_step //= int( time() / 30 );
+
+    my $binary_secret = $c->base32_decode($secret);
+
+    my $time_bytes = pack( 'Q>', $time_step );
+    my $hmac       = hmac_sha1( $time_bytes, $binary_secret );
+
+    my $offset    = ord( substr( $hmac, -1 ) ) & 0x0f;
+    my $truncated = unpack( 'N', substr( $hmac, $offset, 4 ) ) & 0x7fffffff;
+
+    return sprintf( '%06d', $truncated % 1000000 );
+};
+
+helper verify_totp => sub {
+    my ( $c, $secret, $code, $window ) = @_;
+    $window //= 1;    # Allow 1 time step before/after
+
+    my $current_time = int( time() / 30 );
+
+    for my $time_step (
+        ( $current_time - $window ) .. ( $current_time + $window ) )
+    {
+        my $expected = $c->generate_totp_code( $secret, $time_step );
+        return 1 if $expected eq $code;
+    }
+    return 0;
+};
+
+helper base32_decode => sub {
+    my ( $c, $base32 ) = @_;
+    my $base32_chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+    my %char_map     = map { substr( $base32_chars, $_, 1 ) => $_ } 0 .. 31;
+
+    my $bits = '';
+    for my $char ( split //, uc($base32) ) {
+        $bits .= sprintf( '%05b', $char_map{$char} // 0 );
+    }
+
+    my $bytes = '';
+    while ( length($bits) >= 8 ) {
+        $bytes .= chr( oct( '0b' . substr( $bits, 0, 8 ) ) );
+        $bits = substr( $bits, 8 );
+    }
+
+    return $bytes;
+};
+helper generate_qr_svg => sub {
+    my ( $c, $data ) = @_;
+
+    # Generate the QR code matrix (array of array of 0/1)
+    my $qrcode = Imager::QRCode->new(
+        version       => 0,
+        level         => 'M',
+        casesensitive => 1,
+        lightcolor    => Imager::Color->new('white'),
+        darkcolor     => Imager::Color->new('black'),
+    );
+
+    my $matrix = $qrcode->plot($data)->to_paletted;  # convert to paletted image
+    my ( $w, $h ) = ( $matrix->getwidth, $matrix->getheight );
+
+    my $module_size = 4;
+    my $margin      = 4;
+    my $total_size  = ( $w + 2 * $margin ) * $module_size;
+
+    my $svg =
+qq{<svg width="$total_size" height="$total_size" viewBox="0 0 $total_size $total_size" xmlns="http://www.w3.org/2000/svg">};
+    $svg .= qq{<rect width="$total_size" height="$total_size" fill="white"/>};
+
+    for my $y ( 0 .. $h - 1 ) {
+        for my $x ( 0 .. $w - 1 ) {
+            my ( $r, $g, $b ) = $matrix->getpixel( x => $x, y => $y )->rgba;
+            next if $r > 128;    # skip white pixels
+            my $xpos = ( $x + $margin ) * $module_size;
+            my $ypos = ( $y + $margin ) * $module_size;
+            $svg .=
+qq{<rect x="$xpos" y="$ypos" width="$module_size" height="$module_size" fill="black"/>};
+        }
+    }
+
+    $svg .= qq{</svg>};
+    return $svg;
+};
+
+$central->post(
+    '/2fa/setup' => sub {
+        my $c      = shift;
+        my $params = $c->req->json;
+
+        my $temp_sessionkey = $params->{temp_sessionkey};
+
+        unless ($temp_sessionkey) {
+            return $c->render(
+                status => 400,
+                json   => { message => "Missing temporary session" }
+            );
+        }
+
+        my $central_dbs = $c->central_dbs();
+
+        # Validate temp session
+        my $temp_session = $central_dbs->query(
+            'SELECT * FROM temp_2fa_session 
+         WHERE temp_sessionkey = ? 
+         AND expires_at > NOW()',
+            $temp_sessionkey
+        )->hash;
+
+        unless ($temp_session) {
+            return $c->render(
+                status => 401,
+                json   => { message => "Invalid or expired session" }
+            );
+        }
+
+        my $profile = $central_dbs->query( 'SELECT * FROM profile WHERE id = ?',
+            $temp_session->{profile_id} )->hash;
+
+        my $existing = $central_dbs->query(
+'SELECT id FROM totp_secrets WHERE profile_id = ? AND enabled = TRUE',
+            $profile->{id}
+        )->hash;
+
+        if ($existing) {
+            return $c->render(
+                status => 400,
+                json   => { message => "2FA already configured" }
+            );
+        }
+
+        my $totp_record = $central_dbs->query(
+'SELECT secret FROM totp_secrets WHERE profile_id = ? AND enabled = FALSE',
+            $profile->{id}
+        )->hash;
+
+        my $secret;
+        if ($totp_record) {
+            $secret = $totp_record->{secret};
+        }
+        else {
+            $secret = $c->generate_totp_secret();
+            $central_dbs->query(
+                'INSERT INTO totp_secrets (profile_id, secret, enabled) 
+             VALUES (?, ?, FALSE)',
+                $profile->{id}, $secret
+            );
+        }
+
+        my $issuer      = $ENV{APP_NAME} // 'Neo-Ledger';
+        my $otpauth_url = sprintf( 'otpauth://totp/%s:%s?secret=%s&issuer=%s',
+            $issuer, $profile->{email}, $secret, $issuer );
+
+        my $qr_svg = $c->generate_qr_svg($otpauth_url);
+
+        return $c->render(
+            json => {
+                secret          => $secret,
+                qr_svg          => $qr_svg,
+                otpauth_url     => $otpauth_url,
+                temp_sessionkey => $temp_sessionkey
+            }
+        );
+    }
+);
+$central->post(
+    '/2fa/verify_setup' => sub {
+        my $c      = shift;
+        my $params = $c->req->json;
+
+        my $temp_sessionkey = $params->{temp_sessionkey};
+        my $totp_code       = $params->{totp_code};
+
+        unless ( $temp_sessionkey && $totp_code ) {
+            return $c->render(
+                status => 400,
+                json   => { message => "Missing required parameters" }
+            );
+        }
+
+        my $central_dbs = $c->central_dbs();
+
+        my $temp_session = $central_dbs->query(
+            'SELECT ts.*, p.config 
+         FROM temp_2fa_session ts 
+         JOIN profile p ON ts.profile_id = p.id 
+         WHERE ts.temp_sessionkey = ? 
+         AND ts.expires_at > NOW()',
+            $temp_sessionkey
+        )->hash;
+
+        unless ($temp_session) {
+            return $c->render(
+                status => 401,
+                json   => { message => "Invalid or expired session" }
+            );
+        }
+
+        my $totp_record = $central_dbs->query(
+            'SELECT * FROM totp_secrets 
+         WHERE profile_id = ? AND enabled = FALSE',
+            $temp_session->{profile_id}
+        )->hash;
+
+        unless ($totp_record) {
+            return $c->render(
+                status => 400,
+                json   => { message => "No pending 2FA setup found" }
+            );
+        }
+
+        unless ( $c->verify_totp( $totp_record->{secret}, $totp_code ) ) {
+            return $c->render(
+                status => 400,
+                json   => { message => "Invalid code" }
+            );
+        }
+
+        my @backup_codes;
+        for ( 1 .. 10 ) {
+            my $code = sprintf( '%08d', int( rand(100000000) ) );
+            push @backup_codes, $code;
+        }
+
+        my @hashed_codes = map {
+            crypt(
+                $_,
+                '$2b$10$'
+                  . substr(
+                    encode_base64(
+                        pack( 'C*', map { int( rand(256) ) } 1 .. 16 )
+                    ),
+                    0, 22
+                  )
+            )
+        } @backup_codes;
+
+        $central_dbs->query(
+            'UPDATE totp_secrets 
+         SET enabled = TRUE, verified_at = NOW(), backup_codes = ? 
+         WHERE profile_id = ?',
+            encode_json( \@hashed_codes ), $temp_session->{profile_id}
+        );
+
+        $central_dbs->query(
+            'DELETE FROM temp_2fa_session WHERE temp_sessionkey = ?',
+            $temp_sessionkey );
+
+        my $session_key = $central_dbs->query(
+            'INSERT INTO session (profile_id, sessionkey) 
+         VALUES (?, encode(gen_random_bytes(32), ?)) 
+         RETURNING sessionkey',
+            $temp_session->{profile_id}, 'hex'
+        )->hash->{sessionkey};
+
+        return $c->render(
+            json => {
+                sessionkey   => $session_key,
+                config       => $temp_session->{config},
+                backup_codes => \@backup_codes,
+                message      => "2FA enabled successfully"
+            }
+        );
+    }
+);
 $central->post(
     '/login' => sub {
         my $c      = shift;
@@ -721,10 +1020,10 @@ $central->post(
         return unless $central_dbs;
 
         my $login = $central_dbs->query( '
-            SELECT id, config
-            FROM profile
-            WHERE email = ? AND crypt(?, password) = password
-        ', $email, $password )->hash;
+        SELECT id, config
+        FROM profile
+        WHERE email = ? AND crypt(?, password) = password
+    ', $email, $password )->hash;
 
         unless ($login) {
             return $c->render(
@@ -734,11 +1033,10 @@ $central->post(
         }
 
         if ($client) {
-
-            # Check if the dataset (client) exists
             my $dataset =
               $central_dbs->query( 'SELECT id FROM dataset WHERE db_name = ?',
                 $client )->hash;
+
             unless ($dataset) {
                 return $c->render(
                     status => 400,
@@ -746,11 +1044,11 @@ $central->post(
                 );
             }
 
-            # Check if the user has access to the dataset
             my $access = $central_dbs->query(
 'SELECT access_level FROM dataset_access WHERE profile_id = ? AND dataset_id = ?',
                 $login->{id}, $dataset->{id}
             )->hash;
+
             unless ($access) {
                 return $c->render(
                     status => 403,
@@ -760,8 +1058,59 @@ $central->post(
             }
         }
 
+        my $enforce_2fa = $ENV{ENFORCE_2FA} // 0;
+
+        if ($enforce_2fa) {
+
+            my $totp_record = $central_dbs->query(
+'SELECT id FROM totp_secrets WHERE profile_id = ? AND enabled = TRUE',
+                $login->{id}
+            )->hash;
+
+            if ($totp_record) {
+
+                $central_dbs->query(
+                    'DELETE FROM temp_2fa_session WHERE expires_at < NOW()');
+
+                my $temp_sessionkey = $central_dbs->query(
+'INSERT INTO temp_2fa_session (profile_id, temp_sessionkey, client) 
+                 VALUES (?, encode(gen_random_bytes(32), ?), ?) 
+                 RETURNING temp_sessionkey',
+                    $login->{id}, 'hex', $client
+                )->hash->{temp_sessionkey};
+
+                return $c->render(
+                    status => 200,
+                    json   => {
+                        requires_2fa    => 1,
+                        temp_sessionkey => $temp_sessionkey,
+                        message         => "Please provide 2FA code"
+                    }
+                );
+            }
+            else {
+                my $temp_sessionkey = $central_dbs->query(
+'INSERT INTO temp_2fa_session (profile_id, temp_sessionkey, client) 
+                 VALUES (?, encode(gen_random_bytes(32), ?), ?) 
+                 RETURNING temp_sessionkey',
+                    $login->{id}, 'hex', $client
+                )->hash->{temp_sessionkey};
+
+                return $c->render(
+                    status => 200,
+                    json   => {
+                        requires_2fa_setup => 1,
+                        temp_sessionkey    => $temp_sessionkey,
+                        message            => "2FA setup required"
+                    }
+                );
+            }
+        }
+
         my $session_key = $central_dbs->query(
-'INSERT INTO session (profile_id, sessionkey) VALUES (?, encode(gen_random_bytes(32), ?)) RETURNING sessionkey',
+            'INSERT INTO session (profile_id, sessionkey) 
+         VALUES (?, encode(gen_random_bytes(32), ?)) 
+         RETURNING sessionkey',
             $login->{id}, 'hex'
         )->hash->{sessionkey};
 
@@ -769,6 +1118,80 @@ $central->post(
             json => {
                 sessionkey => $session_key,
                 config     => $login->{config}
+            }
+        );
+    }
+);
+
+$central->post(
+    '/2fa/verify_login' => sub {
+        my $c      = shift;
+        my $params = $c->req->json;
+
+        my $temp_sessionkey = $params->{temp_sessionkey};
+        my $totp_code       = $params->{totp_code};
+
+        unless ( $temp_sessionkey && $totp_code ) {
+            return $c->render(
+                status => 400,
+                json   => { message => "Missing required parameters" }
+            );
+        }
+
+        my $central_dbs = $c->central_dbs();
+
+        my $temp_session = $central_dbs->query(
+            'SELECT ts.*, p.email, p.config 
+         FROM temp_2fa_session ts 
+         JOIN profile p ON ts.profile_id = p.id 
+         WHERE ts.temp_sessionkey = ? 
+         AND ts.expires_at > NOW()',
+            $temp_sessionkey
+        )->hash;
+
+        unless ($temp_session) {
+            return $c->render(
+                status => 401,
+                json   => { message => "Invalid or expired session" }
+            );
+        }
+
+        my $totp_record = $central_dbs->query(
+            'SELECT secret FROM totp_secrets 
+         WHERE profile_id = ? AND enabled = TRUE',
+            $temp_session->{profile_id}
+        )->hash;
+
+        unless ($totp_record) {
+            return $c->render(
+                status => 400,
+                json   => { message => "2FA not configured" }
+            );
+        }
+
+        unless ( $c->verify_totp( $totp_record->{secret}, $totp_code ) ) {
+
+            return $c->render(
+                status => 401,
+                json   => { message => "Invalid 2FA code" }
+            );
+        }
+
+        $central_dbs->query(
+            'DELETE FROM temp_2fa_session WHERE temp_sessionkey = ?',
+            $temp_sessionkey );
+
+        my $session_key = $central_dbs->query(
+            'INSERT INTO session (profile_id, sessionkey) 
+         VALUES (?, encode(gen_random_bytes(32), ?)) 
+         RETURNING sessionkey',
+            $temp_session->{profile_id}, 'hex'
+        )->hash->{sessionkey};
+
+        return $c->render(
+            json => {
+                sessionkey => $session_key,
+                config     => $temp_session->{config}
             }
         );
     }
