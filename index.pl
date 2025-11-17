@@ -7636,10 +7636,16 @@ $api->get(
         my $files = FM->get_files( $dbs, $c, $form );
         my $station_id;
         my $transfer_history;
+        my $payment_file;
         if ( $vc eq 'vendor' && $ai_plugin ) {
             my $station_info = $c->invoice_station_info( $form->{id} );
             $station_id       = $station_info->{station_id};
             $transfer_history = $station_info->{transfer_history};
+            $payment_file = $dbs->query("SELECT * FROM payments WHERE transaction_id = ?", $form->{id})->hash;
+            warn( Dumper $payment_file );
+            if ($payment_file) {
+                $payment_file = 1;
+            }
         }
 
         # Create the transformed data structure
@@ -7673,6 +7679,7 @@ $api->get(
             files            => $files,
             station_id       => $station_id       ? $station_id       : undef,
             history          => $transfer_history ? $transfer_history : undef,
+            payment_file      => $payment_file ? $payment_file : 0,
         };
 
         # Add tax information if present
@@ -7858,7 +7865,9 @@ helper process_transaction => sub {
     }
 
     if ( $ai_plugin && $vc eq 'vendor' ) {
-        $c->add_payment( $form->{id}, $dbs );
+        if ( $data->{payment_file} ) {
+            $c->add_payment( $form->{id}, $dbs );
+        }
     }
 
     return $form->{id};
