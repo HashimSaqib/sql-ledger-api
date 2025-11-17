@@ -1403,7 +1403,7 @@ $central->get(
                 $dataset->{connections} = $connections;
 
                 if ($ai_plugin) {
-                    $dataset->{work_stations} =
+                    $dataset->{workstations} =
                       $c->get_pending_items( $dataset->{db_name},
                         $profile->{profile_id} );
                 }
