@@ -1350,6 +1350,13 @@ $central->get(
         create_temp_columns( $c, $datasets );
 
         foreach my $dataset (@$datasets) {
+            my $db_dbs = $c->dbs( $dataset->{db_name} );
+
+            my $name_q = $db_dbs->query(
+                "SELECT fldvalue FROM defaults WHERE fldname = 'company'")
+              ->hash;
+            $dataset->{name} =
+              $name_q->{fldvalue} ? $name_q->{fldvalue} : $dataset->{db_name};
             my $db_name   = $dataset->{db_name};
             my $logo_path = "templates/$db_name/logo.png";
 
@@ -1730,6 +1737,9 @@ $central->post(
         $dataset_dbh->do(
 "GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public TO $postgres_user"
         );
+        $dataset_dbh->do(
+            "INSERT INTO defaults (fldname, fldvalue) VALUES ('company', ?)",
+            undef, $company );
 
         # Set default privileges for future objects
         $dataset_dbh->do(
@@ -7641,7 +7651,9 @@ $api->get(
             my $station_info = $c->invoice_station_info( $form->{id} );
             $station_id       = $station_info->{station_id};
             $transfer_history = $station_info->{transfer_history};
-            $payment_file = $dbs->query("SELECT * FROM payments WHERE transaction_id = ?", $form->{id})->hash;
+            $payment_file =
+              $dbs->query( "SELECT * FROM payments WHERE transaction_id = ?",
+                $form->{id} )->hash;
             warn( Dumper $payment_file );
             if ($payment_file) {
                 $payment_file = 1;
@@ -7679,7 +7691,7 @@ $api->get(
             files            => $files,
             station_id       => $station_id       ? $station_id       : undef,
             history          => $transfer_history ? $transfer_history : undef,
-            payment_file      => $payment_file ? $payment_file : 0,
+            payment_file     => $payment_file     ? $payment_file     : 0,
         };
 
         # Add tax information if present
