@@ -7380,7 +7380,7 @@ $api->post(
         my @results;
         foreach my $transaction (@$transactions) {
             return unless my $form = $c->check_perms("$vc.invoice");
-            my $new_invoice_id = process_invoice( $c, $transaction, $form );
+            my $new_invoice_id = $c->process_invoice($transaction, $form );
             push @results,
               {
                 id      => $new_invoice_id,
@@ -8135,7 +8135,7 @@ $api->get(
     }
 );
 
-sub process_invoice {
+helper process_invoice => sub {
     my ( $c, $data, $form, $client ) = @_;
 
     if ( $c->param('client') ) {
@@ -8317,7 +8317,7 @@ sub process_invoice {
     }
 
     return $form->{id};
-}
+};
 $api->post(
     '/arap/invoice/:vc/:id' => { id => undef } => sub {
         my $c      = shift;
@@ -8354,7 +8354,7 @@ $api->post(
                 $form = $c->check_perms("vendor.invoice");
             }
         }
-        my $new_invoice_id = process_invoice( $c, $data, $form, $client );
+        my $new_invoice_id = $c->process_invoice($data, $form, $client );
 
         # Return the newly posted or updated invoice ID
         $c->render( json => { id => $new_invoice_id } );
