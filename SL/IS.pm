@@ -2975,7 +2975,7 @@ sub retrieve_invoice {
     if ( $form->{id} *= 1 ) {
 
         # retrieve invoice
-        $query = qq|SELECT a.invnumber, a.ordnumber, a.quonumber,
+        $query = qq|SELECT a.invnumber, a.ordnumber, a.quonumber, a.dcn,
                 a.transdate, a.amount, a.netamount, a.paid,
                 a.shippingpoint, a.shipvia, a.waybill,
 		a.cashdiscount, a.discountterms, a.terms,
