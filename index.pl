@@ -7380,7 +7380,7 @@ $api->post(
         my @results;
         foreach my $transaction (@$transactions) {
             return unless my $form = $c->check_perms("$vc.invoice");
-            my $new_invoice_id = $c->process_invoice($transaction, $form );
+            my $new_invoice_id = $c->process_invoice( $transaction, $form );
             push @results,
               {
                 id      => $new_invoice_id,
@@ -8099,6 +8099,7 @@ $api->get(
             shipVia          => $form->{shipvia},
             wayBill          => $form->{waybill},
             description      => $form->{invdescription},
+            dcn              => $form->{dcn},
             notes            => $form->{notes},
             intnotes         => $form->{intnotes},
             invNumber        => $form->{invnumber},
@@ -8171,6 +8172,7 @@ helper process_invoice => sub {
     $form->{intnotes}     = $data->{intnotes}     || '';
     $form->{till}         = $data->{till}         || '';
     $form->{department}   = $data->{department}   || '';
+    $form->{dcn}          = $data->{dcn}          || '';
 
     # Set up AR or AP account from JSON
     # for AR, it's $form->{AR}, for AP, it's $form->{AP}.
@@ -8354,7 +8356,7 @@ $api->post(
                 $form = $c->check_perms("vendor.invoice");
             }
         }
-        my $new_invoice_id = $c->process_invoice($data, $form, $client );
+        my $new_invoice_id = $c->process_invoice( $data, $form, $client );
 
         # Return the newly posted or updated invoice ID
         $c->render( json => { id => $new_invoice_id } );
