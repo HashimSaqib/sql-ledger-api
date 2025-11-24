@@ -1414,6 +1414,16 @@ $central->get(
                       $c->get_pending_items( $dataset->{db_name},
                         $profile->{profile_id} );
                 }
+
+                my $onboarding =
+                  $client_dbs->query("SELECT fldname, fldvalue FROM onboarding")
+                  ->hashes;
+
+                my $incomplete_count = grep { !$_->{fldvalue} } @$onboarding;
+                $dataset->{onboarding} = $incomplete_count ? 1 : 0;
+            }
+            else {
+                $dataset->{onboarding} = 0;
             }
         }
 
@@ -13542,4 +13552,85 @@ $api->post(
     }
 );
 
+$api->get(
+    '/onboarding' => sub {
+        my $c       = shift;
+        my $client  = $c->param('client');
+        my $profile = $c->get_user_profile();
+        my $central = $c->central_dbs();
+
+        my $dataset =
+          $central->query( "SELECT id from dataset WHERE db_name = ?", $client )
+          ->hash;
+        my $access = $central->query(
+"SELECT access_level FROM dataset_access WHERE profile_id = ? AND dataset_id = ?",
+            $profile->{profile_id}, $dataset->{id}
+        )->hash;
+
+        unless (
+            $access
+            && (   $access->{access_level} eq 'admin'
+                || $access->{access_level} eq 'owner' )
+          )
+        {
+            return $c->render(
+                json => { onboarding => 0, completed => [], incomplete => [] }
+            );
+        }
+
+        my $dbs = $c->dbs($client);
+        my $onboarding =
+          $dbs->query("SELECT fldname, fldvalue FROM onboarding")->hashes;
+
+        my @incomplete_items = ();
+        my @completed_items  = ();
+
+        foreach my $item (@$onboarding) {
+            if ( $item->{fldvalue} ) {
+                push @completed_items, $item->{fldname};
+            }
+            else {
+                push @incomplete_items, $item->{fldname};
+            }
+        }
+
+        my $onboarding_status = @incomplete_items ? 1 : 0;
+
+        return $c->render(
+            json => {
+                onboarding => $onboarding_status,
+                completed  => \@completed_items,
+                incomplete => \@incomplete_items
+            }
+        );
+    }
+);
+$api->post(
+    '/onboarding' => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+        my $dbs    = $c->dbs($client);
+        my $data   = $c->req->json;
+
+        my $onboarding =
+          $dbs->query( "SELECT * FROM onboarding WHERE fldname = ?",
+            $data->{fldname} )->hash;
+
+        unless ($onboarding) {
+            return $c->render(
+                status => 404,
+                json   => {
+                    success => 0,
+                    message => "Onboarding item not found"
+                }
+            );
+        }
+
+        $dbs->query( "UPDATE onboarding SET fldvalue = ? WHERE fldname = ?",
+            $data->{fldvalue}, $data->{fldname} );
+
+        $c->render( json =>
+              { success => 1, message => "Onboarding updated successfully" } );
+    }
+);
 app->start;
