@@ -155,4 +155,5 @@ CREATE UNIQUE INDEX idx_api_key_dataset ON api_key_access(apikey_id, dataset_id)
 CREATE INDEX idx_dataset_id ON api_key_access(dataset_id);
 CREATE INDEX idx_api_key_profile_id ON api_key(profile_id);
 
-INSERT INTO db_updates (version, last_update) VALUES ('001', 'API Tables');
+INSERT INTO db_updates (version, last_update) VALUES ('002', '2FA Tables');
+
