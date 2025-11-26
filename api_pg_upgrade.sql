@@ -282,20 +282,6 @@ CREATE TABLE bank_account (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE onboarding (
-    id SERIAL PRIMARY KEY,
-    fldname VARCHAR(255) NOT NULL
-    fldvalue BOOLEAN
-);
-
-INSERT INTO onboarding (fldname, fldvalue) VALUES ('coa', true);
-INSERT INTO onboarding (fldname, fldvalue) VALUES ('departments', true);
-INSERT INTO onboarding (fldname, fldvalue) VALUES ('projects', true);
-INSERT INTO onboarding (fldname, fldvalue) VALUES ('bank_accounts', true);
-INSERT INTO onboarding (fldname, fldvalue) VALUES ('defaults', true);
-INSERT INTO onboarding (fldname, fldvalue) VALUES ('services', true);
-INSERT INTO onboarding (fldname, fldvalue) VALUES ('stations', true);
-
 
 ALTER TABLE ar ADD COLUMN vc_bank_id INTEGER;
 ALTER TABLE ap ADD COLUMN vc_bank_id INTEGER;
