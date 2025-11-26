@@ -306,3 +306,6 @@ INSERT INTO onboarding (fldname, fldvalue) VALUES ('defaults', false);
 INSERT INTO onboarding (fldname, fldvalue) VALUES ('services', false);
 INSERT INTO onboarding (fldname, fldvalue) VALUES ('stations', false);
 INSERT INTO db_updates (version, last_update) VALUES ('009', 'Onboarding');
+
+ALTER TABLE bank_transactions ADD COLUMN processing_info JSONB;
+INSERT INTO db_updates (version, last_update) VALUES ('010', 'Bank Transaction Processing Info');
