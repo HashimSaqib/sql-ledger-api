@@ -1,0 +1,1 @@
+ALTER TABLE bank_transactions ADD COLUMN processing_info JSONB;
