@@ -1355,16 +1355,8 @@ $central->get(
             my $name_q = $db_dbs->query(
                 "SELECT fldvalue FROM defaults WHERE fldname = 'company'")
               ->hash;
-              if (!$name_q) {
-                return $c->render(
-                    json => { error => "Company name not found $dataset->{db_name}" },
-                    status => 400
-                );
-               $dataset->{name} = $dataset->{db_name};
-              }
-              else {
+              
                 $dataset->{name} = $name_q->{fldvalue} || $dataset->{db_name};
-              }
             my $db_name   = $dataset->{db_name};
             my $logo_path = "templates/$db_name/logo.png";
 
