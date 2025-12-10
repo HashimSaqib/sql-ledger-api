@@ -2353,6 +2353,7 @@ sub bank_accounts {
   my $query = qq|SELECT c.id, c.accno, c.description, c.closed,
                  bk.name, bk.iban, bk.bic, bk.membernumber, bk.clearingnumber,
 		 bk.dcn, bk.rvc, bk.qriban, bk.strdbkginf, bk.invdescriptionqr,
+		 bk.external_id,
 		 ad.address1, ad.address2, ad.city,
                  ad.state, ad.zipcode, ad.country,
 		 l.description AS translation
@@ -2396,7 +2397,7 @@ sub get_bank {
   
   $query = qq|SELECT c.accno, c.description, c.closed,
               bk.name, bk.iban, bk.bic, bk.membernumber, bk.clearingnumber,
-	      bk.dcn, bk.rvc, bk.qriban, bk.strdbkginf, bk.invdescriptionqr,
+	      bk.dcn, bk.rvc, bk.qriban, bk.strdbkginf, bk.invdescriptionqr, bk.external_id,
 	      ad.address1, ad.address2, ad.city,
               ad.state, ad.zipcode, ad.country,
 	      l.description AS translation

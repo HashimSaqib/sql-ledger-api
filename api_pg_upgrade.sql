@@ -309,3 +309,23 @@ INSERT INTO db_updates (version, last_update) VALUES ('009', 'Onboarding');
 
 ALTER TABLE bank_transactions ADD COLUMN processing_info JSONB;
 INSERT INTO db_updates (version, last_update) VALUES ('010', 'Bank Transaction Processing Info');
+
+
+CREATE TABLE connection_keys (
+    id SERIAL PRIMARY KEY,
+    fldname VARCHAR(255) NOT NULL,
+    fldvalue JSONB,
+    created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+ALTER TABLE bank ADD COLUMN external_id VARCHAR(255);
+
+
+CREATE TABLE transaction_distribution (
+    id SERIAL PRIMARY KEY,
+    transaction_id VARCHAR(255) NOT NULL,
+    trans_id INTEGER NOT NULL,
+    amount double precision NOT NULL,
+    based_on VARCHAR(50),
+    module VARCHAR(50) NOT NULL
+);

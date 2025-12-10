@@ -399,6 +399,7 @@ sub post_transaction {
   my $voucherid;
   my $apprpaid = $approved;
   my $paymentid = 1;
+  my %dist_amounts;
 
  
   # add paid transactions
@@ -475,6 +476,9 @@ sub post_transaction {
       $amount = $paid{fxamount}{$i};
       
       if ($amount) {
+        if ($form->{"source_$i"}) {
+           $dist_amounts{$form->{"source_$i"}} += $amount;
+        }
 	# add payment
 	$query = qq|INSERT INTO acc_trans (trans_id, chart_id, amount,
 		    transdate, source, memo, cleared, approved, vr_id, id)
@@ -528,6 +532,47 @@ sub post_transaction {
 	}
       }
     }
+  }
+
+  my @valid_sources;
+  if (keys %dist_amounts) {
+    my $placeholders = join ', ', ('?') x keys %dist_amounts;
+    my $query = qq|SELECT transaction_id FROM bank_transactions WHERE transaction_id IN ($placeholders)|;
+    my $sth = $dbh->prepare($query);
+    $sth->execute(keys %dist_amounts) || $form->dberror($query);
+    while (my ($source) = $sth->fetchrow_array) {
+      push @valid_sources, $source;
+      my $abs_amount = abs($dist_amounts{$source});
+      
+      my $query_check = qq|SELECT id FROM transaction_distribution WHERE transaction_id = ? AND trans_id = ?|;
+      my $sth_check = $dbh->prepare($query_check);
+      $sth_check->execute($source, $form->{id});
+      my ($dist_id) = $sth_check->fetchrow_array;
+      $sth_check->finish;
+
+      my $dist_module = $table eq 'ar' ? 'ar' : 'ap';
+
+      if ($dist_id) {
+        my $query_update = qq|UPDATE transaction_distribution SET amount = ?, module = ? WHERE id = ?|;
+        my $sth_update = $dbh->prepare($query_update);
+        $sth_update->execute($abs_amount, $dist_module, $dist_id) || $form->dberror($query_update);
+      } else {
+        my $query_insert = qq|INSERT INTO transaction_distribution (transaction_id, trans_id, amount, module) VALUES (?, ?, ?, ?)|;
+        my $sth_insert = $dbh->prepare($query_insert);
+        $sth_insert->execute($source, $form->{id}, $abs_amount, $dist_module) || $form->dberror($query_insert);
+      }
+    }
+    $sth->finish;
+  }
+
+  if (@valid_sources) {
+     my $placeholders = join ', ', ('?') x @valid_sources;
+     my $query_clean = qq|DELETE FROM transaction_distribution WHERE trans_id = $form->{id} AND transaction_id NOT IN ($placeholders)|;
+     my $sth_clean = $dbh->prepare($query_clean);
+     $sth_clean->execute(@valid_sources) || $form->dberror($query_clean);
+  } else {
+     my $query_clean = qq|DELETE FROM transaction_distribution WHERE trans_id = $form->{id}|;
+     $dbh->do($query_clean) || $form->dberror($query_clean);
   }
 
   # save taxes for discount
@@ -722,7 +767,10 @@ sub delete_transaction {
   $form->delete_references($dbh);
 
   $form->remove_locks($myconfig, $dbh, $table);
- 
+  
+  # delete bank transaction distribution
+  $query = qq|DELETE FROM transaction_distribution WHERE trans_id = $form->{id}|;
+  $dbh->do($query) || $form->dberror($query);
   # commit
   my $rc = $dbh->commit;
   
