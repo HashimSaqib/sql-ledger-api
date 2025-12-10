@@ -645,6 +645,7 @@ sub post_payment {
   my $diff;
   my $accno;
   my $rate;
+  my %dist_amounts;
 
   # delete payments
   $form->{voucherid} *= 1;
@@ -807,6 +808,9 @@ sub post_payment {
                   VALUES ($paymentid, $form->{"id_$i"}, $form->{exchangerate},
 		  $paymentmethod_id)|;
       $dbh->do($query) || $form->dberror($query);
+      if ($form->{source}) {
+        $dist_amounts{$form->{source}}{$form->{"id_$i"}} += $form->{"paid_$i"};
+      }
 
       # add exchangerate difference if currency ne defaultcurrency
       $amount = $form->round_amount($form->{"paid_$i"} * ($form->{exchangerate} - 1) * $ml * -1, $form->{precision});
@@ -970,6 +974,57 @@ sub post_payment {
 				'amount',
 				qq|id = $form->{batchid}|,
 				$amount);
+      }
+    }
+  }
+
+  my @valid_sources;
+  if (keys %dist_amounts) {
+    my $placeholders = join ', ', ('?') x keys %dist_amounts;
+    my $query = qq|SELECT transaction_id FROM bank_transactions WHERE transaction_id IN ($placeholders)|;
+    my $sth = $dbh->prepare($query);
+    $sth->execute(keys %dist_amounts) || $form->dberror($query);
+    while (my ($source) = $sth->fetchrow_array) {
+      push @valid_sources, $source;
+      
+      # Check each transaction that was paid
+      for my $i (1 .. $form->{rowcount}) {
+        if ($form->{"checked_$i"}) {
+          my $abs_amount = abs($dist_amounts{$source}{$form->{"id_$i"}});
+          my $query_check = qq|SELECT id FROM transaction_distribution WHERE transaction_id = ? AND trans_id = ?|;
+          my $sth_check = $dbh->prepare($query_check);
+          $sth_check->execute($source, $form->{"id_$i"});
+          my ($dist_id) = $sth_check->fetchrow_array;
+          $sth_check->finish;
+
+          my $dist_module = $form->{arap};
+
+          if ($dist_id) {
+            my $query_update = qq|UPDATE transaction_distribution SET amount = ?, module = ? WHERE id = ?|;
+            my $sth_update = $dbh->prepare($query_update);
+            $sth_update->execute($abs_amount, $dist_module, $dist_id) || $form->dberror($query_update);
+          } else {
+            my $query_insert = qq|INSERT INTO transaction_distribution (transaction_id, trans_id, amount, module) VALUES (?, ?, ?, ?)|;
+            my $sth_insert = $dbh->prepare($query_insert);
+            $sth_insert->execute($source, $form->{"id_$i"}, $abs_amount, $dist_module) || $form->dberror($query_insert);
+          }
+        }
+      }
+    }
+    $sth->finish;
+  }
+
+  # Clean up old distribution records for transactions that were paid
+  for my $i (1 .. $form->{rowcount}) {
+    if ($form->{"checked_$i"}) {
+      if (@valid_sources) {
+        my $placeholders = join ', ', ('?') x @valid_sources;
+        my $query_clean = qq|DELETE FROM transaction_distribution WHERE trans_id = $form->{"id_$i"} AND transaction_id NOT IN ($placeholders)|;
+        my $sth_clean = $dbh->prepare($query_clean);
+        $sth_clean->execute(@valid_sources) || $form->dberror($query_clean);
+      } else {
+        my $query_clean = qq|DELETE FROM transaction_distribution WHERE trans_id = $form->{"id_$i"}|;
+        $dbh->do($query_clean) || $form->dberror($query_clean);
       }
     }
   }
