@@ -1356,6 +1356,10 @@ $central->get(
                 "SELECT fldvalue FROM defaults WHERE fldname = 'company'")
               ->hash;
               if (!$name_q) {
+                return $c->render(
+                    json => { error => "Company name not found $dataset->{db_name}" },
+                    status => 400
+                );
                $dataset->{name} = $dataset->{db_name};
               }
               else {
