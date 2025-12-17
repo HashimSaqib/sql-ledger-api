@@ -546,8 +546,12 @@ sub get_files_for_transactions {
 
     return [] unless @$transactions;
 
-    # Get all transaction IDs
-    my @transaction_ids = map { $_->{id} } @$transactions;
+# Get unique transaction IDs (GL->transactions returns multiple rows per transaction)
+    my %seen;
+    my @transaction_ids =
+      grep { defined $_ && !$seen{$_}++ } map { $_->{id} } @$transactions;
+
+    return [] unless @transaction_ids;
 
     # Get all files for these transactions in a single query
     my @files = $dbs->query(
