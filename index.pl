@@ -1352,11 +1352,17 @@ $central->get(
         foreach my $dataset (@$datasets) {
             my $db_dbs = $c->dbs( $dataset->{db_name} );
 
-            my $name_q = $db_dbs->query(
-                "SELECT fldvalue FROM defaults WHERE fldname = 'company'")
-              ->hash;
-              
-                $dataset->{name} = $name_q->{fldvalue} || $dataset->{db_name};
+            my $name_q;
+            eval {
+                $name_q = $db_dbs->query(
+                    "SELECT fldvalue FROM defaults WHERE fldname = 'company'")
+                  ->hash;
+            };
+
+            $dataset->{name} =
+              ( $name_q && $name_q->{fldvalue} )
+              ? $name_q->{fldvalue}
+              : $dataset->{db_name};
             my $db_name   = $dataset->{db_name};
             my $logo_path = "templates/$db_name/logo.png";
 
