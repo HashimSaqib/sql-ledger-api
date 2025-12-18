@@ -1,229 +1,553 @@
 openapi: 3.0.0
 info:
-  version: "1"
-  title: Sql Ledger Rest API
-  description: Sql Ledger Rest API
+  title: SQL Ledger API
+  version: '0.1'
+  description: |
+    Backend API for interacting with Neo-Ledger (modern remake of SQL-Ledger). While the entire backend is based on API, this documentation covers interacting with client data. For integrations, it is recommended to use an API key that can be created for a client in the user dashboard. You need to be owner of a dataset to create an API key. API key will grant the API access to the entire dataset (it is planned to introduce scops later on).  All dates will be in yyyy-mm-dd format. 
+
+    **HTTP methods**
+      - **GET**: retrieve data  
+      - **POST**: create or update records. Normal post routes will create and post routes ending with /:id will update.
+      - **DELETE**: delete an object
+
+    **Authentication**
+      - **API Key** (recommended for server-side integrations):  
+        include your dataset-specific key in the `X-API-Key` header  
+      - **Session Key**:  
+        obtain a short-lived key via `POST /login` with your credentials  
+        send as `Authorization: <sessionKey>`  
+        (grants access to all datasets your user account can reach).
+
+    🔧 **Server configuration**: Add your own API server by choosing the "Custom API Server" option below and entering your API url.
+
 servers:
-  - url: "https://sqlledger.hashimsaqib.com/api/client/{client}"
-    description: Testing Server
+  # Added by API Auto Mocking Plugin
+  - description: SwaggerHub API Auto Mocking
+    url: https://virtserver.swaggerhub.com/HASHIM1SAQIB/sql-ledger-api/0.1
+  - description: A default testing server is provided. You can configure your own server for hosting by updating the host.
+    url: https://{host}/client/{client}
     variables:
+      host:
+        default: apineo.hashimsaqib.com
+        description: Enter your API Url
       client:
         default: neoledger
-        description: Client parameter for testing
+        description: Your database/client identifier
+
+
+security:
+  - ApiKeyAuth: []
+
 tags:
   - name: Auth
-    description: Endpoints related to API Authentication
+    description: Authentication and API key validation
   - name: General Ledger
-    description: Endpoints related to General Ledger
-  - name: Charts Of Accounts
-    description: Endpoints related to the Chart Of Accounts
-  - name: System Settings 
-    description: Endpoints related to System Settings 
+    description: Endpoints for general ledger transactions
+  - name: Customers
+    description: Endpoints for customer-related transactions (sales invoices)
+  - name: Payments
+    description: Endpoints for payment information
+
 components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: Your dataset-specific API key.
+
   schemas:
-    GLTransaction:
+    GeneralLedger:
       type: object
       properties:
-        id:
-          type: integer
         approved:
           type: integer
+          description: 1 if approved, 0 otherwise
+          readOnly: true
         curr:
           type: string
-        departmentid:
+          description: ISO currency code (e.g. "CHF")
+        department:
+          type: string
+          nullable: true
+        department_id:
           type: integer
+          readOnly: true
         description:
           type: string
-        exchangeRate:
-          type: number
         employeeId:
           type: integer
+          nullable: true
+          readOnly: true
+        exchangeRate:
+          type: number
+          format: float
+        files:
+          type: array
+          items:
+            $ref: '#/components/schemas/File'
+        id:
+          type: integer
+          readOnly: true
         lines:
           type: array
           items:
-            type: object
-            properties:
-              accno:
-                type: string
-              cleared:
-                type: string
-              credit:
-                type: number
-              debit:
-                type: number
-              fx_transaction:
-                type: number
-              memo:
-                type: string
-              source:
-                type: string
-              taxAccount:
-                type: integer
-              taxAmount:
-                type: number
+            $ref: '#/components/schemas/GeneralLedgerLine'
         notes:
           type: string
         reference:
           type: string
         transdate:
           type: string
+          format: date
+          description: Transaction date (YYYY-MM-DD)
         ts:
           type: string
-    GLTransactionLine:
+          format: date-time
+          nullable: true
+          readOnly: true
+        created:
+          type: string
+          format: date-time
+          nullable: true
+          readOnly: true
+        updated:
+          type: string
+          format: date-time
+          nullable: true
+          readOnly: true
+      required:
+        - curr
+        - exchangeRate
+        - reference
+        - transdate
+        - lines
+
+    GeneralLedgerLine:
       type: object
       properties:
-        accdescription:
-          type: string
         accno:
           type: string
-        amount:
-          type: number
         cleared:
-          type: string
-        contra:
-          type: string
+          type: boolean
         credit:
           type: number
-        curr:
-          type: string
-        db:
-          type: string
         debit:
           type: number
-        department:
+        fx_transaction:
+          type: boolean
+          readOnly: true
+        linetaxamount:
+          type: number
+        memo:
           type: string
+        project:
+          type: string
+          nullable: true
+        source:
+          type: string
+        taxAccount:
+          type: integer
         description:
           type: string
-        exchangerate:
-          type: number
-        fx_transaction:
-          type: number
-        gifi_accno:
-          type: string
-        gifi_contra:
-          type: string
+          readOnly: true
+      required:
+        - accno
+        - credit
+        - debit
+        - cleared
+        - taxAccount
+        - linetaxamount
+
+    File:
+      type: object
+      properties:
         id:
           type: integer
-        intnotes:
-          type: string
-        invoice:
-          type: integer
-        lineitem:
-          type: string
         link:
           type: string
-        log:
+          format: uri
+        name:
+          type: string
+      required:
+        - id
+        - link
+        - name
+
+    TransactionLineItem:
+      type: object
+      properties:
+        id:
+          type: number
+          description: Transaction ID
+        transdate:
+          type: string
+          format: date
+          description: Transaction date (YYYY-MM-DD)
+        reference:
+          type: string
+          description: Transaction reference
+        description:
+          type: string
+          description: Transaction description
+        files:
+          type: array
+          items:
+            $ref: '#/components/schemas/File'
+          description: Associated files
+        name:
+          type: string
+          description: Company name
+        vcnumber:
+          type: string
+          description: Vendor/Customer number
+        address:
+          type: string
+          description: Address
+        department:
+          type: string
+          description: Department
+        project_description:
+          type: string
+          description: Project description
+        debit:
+          type: number
+          description: Debit amount
+        credit:
+          type: number
+          description: Credit amount
+        linetax_accno:
+          type: string
+          description: Tax account number
+        linetax_description:
+          type: string
+          description: Tax account description
+        linetaxamount:
+          type: number
+          description: Tax amount
+        source:
+          type: string
+          description: Transaction source
+        memo:
+          type: string
+          description: Transaction memo
+        accno:
+          type: string
+          description: Account number
+        account_description:
+          type: string
+          description: Account description
+        gifi_accno:
+          type: string
+          description: GIFI account number
+        contra:
+          type: string
+          description: Contra account
+        created:
+          type: string
+          format: date-time
+          description: Creation timestamp (ISO timestamp)
+        updated:
+          type: string
+          format: date-time
+          description: Update timestamp (ISO timestamp)
+        amount:
+          type: number
+          description: Transaction amount
+        type:
+          type: string
+          description: Transaction type (gl/ar/ap)
+        till:
+          type: boolean
+          description: Point of sale flag
+        invoice:
+          type: boolean
+          description: Invoice flag
+
+    SalesInvoice:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        customer_id:
+          type: integer
+          description: Customer ID
+        customernumber:
+          type: string
+          readOnly: true
+          description: Customer number
+        invNumber:
+          type: string
+          description: Invoice number
+        invDate:
+          type: string
+          format: date
+          description: Invoice date (YYYY-MM-DD)
+        dueDate:
+          type: string
+          format: date
+          description: Due date (YYYY-MM-DD)
+        ordNumber:
+          type: string
+          description: Order number
+        poNumber:
+          type: string
+          description: Purchase order number
+        description:
+          type: string
+        notes:
+          type: string
+        intnotes:
+          type: string
+          description: Internal notes
+        shippingPoint:
+          type: string
+        shipVia:
+          type: string
+        wayBill:
+          type: string
+        recordAccount:
+          type: string
+          description: AR account number
+        currency:
+          type: string
+          description: ISO currency code (e.g. "CHF")
+        exchangerate:
+          type: number
+          format: float
+          readOnly: true
+        dcn:
+          type: string
+          nullable: true
+        department_id:
+          type: integer
+          readOnly: true
+        paymentmethod_id:
+          type: integer
+          readOnly: true
+        type:
+          type: string
+          description: Transaction type (invoice)
+        taxincluded:
+          type: boolean
+          description: Whether tax is included in prices
+        lines:
+          type: array
+          items:
+            $ref: '#/components/schemas/SalesInvoiceLine'
+        shipto:
+          $ref: '#/components/schemas/ShipTo'
+        payments:
+          type: array
+          items:
+            $ref: '#/components/schemas/InvoicePayment'
+        taxes:
+          type: array
+          items:
+            $ref: '#/components/schemas/InvoiceTax'
+        files:
+          type: array
+          items:
+            $ref: '#/components/schemas/File'
+      required:
+        - customer_id
+        - invDate
+        - dueDate
+        - currency
+        - type
+        - lines
+
+    SalesInvoiceLine:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        number:
+          type: integer
+          description: Part/Service ID (used when creating/updating)
+        partnumber:
+          type: string
+          readOnly: true
+        description:
+          type: string
+        qty:
+          type: number
+        unit:
+          type: string
+        price:
+          type: number
+        discount:
+          type: number
+          description: Discount percentage
+        lineitemdetail:
+          type: boolean
+        itemnotes:
+          type: string
+        cost:
+          type: number
+          readOnly: true
+        costvendor:
+          type: string
+          nullable: true
+          readOnly: true
+        costvendorid:
+          type: integer
+          readOnly: true
+        customerponumber:
+          type: string
+          readOnly: true
+        deliverydate:
+          type: string
+          format: date
+          nullable: true
+          readOnly: true
+        ordernumber:
+          type: string
+          readOnly: true
+        serialnumber:
+          type: string
+          readOnly: true
+        project:
+          type: string
+          readOnly: true
+        onhand:
+          type: number
+          readOnly: true
+        weight:
+          type: number
+          readOnly: true
+        netweight:
+          type: number
+          nullable: true
+          readOnly: true
+        volume:
+          type: number
+          nullable: true
+          readOnly: true
+        package:
+          type: string
+          nullable: true
+          readOnly: true
+        taxaccounts:
+          type: array
+          items:
+            type: string
+          readOnly: true
+          description: Tax account numbers applied to this line
+      required:
+        - number
+        - description
+        - qty
+        - price
+
+    ShipTo:
+      type: object
+      properties:
+        name:
+          type: string
+          nullable: true
+        address1:
+          type: string
+          nullable: true
+        address2:
+          type: string
+          nullable: true
+        city:
+          type: string
+          nullable: true
+        state:
+          type: string
+          nullable: true
+        zipcode:
+          type: string
+          nullable: true
+        country:
+          type: string
+          nullable: true
+        contact:
+          type: string
+          nullable: true
+        phone:
+          type: string
+          nullable: true
+        fax:
+          type: string
+          nullable: true
+        email:
+          type: string
+          nullable: true
+
+    InvoicePayment:
+      type: object
+      properties:
+        date:
+          type: string
+          format: date
+        source:
           type: string
         memo:
           type: string
-        module:
-          type: string
-        notes:
-          type: string
-        payment_id:
-          type: integer
-        projectnumber:
-          type: string
-        reference:
-          type: string
-        source:
-          type: string
-        tax:
+        amount:
           type: number
-        taxamount:
-          type: number
-        till:
+        account:
           type: string
-        transdate:
-          type: string
-        ts:
-          type: string
-        type:
-          type: string
-        vcnumber:
-          type: string
+          description: Payment account number
 
-    Chart:
+    InvoiceTax:
       type: object
       properties:
-        id:
-          type: integer
-          description: Unique identifier for the chart record
         accno:
           type: string
-          description: Account number associated with the chart record
-        description:
-          type: string
-          description: Description of the chart record
-        charttype:
-          type: string
-          maxLength: 1
-          enum:
-            - A # Account
-            - H # Heading
-          description: Type of chart, either Account (A) or Heading (H)
-        category:
-          type: string
-          maxLength: 1
-          enum:
-            - A # Asset
-            - L # Liability
-            - I # Sale/Income
-            - Q # Capital/Equity
-            - E # Expense
-          description: Category of the chart, such as Asset (A), Liability (L), Sale/Income (I), Capital/Equity (Q), or Expense (E)
-        label:
-          type: string
-          description: Label for acc. "Accno --- AccDescription"
-        link:
-          type: string
-          description: Link or reference associated with the chart record
-        gifi_accno:
-          type: string
-          description: GIFI account number associated with the chart record
-        contra:
-          type: boolean
-          description: Indicates if the chart record is a contra account
-        allow_gl:
-          type: string
-          maxLength: 1
-          description: Indicates if the chart record allows general ledger entries
-    Currency: 
+          description: Tax account number
+        amount:
+          type: number
+        rate:
+          type: number
+          nullable: true
+          description: Tax rate (e.g. 0.081 for 8.1%)
+
+    PaymentInfo:
       type: object
       properties:
-        rn:
+        netamount:
           type: number
-        curr:
+          description: Net amount of the invoice
+        paid:
+          type: number
+          description: Amount already paid
+        datepaid:
           type: string
-        prec: 
+          format: date
+          nullable: true
+          description: Date of last payment (YYYY-MM-DD)
+        difference:
           type: number
+          description: Outstanding balance (netamount - paid)
 
 paths:
-  "/auth/validate":
+  /auth/validate_api:
     post:
       tags:
         - Auth
-      summary: Validate a session key to ensure the user is authorized.
-      parameters:
-        - in: query
-          name: sessionkey
-          required: true
-          schema:
-            type: string
-          description: The session key to be validated.
+      summary: Validate API key for a dataset
+      security:
+        - ApiKeyAuth: []
       responses:
-        "200":
-          description: Session key is valid.
+        '200':
+          description: API key is valid and active
           content:
             application/json:
               schema:
                 type: object
                 properties:
                   success:
-                    type: boolean
-                    example: true
-        "401":
-          description: Unauthorized - Invalid session key.
+                    type: integer
+              example:
+                success: 1
+        '401':
+          description: Invalid or inactive API key
           content:
             application/json:
               schema:
@@ -231,9 +555,10 @@ paths:
                 properties:
                   message:
                     type: string
-                    example: "Not Authorized: Invalid session key"
-        "400":
-          description: Bad Request - Missing session key.
+              example:
+                message: "Invalid or inactive API key"
+        '404':
+          description: Unknown dataset
           content:
             application/json:
               schema:
@@ -241,831 +566,880 @@ paths:
                 properties:
                   message:
                     type: string
-                    example: "Missing session key."
+              example:
+                message: "Unknown dataset: neoledger"
+        '403':
+          description: API key has no access to dataset
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+              example:
+                message: "API key has no access to dataset neoledger"
 
-  "/auth/login":
-    post:
-      tags:
-        - Auth
-      summary: Login to a database to get a sessionkey. Sessionkey should be passed in the header in all other routes.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                username:
-                  type: string
-                  description: Username for the user. Should be in the format user@dbname (Just like normal SQL-Ledger login). User should exist as an employee in SQL-Ledger as well as an API User.
-                password:
-                  type: string
-                  description: API Password for the user. This is different from the normal SQL-Ledger password which is stored in the users file. This is stored in the database in the apilogin table. See Database Updates for API for more.
-              required:
-                - username
-                - password
-      responses:
-        "200":
-          description: Successful login
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  sessionkey:
-                    type: string
-                    description: The session key to be used for authenticated requests.
-                  menustring:
-                    type: string
-                    description: The string representing the user's menu or permissions.
-                  client: 
-                    type: string
-                    description: The client/dbName for this user
-        "401":
-          description: Unsuccessful authentication
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  error:
-                    type: string
-                    example: "Invalid username or password."
-        "400":
-          description: Bad Request
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  error:
-                    type: string
-                    example: "Missing username or password."
-  "/auth/create_api_login":
-    post: 
-      tags:
-      - Auth
-      summary: Create an API login. Employee should already exist in database. Uses the username from "employee" table. Can be specified to be an admin.
-      parameters:
-        - name: employeeid
-          in: query
-          required: true
-          description: The ID of the employee for whom the API login is being created. This employee must exist in the SQL-Ledger database.
-          schema:
-           type: string
-        - name: password
-          in: query
-          required: true
-          description: The password for the API login. This password will be stored in the `apilogin` table of the specified client's database.
-          schema:
-            type: string
-        - name: admin
-          in: query
-          required: false
-          description: If the user should have admin access. Admin access will give complete API access without any access control. 
-          schema:
-            type: boolean
-      responses:
-        "200":
-          description: Successful creation of API login
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  message:
-                    type: string
-                    description: Confirmation that the API login was created successfully.
-                    example: "API login created successfully for user 'employeeid'."
-        "400":
-          description: Bad Request
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  message:
-                    type: string
-                    example: "Missing required parameters 'employeeid' or 'password'."
-        "500":
-          description: Internal Server Error
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  message:
-                    type: string
-                    example: "Failed to connect to the client database 'client'." 
-       
-
-  "/gl/transactions/lines":
+  /gl/transactions/lines:
     get:
       tags:
         - General Ledger
-      summary: Get GL transaction lines with filters
+      summary: Retrieve a list of general-ledger transaction lines based on query filters
+      security:
+        - ApiKeyAuth: []
       parameters:
-        - name: reference
-          in: query
-          description: Filter by reference
-          required: false
+        - in: query
+          name: reference
           schema:
             type: string
-        - name: description
-          in: query
-          description: Filter by description
-          required: false
+          description: Transaction reference
+        - in: query
+          name: description
           schema:
             type: string
-        - name: Company Name
-          in: query
-          description: Filter by name
-          required: false
+          description: Transaction description
+        - in: query
+          name: name
           schema:
             type: string
-        - name: department
-          in: query
-          description: Filter by department
-          required: false
+          description: Company name
+        - in: query
+          name: lineitem
           schema:
             type: string
-        - name: lineitem
-          in: query
-          description: Filter by line item
-          required: false
+          description: Line item description
+        - in: query
+          name: source
           schema:
             type: string
-        - name: source
-          in: query
-          description: Filter by source
-          required: false
+          description: Transaction source
+        - in: query
+          name: memo
           schema:
             type: string
-        - name: accnofrom
-          in: query
-          description: Filter by account number from
-          required: false
-          schema:
-            type: string
-        - name: accnoto
-          in: query
-          description: Filter by account number to
-          required: false
-          schema:
-            type: string
-        - name: memo
-          in: query
-          description: Filter by memo
-          required: false
-          schema:
-            type: string
-        - name: datefrom
-          in: query
-          description: Filter by date from
-          required: false
+          description: Transaction memo
+        - in: query
+          name: datefrom
           schema:
             type: string
             format: date
-        - name: dateto
-          in: query
-          description: Filter by date to
-          required: false
+          description: Transaction date from (YYYY-MM-DD)
+        - in: query
+          name: dateto
           schema:
             type: string
             format: date
-        - name: amountfrom
-          in: query
-          description: Filter by amount from
-          required: false
+          description: Transaction date to (YYYY-MM-DD)
+        - in: query
+          name: createdfrom
+          schema:
+            type: string
+            format: date
+          description: Record creation date from (YYYY-MM-DD)
+        - in: query
+          name: createdto
+          schema:
+            type: string
+            format: date
+          description: Record creation date to (YYYY-MM-DD)
+        - in: query
+          name: updatedfrom
+          schema:
+            type: string
+            format: date
+          description: Record update date from (YYYY-MM-DD)
+        - in: query
+          name: updatedto
+          schema:
+            type: string
+            format: date
+          description: Record update date to (YYYY-MM-DD)
+        - in: query
+          name: amountfrom
           schema:
             type: number
-        - name: amountto
-          in: query
-          description: Filter by amount to
-          required: false
+          description: Transaction amount from
+        - in: query
+          name: amountto
           schema:
             type: number
-        - name: notes
-          in: query
-          description: Filter by notes
-          required: false
+          description: Transaction amount to
+        - in: query
+          name: accnofrom
           schema:
             type: string
-        - name: intnotes
-          in: query
-          description: Filter by internal notes
-          required: false
+          description: Account number from
+        - in: query
+          name: accnoto
           schema:
             type: string
-        - name: accno
-          in: query
-          description: Filter by account number
-          required: false
+          description: Account number to
+        - in: query
+          name: department
           schema:
             type: string
-        - name: onhold
-          in: query
-          description: Filter by on hold status
-          required: false
+          description: 'Format: "description--id"'
+        - in: query
+          name: project_id
           schema:
             type: string
-        - name: filter_amounts
-          in: query
-          description: Filter by amounts
-          required: false
+          description: Project ID
+        - in: query
+          name: vcnumber
           schema:
-            type: boolean
+            type: string
+          description: Vendor/Customer number
       responses:
-        "200":
-          description: Successful response with GL transaction lines
+        '200':
+          description: A list of transaction lines matching the criteria
           content:
             application/json:
               schema:
                 type: array
                 items:
-                  $ref: "#/components/schemas/GLTransactionLine"
-        "400":
-          description: Invalid request parameters
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  error:
-                    type: string
-        "404":
-          description: No transaction lines found
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  error:
-                    type: string
+                  $ref: '#/components/schemas/TransactionLineItem'
+              example:
+                - id: 10334
+                  transdate: "2024-12-01"
+                  reference: "X-4"
+                  description: "Initial capital contribution"
+                  files: []
+                  name: "Client Corp"
+                  vcnumber: "CUST-001"
+                  address: "123 Main St"
+                  department: "Finance--1"
+                  project_description: "Q4 Financials"
+                  debit: 5000000
+                  credit: 0
+                  linetax_accno: "2120"
+                  linetax_description: "VAT Payable"
+                  linetaxamount: 374653.09
+                  source: "Bank Statement"
+                  memo: "Capital from investors"
+                  accno: "1020"
+                  account_description: "Bank Account"
+                  gifi_accno: "1001"
+                  contra: "2800"
+                  created: "2024-12-01T10:15:30Z"
+                  updated: "2024-12-01T10:15:30Z"
+                  amount: 5000000
+                  type: "gl"
+                  till: false
+                  invoice: false
 
-  "/gl/transactions/":
+  /gl/transactions:
     get:
       tags:
         - General Ledger
-      summary: Get all GL transactions
+      summary: Retrieve general-ledger transactions based on query filters
+      security:
+        - ApiKeyAuth: []
       parameters:
-        - name: datefrom
-          in: query
-          description: The start date to filter transactions
-          required: false
+        - in: query
+          name: datefrom
           schema:
             type: string
             format: date
-        - name: dateto
-          in: query
-          description: The end date to filter transactions
-          required: false
+          description: Transaction date from (YYYY-MM-DD)
+        - in: query
+          name: dateto
           schema:
             type: string
             format: date
-        - name: description
-          in: query
-          description: Text to filter by description
-          required: false
+          description: Transaction date to (YYYY-MM-DD)
+        - in: query
+          name: description
           schema:
             type: string
-        - name: notes
-          in: query
-          description: Text to filter by notes
-          required: false
+          description: Transaction description (case-insensitive partial match)
+        - in: query
+          name: notes
           schema:
             type: string
-        - name: reference
-          in: query
-          description: Text to filter by reference
-          required: false
+          description: Transaction notes (case-insensitive partial match)
+        - in: query
+          name: reference
           schema:
             type: string
-        - name: accno
-          in: query
-          description: Search On Account Number. All GL entries with at least one transaction with the specified account number will be included.
-          required: false
+          description: Transaction reference (case-insensitive partial match)
+        - in: query
+          name: accno
           schema:
-            type: integer
+            type: string
+          description: Filter transactions that involve this account number
       responses:
-        "200":
-          description: Successful response
+        '200':
+          description: A list of general ledger transactions matching the criteria
           content:
             application/json:
               schema:
                 type: array
                 items:
-                  $ref: "#/components/schemas/GLTransaction"
-        "400":
-          description: Invalid request parameters
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  error:
-                    type: string
-        "404":
-          description: No transactions found
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  error:
-                    type: string
+                  $ref: '#/components/schemas/GeneralLedger'
+              example:
+                - id: 10334
+                  reference: "X-4"
+                  transdate: "2024-12-01"
+                  description: "Initial capital contribution"
+                  notes: "Starting capital for new venture"
+                  curr: "CHF"
+                  department_id: 1
+                  approved: 1
+                  ts: "2024-12-01T10:15:30Z"
+                  exchangeRate: 1.0
+                  created: "2024-12-01T10:15:30Z"
+                  updated: "2024-12-01T10:15:30Z"
+                  lines:
+                    - accno: "1020"
+                      description: "Bank Account"
+                      debit: 5000000
+                      credit: 0
+                      memo: "Capital deposit"
+                      source: "Bank Statement"
+                      taxAccount: 10025
+                      taxAmount: 374653.09
+                      fx_transaction: false
+                      cleared: false
+                    - accno: "2800"
+                      description: "Capital Stock"
+                      debit: 0
+                      credit: 5000000
+                      memo: "Share issuance"
+                      source: "Share Certificate"
+                      taxAccount: 10026
+                      taxAmount: 2500000
+                      fx_transaction: false
+                      cleared: false
+                - id: 10335
+                  reference: "X-5"
+                  transdate: "2024-12-02"
+                  description: "Office supplies purchase"
+                  notes: ""
+                  curr: "CHF"
+                  department_id: 2
+                  approved: 1
+                  ts: "2024-12-02T14:30:00Z"
+                  exchangeRate: 1.0
+                  created: "2024-12-02T14:30:00Z"
+                  updated: "2024-12-02T14:30:00Z"
+                  lines:
+                    - accno: "5100"
+                      description: "Office Supplies"
+                      debit: 1200
+                      credit: 0
+                      memo: "Printer paper and pens"
+                      source: "Invoice #12345"
+                      taxAccount: 10025
+                      taxAmount: 90
+                      fx_transaction: false
+                      cleared: false
+                    - accno: "1020"
+                      description: "Bank Account"
+                      debit: 0
+                      credit: 1200
+                      memo: "Payment for supplies"
+                      source: "Bank Transfer"
+                      taxAccount: 10026
+                      taxAmount: 0
+                      fx_transaction: false
+                      cleared: true
+
     post:
       tags:
         - General Ledger
-      summary: Create a new GL transaction
+      summary: Create a new general-ledger transaction
+      security:
+        - ApiKeyAuth: []
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/GLTransaction"
+              $ref: '#/components/schemas/GeneralLedger'
+            example:
+              curr: "CHF"
+              exchangeRate: 1
+              description: ""
+              notes: ""
+              reference: "X-4"
+              transdate: "2024-12-01"
+              lines:
+                - accno: "1020"
+                  credit: 0
+                  debit: 5000000
+                  memo: ""
+                  source: ""
+                  cleared: false
+                  taxAccount: 10025
+                  linetaxamount: 374653.098982424
+                - accno: "2800"
+                  credit: 5000000
+                  debit: 0
+                  memo: ""
+                  source: ""
+                  cleared: false
+                  taxAccount: 10026
+                  linetaxamount: 2500000
+              files: []
       responses:
-        "201":
-          description: The GL transaction was successfully created
+        '201':
+          description: Transaction created
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/GLTransaction"
-        "400":
-          description: Bad Request
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  error:
-                    type: object
-                    properties:
-                      message:
-                        type: string
-                        example: At least two items are required in LINES.
-  "/gl/transactions/{id}":
+                $ref: '#/components/schemas/GeneralLedger'
+              example:
+                approved: 1
+                curr: "CHF"
+                department: null
+                department_id: 0
+                description: ""
+                employeeId: null
+                exchangeRate: 1.0
+                id: 10334
+                lines:
+                  - accno: "1020"
+                    cleared: null
+                    credit: 0
+                    debit: 5000000
+                    fx_transaction: false
+                    linetaxamount: 374653.098982424
+                    memo: ""
+                    project: null
+                    source: ""
+                    taxAccount: 10025
+                  - accno: "2800"
+                    cleared: null
+                    credit: 5000000
+                    debit: 0
+                    fx_transaction: false
+                    linetaxamount: 2500000
+                    memo: ""
+                    project: null
+                    source: ""
+                    taxAccount: 10026
+                notes: ""
+                reference: "X-4"
+                transdate: "2024-12-01"
+                ts: "2024-12-01T10:15:30Z"
+
+  /gl/transactions/{id}:
     get:
       tags:
         - General Ledger
-      summary: Get an individual GL transaction
+      summary: Retrieve a general-ledger transaction by ID
+      security:
+        - ApiKeyAuth: []
       parameters:
         - in: path
           name: id
           schema:
             type: integer
           required: true
-          description: Unique identifier of the GL transaction
+          description: The transaction ID
       responses:
-        "200":
-          description: Successful response
+        '200':
+          description: The requested transaction
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/GLTransaction"
-        "404":
-          description: The requested GL transaction was not found
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  error:
-                    type: object
-                    properties:
-                      message:
-                        type: string
-
-    put:
-      tags:
-        - General Ledger
-      summary: Update a GL transaction
-      parameters:
-        - name: id
-          in: path
-          required: true
-          description: Identifier for the GL transaction to update.
-          schema:
-            type: string
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/GLTransaction"
-      responses:
-        "200":
-          description: The GL transaction was successfully updated
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/GLTransaction"
-        "400":
-          description: Bad Request
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  error:
-                    type: object
-                    properties:
-                      message:
-                        type: string
-                        example: At least two items are required in LINES.
-        "404":
-          description: GL transaction not found
+                $ref: '#/components/schemas/GeneralLedger'
+              example:
+                approved: 1
+                curr: "CHF"
+                department: null
+                department_id: 0
+                description: ""
+                employeeId: null
+                exchangeRate: 1.0
+                id: 10334
+                lines:
+                  - accno: "1020"
+                    cleared: null
+                    credit: 0
+                    debit: 5000000
+                    fx_transaction: false
+                    linetaxamount: 374653.098
+                    memo: ""
+                    project: null
+                    source: ""
+                    taxAccount: 10025
+                    id: 1
+                  - accno: "2800"
+                    cleared: null
+                    credit: 5000000
+                    debit: 0
+                    fx_transaction: false
+                    linetaxamount: 2500000
+                    memo: ""
+                    project: null
+                    source: ""
+                    taxAccount: 10026
+                    id: 2
+                notes: ""
+                reference: "X-4"
+                transdate: "2024-12-01"
+                ts: "2024-12-01T10:15:30Z"
+        '404':
+          description: Transaction not found
           content:
             application/json:
               schema:
                 type: object
                 properties:
                   error:
-                    type: object
-                    properties:
-                      message:
-                        type: string
-                        example: The GL transaction with the provided ID does not exist.
-
-    delete:
-      tags:
-        - General Ledger
-      summary: Delete a GL transaction
-      parameters:
-        - name: id
-          in: path
-          required: true
-          description: Identifier for the GL transaction to delete.
-          schema:
-            type: integer
-      responses:
-        "204":
-          description: Successfully Deleted.
-        "404":
-          description: GL transaction not found
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  error:
-                    type: object
-                    properties:
-                      message:
-                        type: string
-                        example: The GL transaction with the provided ID does not exist.
-
-  "/charts/":
-    get:
-      tags:
-        - Charts Of Accounts
-      summary: Get a list of all available chart of accounts
-      parameters:
-        - name: link
-          in: query
-          required: false
-          schema:
-            type: string
-            items:
-              type: string
-          description: A comma list of link strings to filter the chart entries. Multiple values can be provided.
-      responses:
-        "200":
-          description: A list of chart of accounts entries
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/Chart"
-        "404":
-          description: No chart entries found
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  error:
-                    type: object
-                    properties:
-                      message:
-                        type: string
-                        description: A message indicating that no chart entries were found
-                example:
-                  error:
-                    message: "No accounts found"
-        "400":
-          description: Invalid client or request
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  error:
-                    type: object
-                    properties:
-                      message:
-                        type: string
-                        description: A message indicating that the client is invalid or the request is malformed
-                example:
-                  error:
-                    message: "Invalid client or request"
+                    type: string
+              example:
+                error: "Transaction with ID 12345 not found."
 
     post:
       tags:
-        - Charts Of Accounts
-      summary: Create a new chart of accounts entry
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required:
-                - accno
-                - description
-              properties:
-                accno:
-                  type: string
-                  description: The account number for the chart of accounts entry
-                description:
-                  type: string
-                  description: The description of the chart of accounts entry
-                charttype:
-                  type: string
-                  description: The type of the chart of accounts entry, must be either 'A' or 'H'
-                  enum:
-                    - A
-                    - H
-                  default: A
-                category:
-                  type: string
-                  maxLength: 1
-                  enum:
-                    - A # Asset
-                    - L # Liability
-                    - I # Sale/Income
-                    - Q # Capital/Equity
-                    - E # Expense
-                link:
-                  type: string
-                  description: The link for the chart of accounts entry
-                contra:
-                  type: boolean
-                  description: Indicates whether the account is a contra account
-                  default: false
-                allow_gl:
-                  type: string
-                  description: Indicates whether general ledger entries are allowed for this account
-      responses:
-        "201":
-          description: Chart of accounts entry created successfully
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  message:
-                    type: string
-                    description: A success message
-                  entry:
-                    $ref: "#/components/schemas/Chart"
-              example:
-                message: "Chart entry created successfully"
-                entry:
-                  accno: "4000"
-                  description: "Sales"
-                  charttype: "A"
-                  category: "I"
-                  link: "AR_amount:IC_sale:IC_income"
-                  contra: false
-                  allow_gl: "1"
-        "400":
-          description: Invalid request data
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  error:
-                    type: object
-                    properties:
-                      message:
-                        type: string
-                        description: A message indicating that required fields are missing or invalid
-              example:
-                error:
-                  message: "Missing required fields: accno, description"
-        "500":
-          description: Internal server error
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  error:
-                    type: object
-                    properties:
-                      message:
-                        type: string
-                        description: A message indicating that the server encountered an error while creating the entry
-              example:
-                error:
-                  message: "Failed to create chart entry"
-    
-  "/system/currencies/":
-    get:
-      tags:
-        - Currencies
-      summary: Retrieve all available currencies
-      responses:
-        "200":
-          description: List of available currencies retrieved successfully
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  currencies:
-                    type: array
-                    items:
-                      type: object
-                      properties:
-                        rn:
-                          type: integer
-                          description: Running number of the currency
-                        curr:
-                          type: string
-                          description: The currency code (3 characters)
-                        prec:
-                          type: integer
-                          description: The number of decimal places for the currency
-                example:
-                  currencies:
-                    - rn: 1
-                      curr: "USD"
-                      prec: 2
-                    - rn: 2
-                      curr: "EUR"
-                      prec: 2
-        "404":
-          description: No currencies found
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  message:
-                    type: string
-                    description: A message indicating that no currencies were found
-              example:
-                message: "No currencies found"
-        "500":
-          description: Failed to retrieve currencies
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  message:
-                    type: string
-                    description: A message indicating that the server encountered an error
-              example:
-                message: "Failed to retrieve currencies"
-
-    post:
-      tags:
-        - Currencies
-      summary: Create a new currency entry
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required:
-                - curr
-                - prec
-              properties:
-                curr:
-                  type: string
-                  description: The 3-character currency code (e.g., "USD", "EUR")
-                  maxLength: 3
-                  minLength: 3
-                  example: "USD"
-                prec:
-                  type: integer
-                  description: The number of decimal places for the currency
-                  minimum: 0
-                  maximum: 10
-                  example: 2
-      responses:
-        "201":
-          description: Currency created successfully
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  message:
-                    type: string
-                    description: A success message
-                  currency:
-                    type: object
-                    properties:
-                      rn:
-                        type: integer
-                        description: Running number of the currency
-                      curr:
-                        type: string
-                        description: The currency code (3 characters)
-                      prec:
-                        type: integer
-                        description: The number of decimal places for the currency
-              example:
-                message: "Currency created successfully"
-                currency:
-                  rn: 3
-                  curr: "GBP"
-                  prec: 2
-        "400":
-          description: Invalid input parameters
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  message:
-                    type: string
-                    description: A message indicating that required fields are missing or invalid
-              example:
-                message: "Invalid input parameters"
-        "500":
-          description: Failed to create currency
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  message:
-                    type: string
-                    description: A message indicating that the server encountered an error while creating the currency
-              example:
-                message: "Failed to create currency"
-
-  "/system/currencies/{curr}":
-    delete:
-      tags:
-        - Currencies
-      summary: Delete a currency entry
+        - General Ledger
+      summary: Update an existing general-ledger transaction
+      security:
+        - ApiKeyAuth: []
       parameters:
         - in: path
-          name: curr
+          name: id
+          schema:
+            type: integer
           required: true
+          description: The transaction ID to update
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GeneralLedger'
+            example:
+              curr: "CHF"
+              exchangeRate: 1
+              description: "Updated transaction description"
+              notes: "Updated notes"
+              reference: "X-4-UPDATED"
+              transdate: "2024-12-01"
+              lines:
+                - accno: "1020"
+                  credit: 0
+                  debit: 5500000
+                  memo: "Updated memo"
+                  source: "Updated source"
+                  cleared: false
+                  taxAccount: 10025
+                  linetaxamount: 411118.408880066
+                - accno: "2800"
+                  credit: 5500000
+                  debit: 0
+                  memo: "Updated memo"
+                  source: "Updated source"
+                  cleared: false
+                  taxAccount: 10026
+                  linetaxamount: 2750000
+              files: []
+      responses:
+        '200':
+          description: Transaction updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GeneralLedger'
+              example:
+                approved: 1
+                curr: "CHF"
+                department: null
+                department_id: 0
+                description: "Updated transaction description"
+                employeeId: null
+                exchangeRate: 1.0
+                id: 10334
+                lines:
+                  - accno: "1020"
+                    cleared: null
+                    credit: 0
+                    debit: 5500000
+                    fx_transaction: false
+                    linetaxamount: 411118.408880066
+                    memo: "Updated memo"
+                    project: null
+                    source: "Updated source"
+                    taxAccount: 10025
+                  - accno: "2800"
+                    cleared: null
+                    credit: 5500000
+                    debit: 0
+                    fx_transaction: false
+                    linetaxamount: 2750000
+                    memo: "Updated memo"
+                    project: null
+                    source: "Updated source"
+                    taxAccount: 10026
+                notes: "Updated notes"
+                reference: "X-4-UPDATED"
+                transdate: "2024-12-01"
+                ts: "2024-12-01T10:15:30Z"
+        '404':
+          description: Transaction not found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+              example:
+                error: "Transaction with ID 12345 not found."
+
+  /arap/invoice/customer/{id}:
+    get:
+      tags:
+        - Customers
+      summary: Retrieve a sales invoice by ID
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: integer
+          required: true
+          description: The sales invoice ID
+      responses:
+        '200':
+          description: The requested sales invoice
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SalesInvoice'
+              example:
+                id: 10322
+                customer_id: 10319
+                customernumber: "KD-1"
+                invNumber: "R-1000"
+                invDate: "2025-12-18"
+                dueDate: "2025-12-18"
+                ordNumber: ""
+                poNumber: ""
+                description: ""
+                notes: ""
+                intnotes: ""
+                shippingPoint: ""
+                shipVia: ""
+                wayBill: ""
+                recordAccount: "1100"
+                currency: "CHF"
+                exchangerate: 1
+                dcn: null
+                department_id: 0
+                paymentmethod_id: 10004
+                type: "invoice"
+                taxincluded: false
+                lines:
+                  - id: 10320
+                    partnumber: "ART-1"
+                    description: "Web Development Services"
+                    qty: 1
+                    unit: ""
+                    price: 500
+                    discount: 0
+                    lineitemdetail: false
+                    itemnotes: ""
+                    cost: 0.0
+                    costvendor: null
+                    costvendorid: 0
+                    customerponumber: ""
+                    deliverydate: null
+                    ordernumber: ""
+                    serialnumber: ""
+                    project: ""
+                    onhand: 0.0
+                    weight: 0.0
+                    netweight: null
+                    volume: null
+                    package: null
+                    taxaccounts: ["22010", "22020", "22030"]
+                  - id: 10321
+                    partnumber: "ART-2"
+                    description: "Web Hosting Services"
+                    qty: 1
+                    unit: ""
+                    price: 500
+                    discount: 0
+                    lineitemdetail: false
+                    itemnotes: ""
+                    cost: 0.0
+                    costvendor: null
+                    costvendorid: 0
+                    customerponumber: ""
+                    deliverydate: null
+                    ordernumber: ""
+                    serialnumber: ""
+                    project: ""
+                    onhand: 0.0
+                    weight: 0.0
+                    netweight: null
+                    volume: null
+                    package: null
+                    taxaccounts: ["22010"]
+                shipto:
+                  name: null
+                  address1: null
+                  address2: null
+                  city: null
+                  state: null
+                  zipcode: null
+                  country: null
+                  contact: null
+                  phone: null
+                  fax: null
+                  email: null
+                payments: []
+                taxes:
+                  - accno: "22010"
+                    amount: 81.0
+                    rate: null
+                  - accno: "22020"
+                    amount: 19.0
+                    rate: null
+                  - accno: "22030"
+                    amount: 13.0
+                    rate: null
+                files: []
+        '404':
+          description: Sales invoice not found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+              example:
+                error: "Sales invoice with ID 12345 not found."
+
+    post:
+      tags:
+        - Customers
+      summary: Update an existing sales invoice
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: integer
+          required: true
+          description: The sales invoice ID to update
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SalesInvoice'
+            example:
+              customer_id: 10319
+              shippingPoint: ""
+              shipVia: ""
+              wayBill: ""
+              description: ""
+              notes: ""
+              intnotes: ""
+              invNumber: ""
+              ordNumber: ""
+              invDate: "2025-12-18"
+              dueDate: "2025-12-18"
+              poNumber: ""
+              recordAccount: "1100"
+              currency: "CHF"
+              dcn: ""
+              type: "invoice"
+              lines:
+                - number: 10320
+                  description: "Web Development Services"
+                  qty: 1
+                  unit: ""
+                  price: 500
+                  discount: 0
+                  lineitemdetail: false
+                  itemnotes: ""
+                - number: 10321
+                  description: "Web Hosting Services"
+                  qty: 1
+                  unit: ""
+                  price: 500
+                  discount: 0
+                  lineitemdetail: false
+                  itemnotes: ""
+              shipto: {}
+              payments:
+                - date: "2025-12-18"
+                  source: ""
+                  memo: ""
+                  amount: 0
+                  account: "1000"
+              taxes:
+                - accno: "22010"
+                  amount: 81
+                  rate: 0.081
+                - accno: "22020"
+                  amount: 19
+                  rate: 0.038
+                - accno: "22030"
+                  amount: 13
+                  rate: 0.026
+              taxincluded: false
+              files: []
+      responses:
+        '200':
+          description: Sales invoice updated successfully
+          content:
+            application/json:
+              schema:
+                type: integer
+                description: The updated invoice ID
+              example: 10322
+        '404':
+          description: Sales invoice not found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+              example:
+                error: "Sales invoice with ID 12345 not found."
+
+  /arap/invoice/customer:
+    post:
+      tags:
+        - Customers
+      summary: Create a new sales invoice
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SalesInvoice'
+            example:
+              customer_id: 10319
+              shippingPoint: ""
+              shipVia: ""
+              wayBill: ""
+              description: ""
+              notes: ""
+              intnotes: ""
+              invNumber: ""
+              ordNumber: ""
+              invDate: "2025-12-18"
+              dueDate: "2025-12-18"
+              poNumber: ""
+              recordAccount: "1100"
+              currency: "CHF"
+              dcn: ""
+              type: "invoice"
+              lines:
+                - number: 10320
+                  description: "Web Development Services"
+                  qty: 1
+                  unit: ""
+                  price: 500
+                  discount: 0
+                  lineitemdetail: false
+                  itemnotes: ""
+                - number: 10321
+                  description: "Web Hosting Services"
+                  qty: 1
+                  unit: ""
+                  price: 500
+                  discount: 0
+                  lineitemdetail: false
+                  itemnotes: ""
+              shipto: {}
+              payments:
+                - date: "2025-12-18"
+                  source: ""
+                  memo: ""
+                  amount: 0
+                  account: "1000"
+              taxes:
+                - accno: "22010"
+                  amount: 81
+                  rate: 0.081
+                - accno: "22020"
+                  amount: 19
+                  rate: 0.038
+                - accno: "22030"
+                  amount: 13
+                  rate: 0.026
+              taxincluded: false
+              files: []
+      responses:
+        '201':
+          description: Sales invoice created successfully
+          content:
+            application/json:
+              schema:
+                type: integer
+                description: The new invoice ID
+              example: 10322
+
+  /arap/payment/{vc}/{id}:
+    get:
+      tags:
+        - Payments
+      summary: Retrieve payment information for an invoice
+      description: |
+        Returns payment status for an invoice from AR (customer) or AP (vendor) table.
+        Use `vc=customer` for sales invoices (AR) or `vc=vendor` for purchase invoices (AP).
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - in: path
+          name: vc
           schema:
             type: string
-            description: The 3-character currency code (e.g., "USD", "EUR")
-            maxLength: 3
-            minLength: 3
-          description: The 3-character currency code to delete
+            enum: [customer, vendor]
+          required: true
+          description: Type of entity - "customer" for AR or "vendor" for AP
+        - in: path
+          name: id
+          schema:
+            type: integer
+          required: true
+          description: The invoice ID
       responses:
-        "204":
-          description: Currency deleted successfully, no content returned
-        "400":
-          description: Invalid currency code provided
+        '200':
+          description: Payment information for the invoice
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentInfo'
+              example:
+                netamount: 1000.00
+                paid: 250.00
+                datepaid: "2025-12-18"
+                difference: 750.00
+        '400':
+          description: Invalid vc parameter
           content:
             application/json:
               schema:
                 type: object
                 properties:
-                  message:
+                  error:
                     type: string
-                    description: A message indicating that the provided currency code is invalid
               example:
-                message: "Invalid currency code"
-        "404":
-          description: Currency not found
+                error: "Invalid vc parameter. Must be 'customer' or 'vendor'."
+        '404':
+          description: Invoice not found
           content:
             application/json:
               schema:
                 type: object
                 properties:
-                  message:
+                  error:
                     type: string
-                    description: A message indicating that the currency was not found
               example:
-                message: "Currency not found"
-        "500":
-          description: Failed to delete currency
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  message:
-                    type: string
-                    description: A message indicating that the server encountered an error while deleting the currency
-              example:
-                message: "Failed to delete currency"
-
-
+                error: "Invoice with ID 12345 not found."

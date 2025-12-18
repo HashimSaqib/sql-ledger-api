@@ -329,3 +329,4 @@ CREATE TABLE transaction_distribution (
     based_on VARCHAR(50),
     module VARCHAR(50) NOT NULL
 );
+INSERT INTO db_updates (version, last_update) VALUES ('011', 'Transaction Distribution');
