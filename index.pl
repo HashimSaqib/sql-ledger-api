@@ -8420,6 +8420,55 @@ $api->delete(
 );
 
 $api->get(
+    '/arap/payment/:vc/:id' => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+        my $id     = $c->param('id');
+        my $vc     = $c->param('vc');
+
+        my $table;
+        if ( $vc eq 'customer' ) {
+            $table = 'ar';
+        }
+        elsif ( $vc eq 'vendor' ) {
+            $table = 'ap';
+        }
+        else {
+            return $c->render(
+                json => {
+                    error =>
+                      "Invalid vc parameter. Must be 'customer' or 'vendor'."
+                },
+                status => 400
+            );
+        }
+
+        return unless my $form = $c->check_perms("$vc.invoice");
+
+        my $dbs = $c->dbs($client);
+        my $row = $dbs->query(
+            "SELECT netamount, paid, datepaid FROM $table WHERE id = ?", $id )
+          ->hash;
+
+        if ( !$row ) {
+            return $c->render(
+                json   => { error => "Invoice with ID $id not found." },
+                status => 404
+            );
+        }
+
+        $c->render(
+            json => {
+                netamount  => $row->{netamount} + 0,
+                paid       => $row->{paid} + 0,
+                datepaid   => $row->{datepaid},
+                difference => ( $row->{netamount} - $row->{paid} ) + 0,
+            }
+        );
+    }
+);
+
+$api->get(
     '/invoice/consolidate' => sub {
         my $c      = shift;
         my $client = $c->param('client');
