@@ -1272,15 +1272,16 @@ $api->get(
 
         # Retrieve all roles assigned to the current profile for this dataset
         my $roles = $dbs->query(
-            "SELECT r.acs
+            "SELECT r.acs, r.extra_info
      FROM dataset_access da
      JOIN role r ON da.role_id = r.id
      WHERE da.profile_id = ? AND r.dataset_id = ?",
             $profile->{profile_id}, $dataset_id
         )->hashes;
 
-        # Merge the ACS arrays from all roles into a single set
+        # Merge the ACS and hidden arrays from all roles into single sets
         my %acs_union;
+        my %hidden_union;
         for my $row (@$roles) {
             my $acs_val = $row->{acs};
             my $acs_array;
@@ -1294,10 +1295,23 @@ $api->get(
                 $acs_array ||= [];
             }
             $acs_union{$_} = 1 for @$acs_array;
-        }
-        my @merged_acs = keys %acs_union;
 
-        $c->render( json => { acs => \@merged_acs } );
+            # Extract hidden array from extra_info
+            my $extra_info = $row->{extra_info};
+            if ($extra_info) {
+                $extra_info = Mojo::JSON::from_json($extra_info)
+                  unless ref $extra_info eq 'HASH';
+                my $hidden = $extra_info->{hidden} // [];
+                $hidden = Mojo::JSON::from_json($hidden)
+                  unless ref $hidden eq 'ARRAY';
+                $hidden_union{$_} = 1 for @$hidden;
+            }
+        }
+        my @merged_acs    = keys %acs_union;
+        my @merged_hidden = keys %hidden_union;
+
+        $c->render(
+            json => { acs => \@merged_acs, hidden => \@merged_hidden } );
     }
 );
 
@@ -1390,7 +1404,7 @@ $central->get(
 
                 # Query all roles for this dataset with their name and acs value
                 my $roles = $dbs->query(
-                    "SELECT id, name, acs 
+                    "SELECT id, name, acs, extra_info
                      FROM role
                      WHERE dataset_id = ?",
                     $dataset->{id}
@@ -1507,12 +1521,13 @@ $api->post(
                 );
             }
 
-            my $acs = defined $data->{acs} ? $data->{acs} : '[]';
+            my $acs        = defined $data->{acs} ? $data->{acs} : '[]';
+            my $extra_info = encode_json( { hidden => $data->{hidden} // [] } );
 
             # Insert new record and return the new id
             my $sth = $dbs_central->query(
-"INSERT INTO role (dataset_id, name, acs) VALUES (?, ?, ?::jsonb) RETURNING id",
-                $dataset_id, $name, $acs );
+"INSERT INTO role (dataset_id, name, acs, extra_info) VALUES (?, ?, ?::jsonb, ?::jsonb) RETURNING id",
+                $dataset_id, $name, $acs, $extra_info );
             my $row = $sth->hash;
             return $c->render(
                 json   => { message => "Role inserted", id => $row->{id} },
@@ -1531,14 +1546,20 @@ $api->post(
                 );
             }
 
-            # Update role. Only name and acs are updated.
-            # If acs is not provided, COALESCE keeps the current value.
+          # Update role. Only name, acs and extra_info are updated.
+          # If acs/extra_info is not provided, COALESCE keeps the current value.
             my $acs = $data->{acs};
+            my $extra_info =
+              exists $data->{hidden}
+              ? encode_json( { hidden => $data->{hidden} // [] } )
+              : undef;
             my $sql = "UPDATE role
                        SET name = COALESCE(?, name),
-                           acs = COALESCE(?::jsonb, acs)
+                           acs = COALESCE(?::jsonb, acs),
+                           extra_info = COALESCE(?::jsonb, extra_info)
                        WHERE id = ? AND dataset_id = ?";
-            $dbs_central->query( $sql, $name, $acs, $id, $dataset_id );
+            $dbs_central->query( $sql, $name, $acs, $extra_info, $id,
+                $dataset_id );
 
             return $c->render( json => { message => "Role updated" } );
         }
