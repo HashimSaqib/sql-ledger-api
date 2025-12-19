@@ -2294,6 +2294,13 @@ $api->post(
             );
         }
 
+        my $db_client = $c->dbs( $dataset->{db_name} );
+        $dataset->{name} = eval {
+            $db_client->query(
+                "SELECT fldvalue FROM defaults WHERE fldname = 'company'")
+              ->hash->{fldvalue};
+        } // $dataset->{db_name};
+
         # Generate a 10-character invite code
         my $invite_code = generate_invite_code();
 
@@ -2317,25 +2324,26 @@ $api->post(
 
             # For existing users, send a login invitation email
             $subject =
-              "You've been invited to access dataset '$dataset->{db_name}'";
+              "You've been invited to access dataset '$dataset->{name}'";
             $content = <<"EMAIL";
 Hello,
 
-You have been invited by $profile->{email} to access the dataset "$dataset->{db_name}" on Neo-Ledger.
+You have been invited by $profile->{email} to access the dataset "$dataset->{name}" on Neo-Ledger.
 Please log in at: $front_end/login
 
-Thank you,
-The Neo-Ledger Team
+Thank you, 
+
+$dataset->{name}
 EMAIL
         }
         else {
             # For new users, send a signup invitation email
             $subject =
-              "Invitation to join Neo-Ledger and access '$dataset->{db_name}'";
+              "Invitation to join Neo-Ledger and access '$dataset->{name}'";
             $content = <<"EMAIL";
 Hello,
 
-You have been invited by $profile->{email} to access the dataset "$dataset->{db_name}" on Neo-Ledger.
+You have been invited by $profile->{email} to access the dataset "$dataset->{name}" on Neo-Ledger.
 If you already have an account, please log in at: $front_end/login.
 If not, please sign up using the following link:
 $front_end/signup?invite=$invite->{invite_code}
@@ -2343,9 +2351,12 @@ $front_end/signup?invite=$invite->{invite_code}
 We look forward to having you onboard.
 
 Best regards,
-$dataset->{db_name}
+$dataset->{name}
 EMAIL
         }
+
+        # Convert newlines to <br> for HTML email
+        $content =~ s/\n/<br>\n/g;
 
         # Use the provided email helper to send the email
         my $email_result =
