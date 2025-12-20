@@ -312,6 +312,10 @@ helper send_email_central => sub {
         my $api_key = $ENV{SEND_IN_BLUE};
         my $ua      = $c->ua;
 
+        # Convert newlines to <br> for HTML email
+        my $html_content = $content;
+        $html_content =~ s/\n/<br>\n/g;
+
         # Prepare the payload for Send in Blue API
         my $payload = {
             sender => {
@@ -325,7 +329,7 @@ helper send_email_central => sub {
                 }
             ],
             subject     => $subject,
-            htmlContent => $content
+            htmlContent => $html_content
         };
 
         # Add attachments if provided
@@ -385,8 +389,12 @@ helper send_email_central => sub {
     );
 
     # Create the Email::Stuffer object
+    my $from =
+      $ENV{PRODUCT_NAME}
+      ? "$ENV{PRODUCT_NAME} <$ENV{SMTP_USERNAME}>"
+      : $ENV{SMTP_USERNAME};
     my $email_obj =
-      Email::Stuffer->from("$ENV{SMTP_USERNAME}")->to($to)->subject($subject)
+      Email::Stuffer->from($from)->to($to)->subject($subject)
       ->text_body($content);
 
     # Attach files if provided
@@ -884,7 +892,7 @@ $central->post(
             );
         }
 
-        my $issuer      = $ENV{APP_NAME} // 'Neo-Ledger';
+        my $issuer      = $ENV{PRODUCT_NAME} // 'Neo-Ledger';
         my $otpauth_url = sprintf( 'otpauth://totp/%s:%s?secret=%s&issuer=%s',
             $issuer, $profile->{email}, $secret, $issuer );
 
@@ -2354,9 +2362,6 @@ Best regards,
 $dataset->{name}
 EMAIL
         }
-
-        # Convert newlines to <br> for HTML email
-        $content =~ s/\n/<br>\n/g;
 
         # Use the provided email helper to send the email
         my $email_result =
