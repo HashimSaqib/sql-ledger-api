@@ -1317,15 +1317,20 @@ $api->get(
         }
         my @merged_acs    = keys %acs_union;
         my @merged_hidden = keys %hidden_union;
-        my $db_client = $c->dbs($client);
-        my $name = eval {
+        my $db_client     = $c->dbs($client);
+        my $name          = eval {
             $db_client->query(
                 "SELECT fldvalue FROM defaults WHERE fldname = 'company'")
               ->hash->{fldvalue};
         } // $client;
 
         $c->render(
-            json => { acs => \@merged_acs, hidden => \@merged_hidden, company => $name } );
+            json => {
+                acs     => \@merged_acs,
+                hidden  => \@merged_hidden,
+                company => $name
+            }
+        );
     }
 );
 
