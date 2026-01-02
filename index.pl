@@ -6982,6 +6982,130 @@ $api->get(
 );
 
 $api->get(
+    '/arap/overview/:vc' => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+        my $vc     = $c->param('vc');
+        return unless my $form = $c->check_perms("$vc.overview");
+        my $dbs    = $c->dbs($client);
+        my $params = $c->req->params->to_hash;
+
+        unless ( $vc eq 'vendor' || $vc eq 'customer' ) {
+            return $c->render(
+                status => 400,
+                json   => {
+                    error => 'Invalid type. Must be either vendor or customer.'
+                }
+            );
+        }
+
+        my $table = ( $vc eq 'customer' ) ? 'ar' : 'ap';
+
+        my $query = qq|
+            SELECT
+                a.id,
+                a.invnumber AS invnum,
+                a.${vc}_id AS vc_id,
+                vc.name AS vc_name,
+                a.transdate,
+                a.duedate,
+                a.amount AS totalamount,
+                a.paid AS amountpaid,
+                a.description,
+                a.invoice
+            FROM $table a
+            JOIN $vc vc ON (a.${vc}_id = vc.id)
+            WHERE a.approved = '1'
+        |;
+
+        my @binds;
+
+        if ( $params->{transdatefrom} ) {
+            $query .= " AND a.transdate >= ?";
+            push @binds, $params->{transdatefrom};
+        }
+        if ( $params->{transdateto} ) {
+            $query .= " AND a.transdate <= ?";
+            push @binds, $params->{transdateto};
+        }
+        if ( $params->{"${vc}_id"} ) {
+            $query .= " AND a.${vc}_id = ?";
+            push @binds, $params->{"${vc}_id"};
+        }
+        if ( $params->{$vc} ) {
+            $query .= " AND lower(vc.name) LIKE lower(?)";
+            push @binds, "%" . $params->{$vc} . "%";
+        }
+        if ( $params->{invnumber} ) {
+            $query .= " AND lower(a.invnumber) LIKE lower(?)";
+            push @binds, "%" . $params->{invnumber} . "%";
+        }
+        if ( $params->{description} ) {
+            $query .= " AND lower(a.description) LIKE lower(?)";
+            push @binds, "%" . $params->{description} . "%";
+        }
+
+        $query .= " ORDER BY a.transdate DESC";
+
+        my $rows = $dbs->query( $query, @binds )->hashes;
+
+        my $summary = {
+            transactions => {
+                open     => { no => 0, amount => 0, transactions => [] },
+                closed   => { no => 0, amount => 0, transactions => [] },
+                overdue  => { no => 0, amount => 0, transactions => [] },
+                overpaid => { no => 0, amount => 0, transactions => [] },
+            }
+        };
+
+        my ( $sec, $min, $hour, $mday, $mon, $year ) = localtime();
+        my $today = sprintf( "%04d-%02d-%02d", $year + 1900, $mon + 1, $mday );
+
+        foreach my $r (@$rows) {
+            my $amount           = $r->{totalamount} // 0;
+            my $paid             = $r->{amountpaid}  // 0;
+            my $status           = 'open';
+            my $remaining_amount = 0;
+
+            if ( abs($paid) > abs($amount) ) {
+                $status = 'overpaid';
+
+                # For overpaid, the amount is the excess paid
+                $remaining_amount = abs($paid) - abs($amount);
+            }
+            elsif ( abs($paid) == abs($amount) ) {
+                $status = 'closed';
+
+                # For closed, show the total original amount
+                $remaining_amount = abs($amount);
+            }
+            else {
+                # For open/overdue, the amount is the remaining balance
+                $remaining_amount = abs($amount) - abs($paid);
+
+                if ( $r->{duedate} && $r->{duedate} lt $today ) {
+                    $status = 'overdue';
+                }
+                else {
+                    $status = 'open';
+                }
+            }
+
+            $summary->{transactions}->{$status}->{no}++;
+            $summary->{transactions}->{$status}->{amount} += $remaining_amount;
+
+            $r->{status} = $status;
+
+            $r->{remaining_amount} = $remaining_amount;
+
+            push @{ $summary->{transactions}->{$status}->{transactions} }, $r;
+        }
+
+        $c->render( json => $summary );
+    }
+);
+
+$api->get(
     '/arap/reminder/customer' => sub {
         my $c          = shift;
         my $client     = $c->param('client');
