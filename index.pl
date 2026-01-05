@@ -11968,6 +11968,54 @@ sub build_invoice {
     $form->{display_credit}        = $display_credit;
     $form->{display_credit_before} = $display_credit_before;
     $form->{credit_before}         = $credit_before;
+
+    my $format = $c->param("format");
+    if ( $format eq 'tex' ) {
+
+        my @escape_fields = qw(
+          invnumber ordnumber quonumber cusordnumber donumber
+          name address1 address2 address3 address4
+          city state zipcode country
+          contact phone fax email
+          shiptoname shiptoaddress1 shiptoaddress2 shiptoaddress3 shiptoaddress4
+          shiptocity shiptostate shiptozipcode shiptocountry
+          shiptocontact shiptophone shiptofax shiptoemail
+          notes intnotes
+          username employee
+          shippingpoint shipvia waybill
+        );
+
+        foreach my $key ( keys %$form ) {
+            if ( $key =~
+/^(description|itemnotes|unit|partnumber|projectnumber|serialnumber|bin|reqdate|transdate|invdate|orddate|quodate)_\d+$/
+              )
+            {
+                push @escape_fields, $key;
+            }
+        }
+
+        for my $field (
+            qw(description itemnotes unit partnumber projectnumber serialnumber bin reqdate transdate invdate orddate quodate ordernumber customerponumber package netweight grossweight)
+          )
+        {
+            if ( ref( $form->{$field} ) eq 'ARRAY' ) {
+                for my $i ( 0 .. $#{ $form->{$field} } ) {
+
+                    next unless defined $form->{$field}[$i];
+
+                    my $temp_form =
+                      { value => $form->{$field}[$i], format => $format };
+                    bless $temp_form, 'Form';
+                    $temp_form->format_string('value');
+                    $form->{$field}[$i] = $temp_form->{value};
+                }
+            }
+        }
+
+        @escape_fields = grep { defined $form->{$_} } @escape_fields;
+        $form->format_string(@escape_fields);
+    }
+
     return $form;
 }
 $api->get(
