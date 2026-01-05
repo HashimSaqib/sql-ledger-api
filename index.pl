@@ -6913,7 +6913,7 @@ $api->get(
         }
 
         # Handle entity-specific fields
-        if ( my $entity_id = $data->{"${vc}_id"} ) {
+        if ( my $entity_id = $data->{"vc_id"} ) {
             $form->{"${vc}_id"} = $entity_id;
         }
         if ( my $number = $data->{"${vc}number"} ) {
