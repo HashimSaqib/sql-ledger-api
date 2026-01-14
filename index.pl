@@ -5755,7 +5755,7 @@ $api->post(
             $form->{vendor_rows} = scalar @{ $data->{vendorLines} };
         }
         $form->{id} = $id;
-        IC->save( $c->slconfig, $form );
+        IC->save( $c->slconfig, $form );        
         $c->render( json => {%$form} );
     }
 );

@@ -12,6 +12,7 @@
 #======================================================================
 
 package IC;
+use Mojo::JSON qw(encode_json decode_json); 
 
 
 sub get_part {
@@ -378,6 +379,24 @@ sub save {
   $form->{partnumber} = $form->update_defaults($myconfig, "partnumber", $dbh) if ! $form->{partnumber};
   $form->{partnumber} =~ s/(^\s+|\s+$)//g;
 
+  my $external_info_json = '{}';
+    if ($form->{id}) {
+        my ($existing_info) = $dbh->selectrow_array("SELECT external_info FROM parts WHERE id = ?", undef, $form->{id});
+        if ($existing_info) {
+             my $info = eval { decode_json($existing_info) } || {};
+             if ($form->{moco_id}) {
+                 $info->{moco_id} = $form->{moco_id};
+             }
+             $external_info_json = encode_json($info);
+        } elsif ($form->{moco_id}) {
+             $external_info_json = encode_json({ moco_id => $form->{moco_id} });
+        }
+    } else {
+        if ($form->{moco_id}) {
+            $external_info_json = encode_json({ moco_id => $form->{moco_id} });
+        }
+    }
+
   $query = qq|UPDATE parts SET
               partnumber = |.$dbh->quote($form->{partnumber}).qq|,
               description = |.$dbh->quote($form->{description}).qq|,
@@ -410,7 +429,8 @@ sub save {
               barcode = '$form->{barcode}',
               lot = |.$dbh->quote($form->{lot}).qq|,
               expires = |.$form->dbquote($form->{expires}, SQL_DATE).qq|,
-              checkinventory = '$form->{checkinventory}'
+              checkinventory = '$form->{checkinventory}',
+              external_info = '$external_info_json' 
               WHERE id = $form->{id}|;
         $dbh->do($query) || $form->dberror($query);
 

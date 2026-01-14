@@ -330,3 +330,11 @@ CREATE TABLE transaction_distribution (
     module VARCHAR(50) NOT NULL
 );
 INSERT INTO db_updates (version, last_update) VALUES ('011', 'Transaction Distribution');
+
+
+ALTER TABLE parts ADD COLUMN external_info JSONB;
+ALTER TABLE ar ADD COLUMN external_info JSONB;
+ALTER TABLE ap ADD COLUMN external_info JSONB;
+ALTER TABLE project ADD COLUMN external_info JSONB;
+
+INSERT INTO db_updates (version, last_update) VALUES ('012', 'External ID');
