@@ -1,13 +1,11 @@
 %%%%%%%%%%%%%  GENEREAL SETTINGS FILE FOR ALL TEMPLATES %%%%%%%%%%%%%
 
 
-
-
 %%% FONT %%%
 \usepackage[scaled=1]{helvet}
 \renewcommand{\familydefault}{\sfdefault}
 
-%%% BACKGROUND FOR STANDARD PAGE %%%
+%%% Standard background PDF picture for the wohle page - usually with logo and CI elements, footer, header, ... %%%
 \usepackage{eso-pic}
 \newcommand\BackgroundPic{
 \put(-2.35,0){
@@ -16,7 +14,7 @@
 \includegraphics{\StandardBackground} 
 }}}
 
-%%% BACKGROUND FOR EINZAHLUNGSSCHEIN %%%
+%%% Background PDF picture for the QR Invoice page %%%
 \newcommand\BackgroundPicEZ{
 \put(-2.35,0){
 \parbox[b][\paperheight]{\paperwidth}{%
@@ -24,7 +22,7 @@
 \ifthenelse{\equal{\PrintOnPaper}{on}}{\includegraphics{\BackgroundESRwhite}}{\includegraphics{\BackgroundESRorange}}
 }}}
 
-%%% BACKGROUND FOR EINZAHLUNGSSCHEIN %%%
+%%% Background PDF picture for the QR Invoice page without footer %%%
 \newcommand\BackgroundWithoutFooter{
 \put(-2.35,0){
 \parbox[b][\paperheight]{\paperwidth}{%
@@ -32,12 +30,12 @@
 \includegraphics{\BackgroundESRwhite}
 }}}
 
-%%% BEGIN DO NOT CHANGE THIS %%%
+%%% BEGIN - DO NOT CHANGE THIS %%%
 \begin{document}
-%%% END DO NOT CHANGE THIS %%%
+%%% END - DO NOT CHANGE THIS %%%
 
 %%% BACKGROUND AND PAGE SETTINGS %%%
-\AddToShipoutPicture{\BackgroundPic} % MUSS EINKOMMENTIERT WERDEN WENN HINTERGRUND
+\AddToShipoutPicture{\BackgroundPic} % Needs to be here if a standard background picture is used.
 \shorthandoff{"}
 \pagestyle{empty}
 

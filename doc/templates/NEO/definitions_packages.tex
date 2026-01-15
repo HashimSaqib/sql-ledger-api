@@ -1,4 +1,4 @@
-%Pakete
+%%% Packages to be loaded for LaTeX %%%
 \documentclass[fontsize=9pt]{scrartcl}
 \usepackage[utf8]{inputenc}
 \usepackage[T1]{fontenc}
@@ -27,7 +27,7 @@
 \setlength{\TPHorizModule}{1mm}%
 \setlength{\TPVertModule}{1mm}%
 
-%%%%%%%%%%%%%  QRCODE AND QR-BILL-SETTINGS  %%%%%%%%%%%%%
+%%%%%%%%%%%%%  QRCODE AND QR-BILL-SETTINGS (FOR SWITZERLAND ONLY) %%%%%%%%%%%%%
 
 %%% Custom package for Swiss Invoice QR code  %%%
 \usepackage{xstring}
@@ -37,6 +37,7 @@
 
 \newlength{\QRdim}\setlength{\QRdim}{46mm}
 \newlength{\QRflag}\setlength{\QRflag}{7mm}
+
 % Swiss flag
 \newcommand{\QRSwissflag}{\tikz[x=\QRflag,y=\QRflag]{%
 \fill[white] (0,0) rectangle (1,1);%

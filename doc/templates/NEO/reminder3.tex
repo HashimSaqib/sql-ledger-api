@@ -1,5 +1,6 @@
 %%%%%%%%%%%%%  TITLE  %%%%%%%%%%%%%
 
+%%% Defines the document type as a variable 3rd reminder %%%
 \newcommand{\DocType}{3. Mahnung}
 
 %%%%%%%%%%%%%  DEFINITIONS  %%%%%%%%%%%%
@@ -12,7 +13,7 @@
 
 %%%%%%%%%%%%% GENERAL SETTINGS FOR THE TEMPLATE %%%%%%%%%%%%
 
-%%% PAGE LAYOUT %%%
+%%% General page layout %%%
 \usepackage[a4paper,top=5cm,bottom=3.1cm,left=1.8cm,right=1.8cm]{geometry} 
 \textblockorigin{0.00cm}{0.00cm} % - nach links / + nach unten
 \newcommand{\PageNumber}{off}
@@ -24,7 +25,7 @@
 \newcommand{\BackgroundESRorange}{../<%templates%>/background_ESR.pdf}
 \newcommand{\BackgroundESRwhite}{../<%templates%>/background_without_footer.pdf}
 
-%%% PLACE OF ADDRESS %%%
+%%% Place of Address Field %%%
 \newcommand{\Addressblock}{right}
 %\newcommand{\Addressblock}{left}
 %\newcommand{\Addressblock}{pingenleft}
@@ -34,7 +35,7 @@
 
 <%include definitions_settings.tex%>
 
-%%%%%%%%%%%%%  ELEMENTS  %%%%%%%%%%%%%
+%%%%%%%%%%%%%  ELEMENTS ON THE TEMPLATE  %%%%%%%%%%%%%
 
 \pagestyle{myfoot}
 
@@ -62,7 +63,11 @@
 
 <%company%>
 
-%include content_einzahlungsschein.tex%>
+%%% Swiss specific payment voucher settings %%%
+
+% Replace with content_qrinvoice_without_amount if you want to print a QR invoice without a preset amount. Add "<" if you want to insert the QR invoice.
+
+%include content_qrinvoice.tex%>
 
 %%%%%%%%%%%%%  END  %%%%%%%%%%%%%
  

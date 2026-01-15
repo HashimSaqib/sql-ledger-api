@@ -1,4 +1,6 @@
+%%% Defines the header section of the template %%%
 
+% Place of the address block:
 \ifthenelse{\equal{\Addressblock}{left}}{\begin{textblock*}{6.5cm}(11.85cm,6.10cm)}{}
 \ifthenelse{\equal{\Addressblock}{pingenleft}}{\begin{textblock*}{6.5cm}(11.85cm,6.10cm)}{}
 \ifthenelse{\equal{\Addressblock}{right}}{\begin{textblock*}{6.5cm}(1.8cm,6.10cm)}{}
@@ -17,22 +19,24 @@
 
 \null\vspace{4.2cm}
 
-%Rechnungstitel
+% Title section
 \textbf{\ifthenelse{\equal{\DocType }{Offerte}}{<%quodescription%>}{\ifthenelse{\equal{\DocType }{\LANGuse{orddescription}}}{<%orddescription%>}{<%invdescription%>}}}
 \vspace{0.1cm}
 %}
 
-%Text-Feld 1
+%%% The following fields enable printing additional text from 3 text fields below the title section, if required %%%
+
+% Text field 1 (<%shippingpoint%> variable)
 \ifthenelse{\equal{<%shippingpoint%>}{}}{}{<%shippingpoint%>
 \vspace{0.1cm}
 }
 
-%Text-Feld 2
+% Text field 2 (<%shipvia%> variable)
 \ifthenelse{\equal{<%shipvia%>}{}}{}{<%shipvia%>
 \vspace{0.1cm}
 }
 
-%Text-Feld 3
+% Text field 3 (<%waybill%> variable)
 \ifthenelse{\equal{<%waybill%>}{}}{}{<%waybill%>
 \vspace{0.1cm}
 }
