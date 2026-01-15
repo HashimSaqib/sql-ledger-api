@@ -5570,6 +5570,26 @@ $api->post(
         for ( keys %$data ) { $form->{$_} = $data->{$_} if $data->{$_} }
 
         PE->save_project( $c->slconfig, $form );
+
+        if ( defined $data->{moco_project_id} ) {
+            my $project =
+              $dbs->query( "SELECT external_info FROM project WHERE id = ?",
+                $form->{id} )->hash;
+
+            my $info = {};
+            if ( $project && $project->{external_info} ) {
+                $info = eval { decode_json( $project->{external_info} ) } || {};
+            }
+
+            $info->{moco_id} = $data->{moco_project_id};
+
+            my $info_json = encode_json($info);
+            $dbs->query( "UPDATE project SET external_info = ? WHERE id = ?",
+                $info_json, $form->{id} );
+
+            $form->{external_info} = $info;
+        }
+
         $c->render( json => {%$form} );
 
     }
@@ -8331,7 +8351,7 @@ helper process_invoice => sub {
         $client = $c->param('client');
     }
     my $dbs = $c->dbs($client);
-    my $id  = $c->param('id');
+    my $id  = $c->param('id') || $data->{id};
     my $vc  = $c->param('vc');
     $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
 
@@ -8414,6 +8434,7 @@ helper process_invoice => sub {
         $form->{"netweight_$i"}        = $line->{netweight}        || '';
         $form->{"cost_$i"}             = $line->{cost}             || '';
         $form->{"projectnumber_$i"}    = $line->{project}          || '';
+        $form->{"project_id_$i"}       = $line->{project_id}       || '';
     }
 
     # Build payments
