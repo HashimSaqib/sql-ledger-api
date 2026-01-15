@@ -1,4 +1,6 @@
-%Definiert die Lieferadresse:
+%%% Definition of address fields %%%
+
+% Defines the delivery address:
 \newcommand{\ShiptoAddress}{
      \ifthenelse{\equal{<%shiptoname%>}{}}{}{<%shiptoname%>\\}
      \ifthenelse{\equal{<%shiptoaddress1%>}{}}{}{<%shiptoaddress1%>\\}
@@ -7,11 +9,11 @@
      \ifthenelse{\equal{<%shiptocountry%>}{}}{}{<%shiptocountry%>\\}
 }
 
-%Definiert die Rechnungsadresse:
+% Defines the address:
 \newcommand{\Address}{
      \ifthenelse{\equal{<%typeofcontact%>}{company}}{
 
-          %Firmenanschrift
+          % If address is a company address:
           <%name%>\\
           \ifthenelse{\equal{<%salutation%>}{}}{}{<%salutation%> }\ifthenelse{\equal{<%contacttitle%>}{}}{}{<%contacttitle%> }\ifthenelse{\equal{<%firstname%>}{}}{}{<%firstname%> }\ifthenelse{\equal{<%lastname%>}{}}{}{<%lastname%>\\}
           \ifthenelse{\equal{<%address1%>}{}}{}{<%address1%>\\}
@@ -19,7 +21,7 @@
            <%zipcode%> <%city%>\\
           \ifthenelse{\equal{<%country%>}{}}{}{<%country%>}
      }{
-          %Privatanschrift
+          % If address is a person address:
           \ifthenelse{\equal{<%salutation%>}{}}{}{<%salutation%>\\}
           \ifthenelse{\equal{<%contacttitle%>}{}}{<%firstname%> <%lastname%>\\}                              
           {<%contacttitle%> <%firstname%> <%lastname%>\\}
@@ -34,6 +36,7 @@
 \ifthenelse{\equal{\Addressblock}{left}}{\begin{textblock*}{6.5cm}(1.8cm,6.10cm)}{}
 \ifthenelse{\equal{\Addressblock}{pingenleft}}{\begin{textblock*}{6.5cm}(2.25cm,6.10cm)}{}
 
+% If the sender address should appear in the address block: 
 %\underline{\tiny{<%company%>, \BeforeSubString{ --}{<%address%>}, \BehindSubString{-- }{<%address%>}}}
 
 \ifthenelse{\equal{\DocType}{Lieferschein}}{\ShiptoAddress}{\Address}

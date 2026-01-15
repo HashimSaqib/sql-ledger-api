@@ -1,15 +1,14 @@
 %%%%%%%%%%%%%  TITLE  %%%%%%%%%%%%%
-% Typ: QR-Rechnung
+% Typ: QR invoice / QR Rechnung
 % Name: content-qrinvoice.tex
-% Sprache: Deutsch
-% Erstellungsdatum: 14. November 2022
-% Â© by Run my Accounts AG
+% Creation Date: 14. November 2022
+% ® by Run my Accounts AG
 
 \ifthenelse{\equal{<%qriban%>}{}}{}{
 \ifthenelse{\equal{<%invtotal%>}{0.00}}{\end{document}}{}
 \ifthenelse{\equal{<%currency%>}{CHF}}{}{\end{document}}{}
 
-\AddToShipoutPicture{\BackgroundWithoutFooter} % MUSS EINKOMMENTIERT WERDEN WENN HINTERGRUND
+\AddToShipoutPicture{\BackgroundWithoutFooter} % Required if a background with a logo should be displayed
 
 % External border style
 \newcommand{\COLextbord}{black}

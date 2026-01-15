@@ -1,5 +1,6 @@
 %%%%%%%%%%%%%  TITLE  %%%%%%%%%%%%%
 
+%%% Defines the document type as a variable %%%
 \newcommand{\DocType}{Rüstschein}
 
 %%%%%%%%%%%%%  DEFINITIONS  %%%%%%%%%%%%
@@ -12,11 +13,11 @@
 
 <%include definitions_table.tex%>
 
-%%% GENERAL SETTINGS %%%
+%%%%%%%%%%%%% GENERAL SETTINGS FOR THE TEMPLATE %%%%%%%%%%%%
 
-%%% PAGE LAYOUT %%%
+%%% General page layout %%%
 \usepackage[a4paper,top=5cm,bottom=3.1cm,left=1.8cm,right=1.8cm]{geometry} 
-\textblockorigin{0.00cm}{0.00cm} % - nach links / + nach unten
+\textblockorigin{0.00cm}{0.00cm} % - to the right / + down
 \newcommand{\PageNumber}{on}
 \newcommand{\PrintOnPaper}{on}
 \newcommand{\Greetings}{on}
@@ -25,12 +26,12 @@
 \newcommand{\BackgroundESRorange}{../<%templates%>/background_ESR.pdf}
 \newcommand{\BackgroundESRwhite}{../<%templates%>/background_without_footer.pdf}
 
-%%% PLACE OF ADDRESS %%%
+%%% Place of Address Field %%%
 \newcommand{\Addressblock}{right}
 %\newcommand{\Addressblock}{left}
 %\newcommand{\Addressblock}{pingenleft}
 
-%%% TEMPLATE TABLE DEFINITIONS %%%
+%%% Item table definitions %%%
 \declarecolumn[headstyle={b},headcolor={black},headalign={l},colstyle={n},colcolor={black},colalign={l}]{1}{\LANGuse{arttable_runningnumber}}{runningnumber}
 \declarecolumn[headstyle={b},headcolor={black},headalign={l},colstyle={n},colcolor={black},colalign={l}]{2}{\LANGuse{arttable_number}}{number}
 \declarecolumn[headstyle={b},headcolor={black},headalign={l},colstyle={n},colcolor={black},colalign={l},colwidth={x}]{3}{\LANGuse{arttable_description}}{description}
@@ -50,7 +51,7 @@
 
 <%include definitions_settings.tex%>
 
-%%%%%%%%%%%%%  ELEMENT  %%%%%%%%%%%%%
+%%%%%%%%%%%%%  ELEMENTS ON THE TEMPLATE  %%%%%%%%%%%%%
 
 \pagestyle{myfoot}
 

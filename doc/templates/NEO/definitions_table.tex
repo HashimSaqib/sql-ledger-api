@@ -1,3 +1,5 @@
+%%% This package produces the item table %%%
+
 \usepackage{keyval}
 \usepackage{etoolbox}
 \usepackage{alphalph}
@@ -131,6 +133,9 @@
         \FPeval\SUBTOTAL{round(\SUBtotal:2)}%
         \def\printSUBtotal{\SUBTOTAL}%
         \csnumgdef{ST\rowlabel}{\SUBTOTAL}%
+
+% If you create an article that with an arcticle number "Titel", then this article acts as a subtitle on the invoice, leaving all fields blank except the description field (which then acts as the subtitle.
+
         \IfSubStr{<%number%>}{Titel}{}{\cellcontenttext{#4}{runningnumber}{<%runningnumber%>}}
         \IfSubStr{<%number%>}{Titel}{}{\cellcontenttext{#4}{number}{<%number%>}}
         \IfSubStr{<%number%>}{Titel}{\csgdef{CELLDESCFONT\columnlabel\rowlabel}{\bfseries}}{\csgdef{CELLDESCFONT\columnlabel\rowlabel}{}}
