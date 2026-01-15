@@ -5755,7 +5755,7 @@ $api->post(
             $form->{vendor_rows} = scalar @{ $data->{vendorLines} };
         }
         $form->{id} = $id;
-        IC->save( $c->slconfig, $form );        
+        IC->save( $c->slconfig, $form );
         $c->render( json => {%$form} );
     }
 );
@@ -8506,8 +8506,170 @@ helper process_invoice => sub {
         FM->upload_files( $dbs, $c, $form, $vc );
     }
 
+    # generate and store the invoice PDF
+    $c->generate_invoice_pdf( $client, $form->{id}, $vc, 'invoice', 'tex' );
+
     return $form->{id};
 };
+
+helper generate_invoice_pdf => sub {
+    my ( $c, $client, $invoice_id, $vc, $template, $format ) = @_;
+
+    $template ||= 'invoice';
+    $format   ||= 'tex';
+
+    my $dbs = $c->dbs($client);
+    $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
+
+    my $form = Form->new;
+    $form->{vc} = $vc;
+    $form->{id} = $invoice_id;
+
+    build_invoice( $c, $client, $form, $dbs );
+
+    $form->{lastpage}          = 0;
+    $form->{sumcarriedforward} = 0;
+    $form->{templates}         = "templates/$client";
+    $form->{IN}                = "$template.$format";
+
+    my $userspath = "tmp";
+    my $defaults  = $c->get_defaults();
+
+    # get the transdate from the invoice for folder structure
+    my $transdate = $form->{invdate} || $form->{transdate};
+    my ( $year, $month );
+    if ( $transdate && $transdate =~ /^(\d{4})-(\d{2})-\d{2}$/ ) {
+        ( $year, $month ) = ( $1, $2 );
+    }
+    else {
+        my @lt = localtime;
+        $year  = $lt[5] + 1900;
+        $month = sprintf( "%02d", $lt[4] + 1 );
+    }
+
+    # create storage directory: files/$client/invoices/$year/$month/
+    my $storage_dir = "files/$client/invoices/$year/$month";
+    eval { make_path($storage_dir); };
+    if ($@) {
+        $c->app->log->error(
+            "Could not create invoice storage directory '$storage_dir': $@");
+        return undef;
+    }
+
+    # generate unique filename using invnumber and template type
+    my $safe_invnumber = $form->{invnumber} || $invoice_id;
+    $safe_invnumber =~ s/[^a-zA-Z0-9_.-]+/_/g;
+    my $safe_template = $template;
+    $safe_template =~ s/[^a-zA-Z0-9_.-]+/_/g;
+    my $filename = "${safe_invnumber}_${safe_template}.pdf";
+    my $pdf_path = "$storage_dir/$filename";
+
+    if ( $format eq 'tex' ) {
+        $form->{OUT}    = ">tmp/invoice_${invoice_id}.pdf";
+        $form->{format} = "pdf";
+        $form->{media}  = "screen";
+        $form->{copies} = 1;
+
+        my $dvipdf  = "";
+        my $xelatex = $defaults->{xelatex};
+        $form->parse_template( $c->slconfig, $userspath, $dvipdf, $xelatex );
+
+        my $temp_pdf = "tmp/invoice_${invoice_id}.pdf";
+        if ( -f $temp_pdf ) {
+            require File::Copy;
+            File::Copy::move( $temp_pdf, $pdf_path )
+              or do {
+                $c->app->log->error("Failed to move PDF to storage: $!");
+                return undef;
+              };
+        }
+        else {
+            $c->app->log->error("PDF generation failed - temp file not found");
+            return undef;
+        }
+    }
+    elsif ( $format eq 'html' ) {
+        $form->{OUT} = ">tmp/invoice_${invoice_id}.html";
+        $form->parse_template( $c->slconfig, $userspath );
+
+        ( my $file_path = $form->{OUT} ) =~ s/^>//;
+
+        open my $fh, '<', $file_path or do {
+            $c->app->log->error("Cannot open $file_path: $!");
+            return undef;
+        };
+        { local $/; $form->{html_content} = <$fh> }
+        close $fh;
+        unlink $file_path;
+
+        my $pdf = html_to_pdf( $form->{html_content} );
+        unless ($pdf) {
+            $c->app->log->error("Failed to convert HTML to PDF");
+            return undef;
+        }
+
+        open my $out_fh, '>', $pdf_path or do {
+            $c->app->log->error("Cannot write to $pdf_path: $!");
+            return undef;
+        };
+        binmode $out_fh;
+        print $out_fh $pdf;
+        close $out_fh;
+    }
+    else {
+        $c->app->log->error("Unsupported format for PDF generation: $format");
+        return undef;
+    }
+
+    $c->app->log->info("Generated invoice PDF: $pdf_path");
+    return $pdf_path;
+};
+
+helper get_invoice_pdf => sub {
+    my ( $c, $client, $invoice_id, $vc, $template, $format ) = @_;
+
+    $template ||= 'invoice';
+    $format   ||= 'tex';
+
+    my $dbs = $c->dbs($client);
+
+    # get invoice details to determine folder path
+    my $arap = $vc eq 'vendor' ? 'ap' : 'ar';
+    my $invoice =
+      $dbs->query( "SELECT invnumber, transdate FROM $arap WHERE id = ?",
+        $invoice_id )->hash;
+
+    return undef unless $invoice;
+
+    my $transdate = $invoice->{transdate};
+    my ( $year, $month );
+    if ( $transdate && $transdate =~ /^(\d{4})-(\d{2})-\d{2}$/ ) {
+        ( $year, $month ) = ( $1, $2 );
+    }
+    else {
+        my @lt = localtime;
+        $year  = $lt[5] + 1900;
+        $month = sprintf( "%02d", $lt[4] + 1 );
+    }
+
+    my $safe_invnumber = $invoice->{invnumber} || $invoice_id;
+    $safe_invnumber =~ s/[^a-zA-Z0-9_.-]+/_/g;
+    my $safe_template = $template;
+    $safe_template =~ s/[^a-zA-Z0-9_.-]+/_/g;
+    my $filename = "${safe_invnumber}_${safe_template}.pdf";
+    my $pdf_path = "files/$client/invoices/$year/$month/$filename";
+
+    # check if file already exists
+    if ( -f $pdf_path ) {
+        $c->app->log->info("Returning existing invoice PDF: $pdf_path");
+        return $pdf_path;
+    }
+
+    # generate if it doesn't exist
+    return $c->generate_invoice_pdf( $client, $invoice_id, $vc, $template,
+        $format );
+};
+
 $api->post(
     '/arap/invoice/:vc/:id' => { id => undef } => sub {
         my $c      = shift;
@@ -8945,6 +9107,12 @@ $api->post(
 
             if ($result) {
                 $total_processed = scalar @$payments;
+
+              # regenerate PDFs for all paid invoices to reflect updated balance
+                for my $payment (@$payments) {
+                    $c->generate_invoice_pdf( $client, $payment->{id}, $vc,
+                        'invoice', 'tex' );
+                }
             }
             else {
                 return $c->render(
@@ -9036,6 +9204,12 @@ $api->post(
                       };
                     $total_processed += scalar @$invoices;
                     $total_amount    += $payment_group->{total_amount};
+
+              # regenerate PDFs for all paid invoices to reflect updated balance
+                    for my $invoice (@$invoices) {
+                        $c->generate_invoice_pdf( $client, $invoice->{id}, $vc,
+                            'invoice', 'tex' );
+                    }
                 }
                 else {
                     return $c->render(
@@ -12021,88 +12195,54 @@ sub build_invoice {
 $api->get(
     "/print_invoice/" => sub {
         my $c        = shift;
-        my $template = $c->param("template");
-        my $format   = $c->param("format");
+        my $template = $c->param("template") || 'invoice';
+        my $format   = $c->param("format")   || 'tex';
 
-        # Extract parameters
         my $client = $c->param('client') || die "Missing client parameter";
         my $vc     = $c->param('vc')     || die "Missing vc parameter";
         my $id     = $c->param('id')     || die "Missing invoice id";
-        my $dbs    = $c->dbs($client);
 
-        return unless my $form = $c->check_perms("$vc.transaction");
-        $form->{vc} = $vc;
-        $form->{id} = $id;
+        return unless $c->check_perms("$vc.transaction");
 
-        # Build invoice and letterhead data
-        build_invoice( $c, $client, $form, $dbs );
+        # get invoice info for the filename
+        my $dbs  = $c->dbs($client);
+        my $arap = $vc eq 'vendor' ? 'ap' : 'ar';
+        my $invoice =
+          $dbs->query( "SELECT invnumber FROM $arap WHERE id = ?", $id )->hash;
 
-        $form->{lastpage}          = 0;
-        $form->{sumcarriedforward} = 0;
-        $form->{templates}         = "templates/$client";
-        $form->{IN}                = "$template.$format";
-
-        # Set input and output based on type
-        if ( $format eq 'tex' ) {
-            $form->{OUT}    = ">tmp/invoice.pdf";
-            $form->{format} = "pdf";
-            $form->{media}  = "screen";
-            $form->{copies} = 1;
-        }
-        elsif ( $format eq 'html' ) {
-            $form->{OUT} = ">tmp/invoice.html";
-        }
-        else {
-            die "Unsupported type: $format";
+        unless ($invoice) {
+            $c->res->status(404);
+            $c->render( json => { error => "Invoice not found" } );
+            return;
         }
 
-        my $userspath = "tmp";
-        my $defaults  = $c->get_defaults();
+        # use the helper to get (or generate) the PDF
+        my $pdf_path =
+          $c->get_invoice_pdf( $client, $id, $vc, $template, $format );
 
-        # Process based on type
-        if ( $format eq 'tex' ) {
-            my $dvipdf = "";
-
-            my $xelatex = $defaults->{xelatex};
-            $form->parse_template( $c->slconfig, $userspath, $dvipdf,
-                $xelatex );
-            my $pdf_path = "tmp/invoice.pdf";
-
-            # Read PDF file content
-            open my $fh, $pdf_path or die "Cannot open file $pdf_path: $!";
-            binmode $fh;
-            my $pdf_content = do { local $/; <$fh> };
-            close $fh;
-            unlink $pdf_path or warn "Could not delete $pdf_path: $!";
-
-            # Return PDF as response
-            $c->res->headers->content_type('application/pdf');
-            $c->res->headers->content_disposition(
-                "attachment; filename=\"$form->{invnumber}.pdf\"");
-            $c->render( data => $pdf_content );
+        unless ( $pdf_path && -f $pdf_path ) {
+            $c->res->status(500);
+            $c->render( json => { error => "Failed to generate invoice PDF" } );
+            return;
         }
-        elsif ( $format eq 'html' ) {
-            $form->parse_template( $c->slconfig, $userspath );
 
-            # Strip the '>' character from the output file path
-            ( my $file_path = $form->{OUT} ) =~ s/^>//;
+        # read and return the PDF
+        open my $fh, '<', $pdf_path or do {
+            $c->res->status(500);
+            $c->render( json => { error => "Cannot read PDF file" } );
+            return;
+        };
+        binmode $fh;
+        my $pdf_content = do { local $/; <$fh> };
+        close $fh;
 
-            # Read the HTML file content
-            open my $fh, '<', $file_path or die "Cannot open $file_path: $!";
-            { local $/; $form->{html_content} = <$fh> }
-            close $fh;
-            unlink $file_path or warn "Could not delete $file_path: $!";
+        my $filename = $invoice->{invnumber} || $id;
+        $filename =~ s/[^a-zA-Z0-9_.-]+/_/g;
 
-            # Convert HTML to PDF
-            my $pdf = html_to_pdf( $form->{html_content} );
-            unless ($pdf) {
-                $c->res->status(500);
-                $c->render( text => "Failed to generate PDF" );
-                return;
-            }
-            $c->res->headers->content_type('application/pdf');
-            $c->render( data => $pdf );
-        }
+        $c->res->headers->content_type('application/pdf');
+        $c->res->headers->content_disposition(
+            "attachment; filename=\"${filename}.pdf\"");
+        $c->render( data => $pdf_content );
     }
 );
 
@@ -12702,7 +12842,7 @@ $api->post(
         my $vc         = $json->{vc}         || die "Missing vc parameter";
         my $id         = $json->{id}         || die "Missing id parameter";
         my $type       = $json->{type}       || die "Missing type parameter";
-        my $attachment = $json->{attachment} || '';    # html, pdf or empty
+        my $attachment = $json->{attachment} || '';    # tex, html or empty
         my $inline     = $json->{inline}     || 0;     # 0 or 1
         my $email      = $json->{email}      || die "Missing email parameter";
         my $cc         = $json->{cc}         || '';
@@ -12716,88 +12856,24 @@ $api->post(
         $form->{vc} = $vc;
         $form->{id} = $id;
 
-        # Build invoice data
+        # Build invoice data (needed for intnotes and status updates)
         build_invoice( $c, $client, $form, $dbs );
 
-        # Set up email content and attachments
+        # Set up email attachments
         my @attachments = ();
 
-        # Process attachment if requested
+# Process attachment if requested - use get_invoice_pdf to get cached or generate new
         if ($attachment) {
-            $form->{lastpage}          = 0;
-            $form->{sumcarriedforward} = 0;
-            $form->{templates}         = "templates/$client";
-            $form->{IN}                = "$type.$attachment";
-
-            my $userspath = "tmp";
-            my $defaults  = $c->get_defaults();
-            my $attachment_path;
-            my $attachment_content;
-
-            # Generate a unique random string for filenames
-            my $random_str = sprintf( "%s_%s", time(), int( rand(1000000) ) );
-
-            # Generate appropriate file based on attachment type
-            if ( $attachment eq 'tex' ) {
-                $form->{OUT}    = ">tmp/invoice_${id}_${random_str}.pdf";
-                $form->{format} = "pdf";
-                $form->{media}  = "screen";
-                $form->{copies} = 1;
-
-                my $dvipdf  = "";
-                my $xelatex = $defaults->{xelatex};
-                $form->parse_template( $c->slconfig, $userspath, $dvipdf,
-                    $xelatex );
-                $attachment_path = "tmp/invoice_${id}_${random_str}.pdf";
-
-                # Add the file path to attachments
-                push @attachments, $attachment_path;
-
-                # Set up a cleanup handler
-                $c->on(
-                    finish => sub {
-                        unlink $attachment_path if -e $attachment_path;
-                    }
-                );
-            }
-            elsif ( $attachment eq 'html' ) {
-                $form->{OUT} = ">tmp/invoice_${id}_${random_str}.html";
-                $form->parse_template( $c->slconfig, $userspath );
-
-                # Strip the '>' character from the output file path
-                ( my $file_path = $form->{OUT} ) =~ s/^>//;
-
-                # Read the HTML file content
-                open my $fh, '<', $file_path
-                  or die "Cannot open $file_path: $!";
-                { local $/; $form->{html_content} = <$fh> }
-                close $fh;
-
-                # Convert HTML to PDF
-                my $pdf = html_to_pdf( $form->{html_content} );
-                unless ($pdf) {
-                    $c->res->status(500);
-                    $c->render( text => "Failed to generate PDF" );
-                    return;
-                }
-
-                # Write the PDF to a file
-                my $pdf_path = "tmp/invoice_${id}_${random_str}_html.pdf";
-                open my $pdf_fh, '>', $pdf_path
-                  or die "Cannot write to $pdf_path: $!";
-                binmode $pdf_fh;
-                print $pdf_fh $pdf;
-                close $pdf_fh;
-
-                # Add the file path to attachments
+            my $pdf_path =
+              $c->get_invoice_pdf( $client, $id, $vc, $type, $attachment );
+            if ( $pdf_path && -f $pdf_path ) {
                 push @attachments, $pdf_path;
-
-                # Set up a cleanup handler
-                $c->on(
-                    finish => sub {
-                        unlink $pdf_path if -e $pdf_path;
-                    }
-                );
+            }
+            else {
+                $c->res->status(500);
+                $c->render(
+                    json => { error => "Failed to generate PDF attachment" } );
+                return;
             }
         }
 
@@ -12909,79 +12985,19 @@ app->minion->add_task(
             my $name      = $item->{name}      || next;
             my $invnumber = $item->{invnumber} || next;
 
-            # Create a form object for this PDF
-            my $form = new Form;
             eval {
-                $form->{vc} = $vc;
-                $form->{id} = $id;
-
-                # Build invoice data
-                build_invoice( $c, $client, $form, $dbs );
-
-                # Generate a unique filename for this PDF
-                my $random_str =
-                  sprintf( "%s_%s_%s", $batch_id, $id, int( rand(1000000) ) );
-                my $pdf_filename;
-
-                # Set up PDF generation parameters
-                $form->{lastpage}          = 0;
-                $form->{sumcarriedforward} = 0;
-                $form->{templates}         = "templates/$client";
-                $form->{IN}                = "$type.$attachment";
-
-                my $userspath = "tmp";
-                my $defaults  = $job->app->get_defaults($client);
-
-                # Generate PDF based on attachment type
-                if ( $attachment eq 'tex' ) {
-                    $pdf_filename   = "tmp/invoice_${random_str}.pdf";
-                    $form->{OUT}    = ">$pdf_filename";
-                    $form->{format} = "pdf";
-                    $form->{media}  = "screen";
-                    $form->{copies} = 1;
-
-                    my $dvipdf  = "";
-                    my $xelatex = $defaults->{xelatex};
-                    $form->parse_template( $config, $userspath, $dvipdf,
-                        $xelatex );
-                }
-                elsif ( $attachment eq 'html' ) {
-                    my $html_file = "tmp/invoice_${random_str}.html";
-                    $form->{OUT} = ">$html_file";
-                    $form->parse_template( $config, $userspath );
-
-                    # Strip the '>' character from the output file path
-                    ( my $file_path = $form->{OUT} ) =~ s/^>//;
-
-                    # Read the HTML file content
-                    open my $fh, '<', $file_path
-                      or die "Cannot open $file_path: $!";
-                    { local $/; $form->{html_content} = <$fh> }
-                    close $fh;
-
-                    # Convert HTML to PDF
-                    my $pdf = html_to_pdf( $form->{html_content} );
-                    die "Failed to generate PDF" unless $pdf;
-
-                    # Write the PDF to a file
-                    $pdf_filename = "tmp/invoice_${random_str}.pdf";
-                    open my $pdf_fh, '>', $pdf_filename
-                      or die "Cannot write to $pdf_filename: $!";
-                    binmode $pdf_fh;
-                    print $pdf_fh $pdf;
-                    close $pdf_fh;
-
-                    # Clean up temporary HTML file
-                    unlink $html_file if -e $html_file;
-                }
+                # use get_invoice_pdf to get cached PDF or generate new one
+                my $pdf_filename =
+                  $c->get_invoice_pdf( $client, $id, $vc, $type, $attachment );
 
                 # Verify PDF was created successfully
-                if ( -e $pdf_filename && -s $pdf_filename > 0 ) {
+                if ( $pdf_filename && -e $pdf_filename && -s $pdf_filename > 0 )
+                {
 
                     # Create a meaningful filename for the ZIP
                     my $display_name = sprintf(
                         "invoice_%s_%s.pdf",
-                        $form->{invnumber} || $id,
+                        $invnumber || $id,
                         $name ? $name =~ s/[^a-zA-Z0-9_-]/_/gr : "customer"
                     );
 
@@ -12990,7 +13006,7 @@ app->minion->add_task(
                         file_path    => $pdf_filename,
                         display_name => $display_name,
                         invoice_id   => $id,
-                        invoice_num  => $form->{invnumber},
+                        invoice_num  => $invnumber,
                         customer     => $name
                       };
 
@@ -13000,7 +13016,7 @@ app->minion->add_task(
                         id        => $id,
                         type      => $type,
                         name      => $name,
-                        invnumber => $form->{invnumber},
+                        invnumber => $invnumber,
                         pdf_file  => $display_name
                       };
 
@@ -13013,7 +13029,7 @@ app->minion->add_task(
                             status    => 'success',
                             type      => $type,
                             name      => $name,
-                            reference => $form->{invnumber}
+                            reference => $invnumber
                         }
                     );
                 }
@@ -13281,78 +13297,25 @@ app->minion->add_task(
             # Create a form object for this email
             my $form = new Form;
             eval {
-                # Check permissions
-
                 $form->{vc} = $vc;
                 $form->{id} = $id;
 
-                # Build invoice data
+                # Build invoice data (needed for intnotes and status updates)
                 build_invoice( $c, $client, $form, $dbs );
 
                 # Set up email content and attachments
                 my @attachments = ();
 
-                my $random_str =
-                  sprintf( "%s_%s", time(), int( rand(1000000) ) );
-
-                # Process attachment if requested
+             # Process attachment if requested - use get_invoice_pdf for caching
                 if ($attachment) {
-                    $form->{lastpage}          = 0;
-                    $form->{sumcarriedforward} = 0;
-                    $form->{templates}         = "templates/$client";
-                    $form->{IN}                = "$type.$attachment";
-
-                    my $userspath = "tmp";
-                    my $defaults  = $job->app->get_defaults($client);
-                    my $attachment_path;
-
-                    # Generate a unique random string for filenames
-
-                    # Generate appropriate file based on attachment type
-                    if ( $attachment eq 'tex' ) {
-                        $form->{OUT} = ">tmp/invoice_${id}_${random_str}.pdf";
-                        $form->{format} = "pdf";
-                        $form->{media}  = "screen";
-                        $form->{copies} = 1;
-
-                        my $dvipdf  = "";
-                        my $xelatex = $defaults->{xelatex};
-                        $form->parse_template( $config, $userspath,
-                            $dvipdf, $xelatex );
-                        $attachment_path =
-                          "tmp/invoice_${id}_${random_str}.pdf";
-
-                        # Add the file path to attachments
-                        push @attachments, $attachment_path;
-                    }
-                    elsif ( $attachment eq 'html' ) {
-                        $form->{OUT} = ">tmp/invoice_${id}_${random_str}.html";
-                        $form->parse_template( $config, $userspath );
-
-                        # Strip the '>' character from the output file path
-                        ( my $file_path = $form->{OUT} ) =~ s/^>//;
-
-                        # Read the HTML file content
-                        open my $fh, '<', $file_path
-                          or die "Cannot open $file_path: $!";
-                        { local $/; $form->{html_content} = <$fh> }
-                        close $fh;
-
-                        # Convert HTML to PDF
-                        my $pdf = html_to_pdf( $form->{html_content} );
-                        die "Failed to generate PDF" unless $pdf;
-
-                        # Write the PDF to a file
-                        my $pdf_path =
-                          "tmp/invoice_${id}_${random_str}_html.pdf";
-                        open my $pdf_fh, '>', $pdf_path
-                          or die "Cannot write to $pdf_path: $!";
-                        binmode $pdf_fh;
-                        print $pdf_fh $pdf;
-                        close $pdf_fh;
-
-                        # Add the file path to attachments
+                    my $pdf_path =
+                      $c->get_invoice_pdf( $client, $id, $vc, $type,
+                        $attachment );
+                    if ( $pdf_path && -f $pdf_path ) {
                         push @attachments, $pdf_path;
+                    }
+                    else {
+                        die "Failed to generate PDF attachment";
                     }
                 }
 
@@ -13421,20 +13384,6 @@ app->minion->add_task(
 
                     # save status
                     $form->update_status($config);
-                }
-
-                # Clean up temporary files
-                if ($attachment) {
-                    if ( $attachment eq 'tex' ) {
-                        unlink "tmp/invoice_${id}_${random_str}.pdf"
-                          if -e "tmp/invoice_${id}_${random_str}.pdf";
-                    }
-                    elsif ( $attachment eq 'html' ) {
-                        unlink "tmp/invoice_${id}_${random_str}.html"
-                          if -e "tmp/invoice_${id}_${random_str}.html";
-                        unlink "tmp/invoice_${id}_${random_str}_html.pdf"
-                          if -e "tmp/invoice_${id}_${random_str}_html.pdf";
-                    }
                 }
 
                 # Track success
