@@ -1649,12 +1649,12 @@ $central->get(
 
 $central->post(
     'create_dataset' => sub {
-        my $c         = shift;
-        my $params    = $c->req->json;
-        my $dataset   = $params->{dataset};
-        my $company   = $params->{company};
-        my $templates = $params->{templates};
-        my $chart     = $params->{chart};
+        my $c                = shift;
+        my $params           = $c->req->json;
+        my $dataset          = $params->{dataset};
+        my $company          = $params->{company};
+        my $template_language = $params->{template_language} || 'en-US';
+        my $chart            = $params->{chart};
 
       # Validate dataset parameter (only lower-case letters and numbers allowed)
         unless ( $dataset =~ /^[a-z0-9]+$/ ) {
@@ -1692,11 +1692,61 @@ $central->post(
         mkdir $images_dir unless -d $images_dir;
         mkdir $spool_dir  unless -d $spool_dir;
 
-        # Template directory handling
-        my $templates_dir   = "doc/templates/";
+        # Template directory handling - always use NEO templates
+        my $templates_dir   = "doc/templates/NEO";
         my $destination_dir = "templates/$dataset";
-        dircopy( "$templates_dir$templates", $destination_dir );
-        rename( "$destination_dir/$templates", "$destination_dir/$dataset" );
+        dircopy( $templates_dir, $destination_dir );
+        rename( "$destination_dir/NEO", "$destination_dir/$dataset" );
+        
+        # Configure language in definitions_language.tex
+        my $definitions_file = "$destination_dir/definitions_language.tex";
+        if ( -f $definitions_file ) {
+            open( my $fh, '<', $definitions_file )
+              or die "Cannot open file '$definitions_file': $!";
+            my @lines = <$fh>;
+            close $fh;
+            
+            # Process each line to comment/uncomment based on selected language
+            for my $i ( 0 .. $#lines ) {
+                my $line = $lines[$i];
+                
+                # Check if this line contains a language load command
+                if ( $line =~ /^[%\\]*(\\LANGload\{(de-CH|de-DE|en-US|fr-CH|it-CH)\})/ ) {
+                    my $lang_code = $2;
+                    if ( $lang_code eq $template_language ) {
+                        # Uncomment this language
+                        $lines[$i] =~ s/^%+//;
+                    } else {
+                        # Comment out this language
+                        $lines[$i] = "%" . $lines[$i] unless $lines[$i] =~ /^%/;
+                    }
+                }
+                # Check for babel package line (comes after LANGload)
+                elsif ( $line =~ /^[%\\]*(\\usepackage\[(ngerman|english|french|italian)\]\{babel\})/ ) {
+                    my $babel_lang = $2;
+                    my $should_enable = (
+                        ( $template_language =~ /^de-/ && $babel_lang eq 'ngerman' ) ||
+                        ( $template_language eq 'en-US' && $babel_lang eq 'english' ) ||
+                        ( $template_language eq 'fr-CH' && $babel_lang eq 'french' ) ||
+                        ( $template_language eq 'it-CH' && $babel_lang eq 'italian' )
+                    );
+                    
+                    if ( $should_enable ) {
+                        # Uncomment this line
+                        $lines[$i] =~ s/^%+//;
+                    } else {
+                        # Comment out this line
+                        $lines[$i] = "%" . $lines[$i] unless $lines[$i] =~ /^%/;
+                    }
+                }
+            }
+            
+            # Write the modified content back to the file
+            open( $fh, '>', $definitions_file )
+              or die "Cannot write to file '$definitions_file': $!";
+            print $fh @lines;
+            close $fh;
+        }
 
         # Connect to database and create new dataset
         my $dbh = DBI->connect( "dbi:Pg:dbname=postgres;host=localhost",
