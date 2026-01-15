@@ -8995,9 +8995,10 @@ $api->get(
 );
 $api->post(
     '/open_invoices/:vc' => sub {
-        my $c    = shift;
-        my $vc   = $c->param('vc');
-        my $json = $c->req->json;
+        my $c      = shift;
+        my $vc     = $c->param('vc');
+        my $client = $c->param('client') || die "Missing client parameter";
+        my $json   = $c->req->json;
         my $form;
 
         # Check permissions
