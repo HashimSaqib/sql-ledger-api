@@ -294,10 +294,10 @@ get '/logo/:client/' => sub {
 ###############################
 
 my $neoledger_perms =
-'["dashboard", "cash", "cash.recon", "gl", "gl.add", "gl.transactions", "items", "items.part", "items.service", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income", "system", "system.currencies", "system.projects", "system.departments", "system.defaults", "system.chart", "system.chart.list", "system.chart.add", "system.chart.gifi", "system.taxes",  "system.templates", "system.audit", "system.yearend", "system.batch", "import", "import.gl", "import.customer", "import.ar_invoice", "import.ar_transaction", "import.vendor", "import.ap_invoice", "import.ap_transaction", "reports.balance", "customer", "customer.transaction", "customer.invoice", "customer.transaction_return", "customer.invoice_return", "customer.add", "customer.batch", "customer.reminder", "customer.consolidate", "customer.transactions", "customer.search", "customer.history", "vendor", "vendor.transaction", "vendor.invoice", "vendor.transaction_return", "vendor.invoice_return", "vendor.add", "vendor.transactions", "vendor.search", "vendor.history", "reports.alltaxes", "vendor.taxreport", "customer.taxreport", "cash.payments", "cash.receipts", "cash.report.customer", "cash.report.vendor", "system.bank", "import.bank", "customer.order", "customer.orders", "customer.quotation", "customer.quotations", "vendor.order", "vendor.orders", "vendor.quotation", "vendor.quotations", "stations.manage", "stations.get", "ai.prompts", "bank.payments", "stations.bank_transactions", "customer.upload", "vendor.upload", "document.list","integrations.manage"]';
+'["dashboard", "cash", "cash.recon", "gl", "gl.add", "gl.transactions", "items", "items.part", "items.service", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income", "system", "system.currencies", "system.projects", "system.departments", "system.defaults", "system.chart", "system.chart.list", "system.chart.add", "system.chart.gifi", "system.taxes",  "system.templates", "system.audit", "system.yearend", "system.batch", "import", "import.gl", "import.customer", "import.ar_invoice", "import.ar_transaction", "import.vendor", "import.ap_invoice", "import.ap_transaction", "reports.balance", "customer", "customer.transaction", "customer.invoice", "customer.transaction_return", "customer.invoice_return", "customer.add", "customer.batch", "customer.reminder", "customer.consolidate", "customer.transactions", "customer.search", "customer.history", "vendor", "vendor.transaction", "vendor.invoice", "vendor.transaction_return", "vendor.invoice_return", "vendor.add", "vendor.transactions", "vendor.search", "vendor.history", "reports.alltaxes", "vendor.taxreport", "customer.taxreport", "cash.payments", "cash.receipts", "cash.report.customer", "cash.report.vendor", "system.bank", "import.bank", "customer.order", "customer.orders", "customer.quotation", "customer.quotations", "vendor.order", "vendor.orders", "vendor.quotation", "vendor.quotations", "stations.manage", "stations.get", "ai.prompts", "bank.payments", "stations.bank_transactions", "customer.upload", "vendor.upload", "document.list","integrations.manage","customer.overview","vendor.overview"]';
 
 my $reports_only =
-'["dashboard", "gl", "gl.transactions", "items", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income",  "reports.balance", "customer", "customer.transactions", "customer.search", "customer.history", "vendor", "vendor.search", "vendor.history", "vendor.transactions", "reports.alltaxes", "vendor.taxreport", "customer.taxreport", "cash.report.customer", "cash.report.vendor", "customer.orders", "customer.quotations", "vendor.orders", "vendor.quotations"]';
+'["dashboard", "gl", "gl.transactions", "items", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income",  "reports.balance", "customer", "customer.transactions", "customer.search", "customer.history", "vendor", "vendor.search", "vendor.history", "vendor.transactions", "reports.alltaxes", "vendor.taxreport", "customer.taxreport", "cash.report.customer", "cash.report.vendor", "customer.orders", "customer.quotations", "vendor.orders", "vendor.quotations","customer.overview","vendor.overview"]';
 helper send_email_central => sub {
     use Email::Sender::Transport::SMTP;
     use Email::Stuffer;
@@ -1649,12 +1649,12 @@ $central->get(
 
 $central->post(
     'create_dataset' => sub {
-        my $c                = shift;
-        my $params           = $c->req->json;
-        my $dataset          = $params->{dataset};
-        my $company          = $params->{company};
+        my $c                 = shift;
+        my $params            = $c->req->json;
+        my $dataset           = $params->{dataset};
+        my $company           = $params->{company};
         my $template_language = $params->{template_language} || 'en-US';
-        my $chart            = $params->{chart};
+        my $chart             = $params->{chart};
 
       # Validate dataset parameter (only lower-case letters and numbers allowed)
         unless ( $dataset =~ /^[a-z0-9]+$/ ) {
@@ -1697,7 +1697,7 @@ $central->post(
         my $destination_dir = "templates/$dataset";
         dircopy( $templates_dir, $destination_dir );
         rename( "$destination_dir/NEO", "$destination_dir/$dataset" );
-        
+
         # Configure language in definitions_language.tex
         my $definitions_file = "$destination_dir/definitions_language.tex";
         if ( -f $definitions_file ) {
@@ -1705,42 +1705,58 @@ $central->post(
               or die "Cannot open file '$definitions_file': $!";
             my @lines = <$fh>;
             close $fh;
-            
+
             # Process each line to comment/uncomment based on selected language
             for my $i ( 0 .. $#lines ) {
                 my $line = $lines[$i];
-                
+
                 # Check if this line contains a language load command
-                if ( $line =~ /^[%\\]*(\\LANGload\{(de-CH|de-DE|en-US|fr-CH|it-CH)\})/ ) {
+                if ( $line =~
+                    /^[%\\]*(\\LANGload\{(de-CH|de-DE|en-US|fr-CH|it-CH)\})/ )
+                {
                     my $lang_code = $2;
                     if ( $lang_code eq $template_language ) {
+
                         # Uncomment this language
                         $lines[$i] =~ s/^%+//;
-                    } else {
+                    }
+                    else {
                         # Comment out this language
                         $lines[$i] = "%" . $lines[$i] unless $lines[$i] =~ /^%/;
                     }
                 }
+
                 # Check for babel package line (comes after LANGload)
-                elsif ( $line =~ /^[%\\]*(\\usepackage\[(ngerman|english|french|italian)\]\{babel\})/ ) {
-                    my $babel_lang = $2;
+                elsif ( $line =~
+/^[%\\]*(\\usepackage\[(ngerman|english|french|italian)\]\{babel\})/
+                  )
+                {
+                    my $babel_lang    = $2;
                     my $should_enable = (
-                        ( $template_language =~ /^de-/ && $babel_lang eq 'ngerman' ) ||
-                        ( $template_language eq 'en-US' && $babel_lang eq 'english' ) ||
-                        ( $template_language eq 'fr-CH' && $babel_lang eq 'french' ) ||
-                        ( $template_language eq 'it-CH' && $babel_lang eq 'italian' )
+                        (
+                                 $template_language =~ /^de-/
+                              && $babel_lang eq 'ngerman'
+                        )
+                          || ( $template_language eq 'en-US'
+                            && $babel_lang eq 'english' )
+                          || ( $template_language eq 'fr-CH'
+                            && $babel_lang eq 'french' )
+                          || ( $template_language eq 'it-CH'
+                            && $babel_lang eq 'italian' )
                     );
-                    
-                    if ( $should_enable ) {
+
+                    if ($should_enable) {
+
                         # Uncomment this line
                         $lines[$i] =~ s/^%+//;
-                    } else {
+                    }
+                    else {
                         # Comment out this line
                         $lines[$i] = "%" . $lines[$i] unless $lines[$i] =~ /^%/;
                     }
                 }
             }
-            
+
             # Write the modified content back to the file
             open( $fh, '>', $definitions_file )
               or die "Cannot write to file '$definitions_file': $!";
@@ -7892,6 +7908,18 @@ $api->get(
         # Process tax information
         my @taxes;
         if ( $form->{acc_trans}{"${transaction_type}_tax"} ) {
+            if ( $transaction_type eq 'AP' ) {
+                $amount_multiplier = -1;
+            }
+            else {
+                $amount_multiplier = 1;
+            }
+            if ( $doc_type eq 'debit_note' ) {
+                $amount_multiplier = 1;
+            }
+            elsif ( $doc_type eq 'credit_note' ) {
+                $amount_multiplier = -1;
+            }
             @taxes = map {
                 {
                     accno  => $_->{accno},
