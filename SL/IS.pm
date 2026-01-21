@@ -947,7 +947,9 @@ sub invoice_details {
     ( $form->{customeremail} ) = $dbh->selectrow_array(
         "SELECT email FROM customer WHERE id = $form->{customer_id}");
 
-    # dcn
+    # dcn - preserve existing dcn if already set or exists in database
+    my $existing_dcn = $form->{dcn};
+    
     $query =
 qq|SELECT iban, bic, membernumber, dcn, rvc, invdescriptionqr, qriban, strdbkginf
             FROM bank
@@ -959,7 +961,12 @@ qq|SELECT iban, bic, membernumber, dcn, rvc, invdescriptionqr, qriban, strdbkgin
         $form->{qriban},       $form->{strdbkginf}
     ) = $dbh->selectrow_array($query);
 
-    if ( $form->{id} && $form->{dcn} eq "<%external%>" ) {
+    # Restore existing dcn if it was already set
+    if ( $existing_dcn ) {
+        $form->{dcn} = $existing_dcn;
+    }
+    # Or fetch from ar table if this is an existing invoice and dcn is set to external
+    elsif ( $form->{id} && $form->{dcn} eq "<%external%>" ) {
         $query = qq|SELECT dcn FROM ar
                 WHERE id = $form->{id}|;
         my $sth = $dbh->prepare($query);
@@ -967,18 +974,36 @@ qq|SELECT iban, bic, membernumber, dcn, rvc, invdescriptionqr, qriban, strdbkgin
         $form->{dcn} = $sth->fetchrow_array;
         $sth->finish;
     }
+    # Or fetch from ar table if this is an existing invoice and dcn exists in database
+    elsif ( $form->{id} && !$form->{dcn} ) {
+        $query = qq|SELECT dcn FROM ar
+                WHERE id = $form->{id}|;
+        my $sth = $dbh->prepare($query);
+        $sth->execute || $form->dberror($query);
+        my $ar_dcn = $sth->fetchrow_array;
+        $sth->finish;
+        # Use dcn from ar table if it exists
+        $form->{dcn} = $ar_dcn if $ar_dcn;
+    }
 
     for my $dcn (qw(dcn rvc)) {
         $form->{$dcn} = $form->format_dcn( $form->{$dcn} );
     }
 
-    # save dcn
+    # save dcn - only update if dcn doesn't already exist in database
     if ( $form->{id} ) {
-        $query = qq|UPDATE ar SET
-  dcn = | . $dbh->quote( $form->{dcn} ) . qq|,
-  bank_id = (SELECT id FROM chart WHERE accno = '$paymentaccno')
-  WHERE id = $form->{id}|;
-        $dbh->do($query) || $form->dberror($query);
+        # Check if dcn already exists in ar table
+        $query = qq|SELECT dcn FROM ar WHERE id = $form->{id}|;
+        my ($existing_ar_dcn) = $dbh->selectrow_array($query);
+        
+        # Only update if no dcn exists in the ar table
+        if ( !$existing_ar_dcn ) {
+            $query = qq|UPDATE ar SET
+      dcn = | . $dbh->quote( $form->{dcn} ) . qq|,
+      bank_id = (SELECT id FROM chart WHERE accno = '$paymentaccno')
+      WHERE id = $form->{id}|;
+            $dbh->do($query) || $form->dberror($query);
+        }
     }
 
     $dbh->disconnect;
@@ -2198,19 +2223,30 @@ qq|id = $form->{voucher}{payment}{$voucherid}{br_id}|,
         $invamount -= $cd_tax if !$form->{taxincluded};
     }
 
-    # for dcn
-    $form->{oldinvtotal} ||= $invamount * $sw;
-    ( $form->{integer_amount}, $form->{decimal} ) = split /\./,
-      $form->{oldinvtotal};
-    $form->{decimal} = substr( "$form->{decimal}00", 0, 2 );
+    # for dcn - only recalculate if not already supplied or exists in database
+    unless ( $form->{dcn} ) {
+        # Check if dcn exists in the ar table (for updates)
+        if ( $form->{id} ) {
+            $query = qq|SELECT dcn FROM ar WHERE id = $form->{id}|;
+            ( $form->{dcn} ) = $dbh->selectrow_array($query);
+        }
+        
+        # If still no dcn, calculate it from bank table
+        unless ( $form->{dcn} ) {
+            $form->{oldinvtotal} ||= $invamount * $sw;
+            ( $form->{integer_amount}, $form->{decimal} ) = split /\./,
+              $form->{oldinvtotal};
+            $form->{decimal} = substr( "$form->{decimal}00", 0, 2 );
 
-    $query = qq|SELECT bk.membernumber, bk.dcn
-	      FROM bank bk
-	      JOIN chart c ON (c.id = bk.id)
-	      WHERE c.accno = '$paymentaccno'|;
-    ( $form->{membernumber}, $form->{dcn} ) = $dbh->selectrow_array($query);
+            $query = qq|SELECT bk.membernumber, bk.dcn
+                  FROM bank bk
+                  JOIN chart c ON (c.id = bk.id)
+                  WHERE c.accno = '$paymentaccno'|;
+            ( $form->{membernumber}, $form->{dcn} ) = $dbh->selectrow_array($query);
 
-    $form->{dcn} = $form->format_dcn( $form->{dcn} );
+            $form->{dcn} = $form->format_dcn( $form->{dcn} );
+        }
+    }
 
     # save AR record
     $query = qq|UPDATE ar set
@@ -3858,19 +3894,25 @@ sub consolidate_invoices {
 
     if ($rc) {
 
-        # update dcn
-        $query = qq|SELECT dcn
-                FROM bank
-		WHERE id = $ar->{bank_id}|;
-        my ($dcn) = $dbh->selectrow_array($query);
+        # update dcn - only if not already set
+        $query = qq|SELECT dcn FROM ar WHERE id = $id|;
+        my ($existing_dcn) = $dbh->selectrow_array($query);
+        
+        # Only update dcn if it doesn't already exist
+        if ( !$existing_dcn ) {
+            $query = qq|SELECT dcn
+                    FROM bank
+            WHERE id = $ar->{bank_id}|;
+            my ($dcn) = $dbh->selectrow_array($query);
 
-        for ( keys %$ar ) { $form->{$_} = $ar->{$_} }
-        $dcn = $form->format_dcn($dcn);
+            for ( keys %$ar ) { $form->{$_} = $ar->{$_} }
+            $dcn = $form->format_dcn($dcn);
 
-        $query = qq|UPDATE ar SET
-                dcn = '$dcn'
-		WHERE id = $id|;
-        $dbh->do($query);
+            $query = qq|UPDATE ar SET
+                    dcn = '$dcn'
+            WHERE id = $id|;
+            $dbh->do($query);
+        }
     }
 
     $dbh->disconnect;
