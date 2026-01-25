@@ -198,7 +198,7 @@ helper validate_date => sub {
     return 1;    # return true if the date is valid
 };
 
-#plugin 'Minion::Admin' => { return_to => '/minion' };
+plugin 'Minion::Admin' => { return_to => '/minion' };
 
 # Database Updates on Startup
 app->hook(
@@ -303,7 +303,12 @@ helper send_email_central => sub {
     use Email::Stuffer;
     use Data::Dumper;
     use MIME::Base64;
-    my ( $c, $to, $subject, $content, $attachments ) = @_;
+    my ( $c, $to, $subject, $content, $attachments, $options ) = @_;
+    
+    # Options can include: cc => [], bcc => []
+    $options //= {};
+    my $cc_list  = $options->{cc}  || [];
+    my $bcc_list = $options->{bcc} || [];
 
     # Check if Send in Blue should be used
     if ( $ENV{SEND_IN_BLUE} ) {
@@ -312,9 +317,13 @@ helper send_email_central => sub {
         my $api_key = $ENV{SEND_IN_BLUE};
         my $ua      = $c->ua;
 
-        # Convert newlines to <br> for HTML email
+       # Convert newlines to <br> for HTML email (only if content is plain text)
         my $html_content = $content;
-        $html_content =~ s/\n/<br>\n/g;
+
+        # Skip conversion if content is already HTML (contains HTML tags)
+        unless ( $html_content =~ /<(html|div|table|p|h[1-6]|span|a|br)/i ) {
+            $html_content =~ s/\n/<br>\n/g;
+        }
 
         # Prepare the payload for Send in Blue API
         my $payload = {
@@ -331,6 +340,16 @@ helper send_email_central => sub {
             subject     => $subject,
             htmlContent => $html_content
         };
+        
+        # Add CC recipients if provided
+        if ( $cc_list && ref($cc_list) eq 'ARRAY' && @$cc_list ) {
+            $payload->{cc} = [ map { { email => $_, name => $_ } } @$cc_list ];
+        }
+        
+        # Add BCC recipients if provided
+        if ( $bcc_list && ref($bcc_list) eq 'ARRAY' && @$bcc_list ) {
+            $payload->{bcc} = [ map { { email => $_, name => $_ } } @$bcc_list ];
+        }
 
         # Add attachments if provided
         if ( $attachments && ref($attachments) eq 'ARRAY' ) {
@@ -393,9 +412,26 @@ helper send_email_central => sub {
       $ENV{PRODUCT_NAME}
       ? "$ENV{PRODUCT_NAME} <$ENV{SMTP_USERNAME}>"
       : $ENV{SMTP_USERNAME};
-    my $email_obj =
-      Email::Stuffer->from($from)->to($to)->subject($subject)
-      ->text_body($content);
+
+    # Detect if content is HTML or plain text
+    my $email_obj = Email::Stuffer->from($from)->to($to)->subject($subject);
+    
+    # Add CC recipients if provided
+    if ( $cc_list && ref($cc_list) eq 'ARRAY' && @$cc_list ) {
+        $email_obj->cc( join( ', ', @$cc_list ) );
+    }
+    
+    # Add BCC recipients if provided
+    if ( $bcc_list && ref($bcc_list) eq 'ARRAY' && @$bcc_list ) {
+        $email_obj->bcc( join( ', ', @$bcc_list ) );
+    }
+    
+    if ( $content =~ /<(html|div|table|p|h[1-6]|span|a|br)/i ) {
+        $email_obj->html_body($content);
+    }
+    else {
+        $email_obj->text_body($content);
+    }
 
     # Attach files if provided
     if ( $attachments && ref($attachments) eq 'ARRAY' ) {
