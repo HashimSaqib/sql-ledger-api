@@ -10187,9 +10187,7 @@ $api->get(
             # Convert HTML to PDF
             my $pdf = html_to_pdf($html_content);
             unless ($pdf) {
-                $c->res->status(500);
-                $c->render( text => "Failed to generate PDF" );
-                return;
+                return $c->render( status => 500, text => "Failed to generate PDF" );
             }
             $c->res->headers->content_type('application/pdf');
             $c->render( data => $pdf );
@@ -11020,9 +11018,7 @@ $api->get(
 
             my $pdf = html_to_pdf($html_content);
             unless ($pdf) {
-                $c->res->status(500);
-                $c->render( text => "Failed to generate PDF" );
-                return;
+                return $c->render( status => 500, text => "Failed to generate PDF" );
             }
 
             $c->res->headers->content_type('application/pdf');
@@ -11577,9 +11573,7 @@ $api->get(
             );
             my $pdf = html_to_pdf($html_content);
             unless ($pdf) {
-                $c->res->status(500);
-                $c->render( text => "Failed to generate PDF" );
-                return;
+                return $c->render( status => 500, text => "Failed to generate PDF" );
             }
 
             $c->res->headers->content_type('application/pdf');
@@ -12347,9 +12341,7 @@ $api->get(
           $dbs->query( "SELECT invnumber FROM $arap WHERE id = ?", $id )->hash;
 
         unless ($invoice) {
-            $c->res->status(404);
-            $c->render( json => { error => "Invoice not found" } );
-            return;
+            return $c->render( status => 404, json => { error => "Invoice not found" } );
         }
 
         # use the helper to get (or generate) the PDF
@@ -12357,16 +12349,12 @@ $api->get(
           $c->get_invoice_pdf( $client, $id, $vc, $template, $format );
 
         unless ( $pdf_path && -f $pdf_path ) {
-            $c->res->status(500);
-            $c->render( json => { error => "Failed to generate invoice PDF" } );
-            return;
+            return $c->render( status => 500, json => { error => "Failed to generate invoice PDF" } );
         }
 
         # read and return the PDF
         open my $fh, '<', $pdf_path or do {
-            $c->res->status(500);
-            $c->render( json => { error => "Cannot read PDF file" } );
-            return;
+            return $c->render( status => 500, json => { error => "Cannot read PDF file" } );
         };
         binmode $fh;
         my $pdf_content = do { local $/; <$fh> };
@@ -13006,10 +12994,9 @@ $api->post(
                 push @attachments, $pdf_path;
             }
             else {
-                $c->res->status(500);
-                $c->render(
+                return $c->render(
+                    status => 500,
                     json => { error => "Failed to generate PDF attachment" } );
-                return;
             }
         }
 
