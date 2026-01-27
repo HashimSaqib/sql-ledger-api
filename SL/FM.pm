@@ -528,8 +528,11 @@ sub get_files {
     foreach my $file (@files) {
         my $link;
         if ( $file->{location} eq 'local' ) {
-            $link =
-"https://$data->{api_url}/client/$data->{client}/files/$file->{link}";
+            my $api_url = $data->{api_url};
+            if ( $api_url !~ m{^https?://} ) {
+                $api_url = "https://$api_url";
+            }
+            $link = "$api_url/client/$data->{client}/files/$file->{link}";
         }
         else {
             $link = $file->{link};
@@ -565,8 +568,11 @@ sub get_files_for_transactions {
     foreach my $file (@files) {
         my $link;
         if ( $file->{location} eq 'local' ) {
-            $link =
-"https://$data->{api_url}/client/$data->{client}/files/$file->{link}";
+            my $api_url = $data->{api_url};
+            if ( $api_url !~ m{^https?://} ) {
+                $api_url = "https://$api_url";
+            }
+            $link = "$api_url/client/$data->{client}/files/$file->{link}";
         }
         else {
             $link = $file->{link};
