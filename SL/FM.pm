@@ -1304,8 +1304,39 @@ sub _ensure_google_drive_folders {
 sub _create_google_drive_public_link {
     my ( $ua, $access_token, $file_id, $connection ) = @_;
 
-    # We'll skip setting public permissions and just retrieve the link
+    # Set "anyone with the link" permission
+    my $permissions_url =
+      "https://www.googleapis.com/drive/v3/files/$file_id/permissions";
 
+    # Add parameters for shared drives if necessary
+    if (   $connection
+        && $connection->{drive_id}
+        && $connection->{drive_id} ne 'root' )
+    {
+        $permissions_url .= "?supportsAllDrives=true";
+    }
+
+    # Create permission for anyone with the link to view
+    my $permission_tx = $ua->post(
+        $permissions_url => {
+            'Authorization' => "Bearer $access_token",
+            'Content-Type'  => 'application/json'
+        } => encode_json(
+            {
+                type => 'anyone',
+                role => 'reader'
+            }
+        )
+    );
+
+    my $perm_res = $permission_tx->result;
+    # Log permission errors but continue to get the link anyway
+    unless ( $perm_res->is_success ) {
+        warn "Failed to set public permission for file $file_id: "
+          . ( $perm_res->message || 'Unknown error' );
+    }
+
+    # Now retrieve the shareable link
     my $file_url =
       "https://www.googleapis.com/drive/v3/files/$file_id?fields=webViewLink";
 
