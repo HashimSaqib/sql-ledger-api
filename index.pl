@@ -10953,12 +10953,19 @@ $api->get(
         my $form   = Form->new;
         my $locale = Locale->new;
 
+        # Get default currency from database
+        my $currencies = $form->get_currencies($c->slconfig);
+        unless ($currencies) {
+            return $c->render(status => 400, json => { error => 'No currencies configured in the database' });
+        }
+        my $default_currency = substr($currencies, 0, 3);
+
         $form->{department}      = $params->{department}      // "";
         $form->{projectnumber}   = $params->{projectnumber}   // "";
         $form->{fromdate}        = $params->{fromdate}        // "";
         $form->{todate}          = $params->{todate}          // "";
-        $form->{currency}        = $params->{currency}        // "PKR";
-        $form->{defaultcurrency} = $params->{defaultcurrency} // "PKR";
+        $form->{currency}        = $params->{currency} || $default_currency;
+        $form->{defaultcurrency} = $default_currency;
         $form->{decimalplaces}   = $params->{decimalplaces}   // "2";
         $form->{method}          = $params->{method}          // "accrual";
         $form->{includeperiod}   = $params->{includeperiod}   // "year";
@@ -11502,12 +11509,19 @@ $api->get(
         my $form   = Form->new;
         my $locale = Locale->new;
 
+        # Get default currency from database
+        my $currencies = $form->get_currencies($c->slconfig);
+        unless ($currencies) {
+            return $c->render(status => 400, json => { error => 'No currencies configured in the database' });
+        }
+        my $default_currency = substr($currencies, 0, 3);
+
         # Assign parameters
         $form->{department}      = $params->{department}      // "";
         $form->{projectnumber}   = $params->{projectnumber}   // "";
         $form->{todate}          = $params->{todate}          // "";
-        $form->{currency}        = $params->{currency}        // "PKR";
-        $form->{defaultcurrency} = $params->{defaultcurrency} // "PKR";
+        $form->{currency}        = $params->{currency} || $default_currency;
+        $form->{defaultcurrency} = $default_currency;
         $form->{decimalplaces}   = $params->{decimalplaces}   // "2";
         $form->{includeperiod}   = $params->{includeperiod}   // "year";
         $form->{previousyear}    = $params->{previousyear}    // "0";
