@@ -181,7 +181,7 @@ helper central_dbs => sub {
     return $dbs;
 };
 
-plugin Minion => { Pg =>
+# plugin Minion => { Pg =>
       "postgresql://$postgres_user:$postgres_password\@localhost/centraldb" };
 
 helper validate_date => sub {
@@ -304,7 +304,7 @@ helper send_email_central => sub {
     use Data::Dumper;
     use MIME::Base64;
     my ( $c, $to, $subject, $content, $attachments, $options ) = @_;
-    
+
     # Options can include: cc => [], bcc => []
     $options //= {};
     my $cc_list  = $options->{cc}  || [];
@@ -318,10 +318,11 @@ helper send_email_central => sub {
         my $ua      = $c->ua;
 
        # Convert newlines to <br> for HTML email (only if content is plain text)
-        # Provide fallback content if empty (SendinBlue requires htmlContent)
-        my $html_content = ( defined($content) && $content ne '' ) 
-            ? $content 
-            : '<p>&nbsp;</p>';
+       # Provide fallback content if empty (SendinBlue requires htmlContent)
+        my $html_content =
+          ( defined($content) && $content ne '' )
+          ? $content
+          : '<p>&nbsp;</p>';
 
         # Skip conversion if content is already HTML (contains HTML tags)
         unless ( $html_content =~ /<(html|div|table|p|h[1-6]|span|a|br)/i ) {
@@ -343,15 +344,16 @@ helper send_email_central => sub {
             subject     => $subject,
             htmlContent => $html_content
         };
-        
+
         # Add CC recipients if provided
         if ( $cc_list && ref($cc_list) eq 'ARRAY' && @$cc_list ) {
             $payload->{cc} = [ map { { email => $_, name => $_ } } @$cc_list ];
         }
-        
+
         # Add BCC recipients if provided
         if ( $bcc_list && ref($bcc_list) eq 'ARRAY' && @$bcc_list ) {
-            $payload->{bcc} = [ map { { email => $_, name => $_ } } @$bcc_list ];
+            $payload->{bcc} =
+              [ map { { email => $_, name => $_ } } @$bcc_list ];
         }
 
         # Add attachments if provided
@@ -418,17 +420,17 @@ helper send_email_central => sub {
 
     # Detect if content is HTML or plain text
     my $email_obj = Email::Stuffer->from($from)->to($to)->subject($subject);
-    
+
     # Add CC recipients if provided
     if ( $cc_list && ref($cc_list) eq 'ARRAY' && @$cc_list ) {
         $email_obj->cc( join( ', ', @$cc_list ) );
     }
-    
+
     # Add BCC recipients if provided
     if ( $bcc_list && ref($bcc_list) eq 'ARRAY' && @$bcc_list ) {
         $email_obj->bcc( join( ', ', @$bcc_list ) );
     }
-    
+
     if ( $content =~ /<(html|div|table|p|h[1-6]|span|a|br)/i ) {
         $email_obj->html_body($content);
     }
@@ -10190,7 +10192,10 @@ $api->get(
             # Convert HTML to PDF
             my $pdf = html_to_pdf($html_content);
             unless ($pdf) {
-                return $c->render( status => 500, text => "Failed to generate PDF" );
+                return $c->render(
+                    status => 500,
+                    text   => "Failed to generate PDF"
+                );
             }
             $c->res->headers->content_type('application/pdf');
             $c->render( data => $pdf );
@@ -10954,25 +10959,28 @@ $api->get(
         my $locale = Locale->new;
 
         # Get default currency from database
-        my $currencies = $form->get_currencies($c->slconfig);
+        my $currencies = $form->get_currencies( $c->slconfig );
         unless ($currencies) {
-            return $c->render(status => 400, json => { error => 'No currencies configured in the database' });
+            return $c->render(
+                status => 400,
+                json => { error => 'No currencies configured in the database' }
+            );
         }
-        my $default_currency = substr($currencies, 0, 3);
+        my $default_currency = substr( $currencies, 0, 3 );
 
-        $form->{department}      = $params->{department}      // "";
-        $form->{projectnumber}   = $params->{projectnumber}   // "";
-        $form->{fromdate}        = $params->{fromdate}        // "";
-        $form->{todate}          = $params->{todate}          // "";
+        $form->{department}      = $params->{department}    // "";
+        $form->{projectnumber}   = $params->{projectnumber} // "";
+        $form->{fromdate}        = $params->{fromdate}      // "";
+        $form->{todate}          = $params->{todate}        // "";
         $form->{currency}        = $params->{currency} || $default_currency;
         $form->{defaultcurrency} = $default_currency;
-        $form->{decimalplaces}   = $params->{decimalplaces}   // "2";
-        $form->{method}          = $params->{method}          // "accrual";
-        $form->{includeperiod}   = $params->{includeperiod}   // "year";
-        $form->{previousyear}    = $params->{previousyear}    // "0";
-        $form->{accounttype}     = $params->{accounttype}     // "standard";
-        $form->{l_accno}         = $params->{l_accno}         // 0;
-        $form->{usetemplate}     = $params->{usetemplate}     // '';
+        $form->{decimalplaces}   = $params->{decimalplaces} // "2";
+        $form->{method}          = $params->{method}        // "accrual";
+        $form->{includeperiod}   = $params->{includeperiod} // "year";
+        $form->{previousyear}    = $params->{previousyear}  // "0";
+        $form->{accounttype}     = $params->{accounttype}   // "standard";
+        $form->{l_accno}         = $params->{l_accno}       // 0;
+        $form->{usetemplate}     = $params->{usetemplate}   // '';
 
         my $periods = [];
         foreach my $key ( keys %$params ) {
@@ -11028,7 +11036,10 @@ $api->get(
 
             my $pdf = html_to_pdf($html_content);
             unless ($pdf) {
-                return $c->render( status => 500, text => "Failed to generate PDF" );
+                return $c->render(
+                    status => 500,
+                    text   => "Failed to generate PDF"
+                );
             }
 
             $c->res->headers->content_type('application/pdf');
@@ -11510,25 +11521,28 @@ $api->get(
         my $locale = Locale->new;
 
         # Get default currency from database
-        my $currencies = $form->get_currencies($c->slconfig);
+        my $currencies = $form->get_currencies( $c->slconfig );
         unless ($currencies) {
-            return $c->render(status => 400, json => { error => 'No currencies configured in the database' });
+            return $c->render(
+                status => 400,
+                json => { error => 'No currencies configured in the database' }
+            );
         }
-        my $default_currency = substr($currencies, 0, 3);
+        my $default_currency = substr( $currencies, 0, 3 );
 
         # Assign parameters
-        $form->{department}      = $params->{department}      // "";
-        $form->{projectnumber}   = $params->{projectnumber}   // "";
-        $form->{todate}          = $params->{todate}          // "";
+        $form->{department}      = $params->{department}    // "";
+        $form->{projectnumber}   = $params->{projectnumber} // "";
+        $form->{todate}          = $params->{todate}        // "";
         $form->{currency}        = $params->{currency} || $default_currency;
         $form->{defaultcurrency} = $default_currency;
-        $form->{decimalplaces}   = $params->{decimalplaces}   // "2";
-        $form->{includeperiod}   = $params->{includeperiod}   // "year";
-        $form->{previousyear}    = $params->{previousyear}    // "0";
-        $form->{accounttype}     = $params->{accounttype}     // "standard";
-        $form->{l_accno}         = $params->{l_accno}         // 0;
-        $form->{usetemplate}     = $params->{usetemplate}     // '';
-        $form->{heading_only}    = $params->{heading_only}    // 0;
+        $form->{decimalplaces}   = $params->{decimalplaces} // "2";
+        $form->{includeperiod}   = $params->{includeperiod} // "year";
+        $form->{previousyear}    = $params->{previousyear}  // "0";
+        $form->{accounttype}     = $params->{accounttype}   // "standard";
+        $form->{l_accno}         = $params->{l_accno}       // 0;
+        $form->{usetemplate}     = $params->{usetemplate}   // '';
+        $form->{heading_only}    = $params->{heading_only}  // 0;
 
         my $periods = [];
         foreach my $key ( keys %$params ) {
@@ -11590,7 +11604,10 @@ $api->get(
             );
             my $pdf = html_to_pdf($html_content);
             unless ($pdf) {
-                return $c->render( status => 500, text => "Failed to generate PDF" );
+                return $c->render(
+                    status => 500,
+                    text   => "Failed to generate PDF"
+                );
             }
 
             $c->res->headers->content_type('application/pdf');
@@ -12358,7 +12375,10 @@ $api->get(
           $dbs->query( "SELECT invnumber FROM $arap WHERE id = ?", $id )->hash;
 
         unless ($invoice) {
-            return $c->render( status => 404, json => { error => "Invoice not found" } );
+            return $c->render(
+                status => 404,
+                json   => { error => "Invoice not found" }
+            );
         }
 
         # use the helper to get (or generate) the PDF
@@ -12366,12 +12386,18 @@ $api->get(
           $c->get_invoice_pdf( $client, $id, $vc, $template, $format );
 
         unless ( $pdf_path && -f $pdf_path ) {
-            return $c->render( status => 500, json => { error => "Failed to generate invoice PDF" } );
+            return $c->render(
+                status => 500,
+                json   => { error => "Failed to generate invoice PDF" }
+            );
         }
 
         # read and return the PDF
         open my $fh, '<', $pdf_path or do {
-            return $c->render( status => 500, json => { error => "Cannot read PDF file" } );
+            return $c->render(
+                status => 500,
+                json   => { error => "Cannot read PDF file" }
+            );
         };
         binmode $fh;
         my $pdf_content = do { local $/; <$fh> };
@@ -13013,7 +13039,8 @@ $api->post(
             else {
                 return $c->render(
                     status => 500,
-                    json => { error => "Failed to generate PDF attachment" } );
+                    json   => { error => "Failed to generate PDF attachment" }
+                );
             }
         }
 
