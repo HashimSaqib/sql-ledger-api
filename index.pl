@@ -181,8 +181,7 @@ helper central_dbs => sub {
     return $dbs;
 };
 
-# plugin Minion => { Pg =>
-      "postgresql://$postgres_user:$postgres_password\@localhost/centraldb" };
+plugin Minion => { Pg => "postgresql://$postgres_user:$postgres_password\@localhost/centraldb" };
 
 helper validate_date => sub {
     my ( $c, $date ) = @_;
