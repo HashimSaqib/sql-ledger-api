@@ -182,16 +182,32 @@
         <tbody>
             <%
                 sub render_accounts_improved {
-                    my ($data, $hierarchy, $periods, $level, $section_name) = @_;
+                    my ($data, $hierarchy, $periods, $level, $section_name, $heading_level) = @_;
                     $level ||= 0;
                     my $output = '';
+                    
+                    # Determine max visible level based on heading_level parameter
+                    # heading_level=1 means show only level 0, heading_level=2 means levels 0-1, etc.
+                    my $max_visible_level = defined($heading_level) && $heading_level ne '' && $heading_level > 0 
+                        ? $heading_level - 1 
+                        : undef;
                     
                     for my $accno (sort { $a <=> $b } keys %$hierarchy) {
                         my $account = $data->{$accno};
                         next unless $account;
                         
-                        my $indent_class = $level > 0 ? "indent-$level" : "";
                         my $is_header = $account->{charttype} eq 'H';
+                        my $account_level = $account->{level} // $level;
+                        
+                        # Skip if heading_level filtering is active
+                        if (defined($max_visible_level)) {
+                            # Skip detail accounts when heading_level is set
+                            next if !$is_header;
+                            # Skip headings deeper than max visible level
+                            next if $account_level > $max_visible_level;
+                        }
+                        
+                        my $indent_class = $level > 0 ? "indent-$level" : "";
                         my $row_class = $is_header ? 'header-account' : 'detail-account';
                         
                         # Apply indentation to both headers and details based on their level
@@ -204,6 +220,14 @@
                             $final_indent_class = "indent-" . ($level + 1);
                         }
                         
+                        # Determine if we should show amounts for this heading
+                        # Show amounts when: it's the deepest visible level OR when it's a detail account
+                        my $show_amount = !$is_header;
+                        if ($is_header && defined($max_visible_level)) {
+                            # For headings in collapsed mode, show amount if this is at max visible level
+                            $show_amount = ($account_level == $max_visible_level);
+                        }
+                        
                         $output .= '<tr class="account-row">';
                         $output .= qq{<td class="account-label $row_class $final_indent_class">};
                         $output .= $account->{label};
@@ -211,40 +235,54 @@
                         
                         for my $period (@$periods) {
                             my $amount = '';
-                            # Only show amounts for detail accounts (charttype 'A'), not headers
-                            if (!$is_header && $account->{amounts}{$period->{label}}) {
+                            # Only show amounts for detail accounts (charttype 'A'), not headers (unless collapsed)
+                            if ($show_amount && $account->{amounts}{$period->{label}}) {
                                 $amount = $account->{amounts}{$period->{label}};
                             }
                             $output .= qq{<td class="account-amount number">$amount</td>};
                         }
                         $output .= '</tr>';
                         
-                        # Render children if any
+                        # Render children if any (only if not filtered out by heading_level)
                         if (keys %{$account->{children}}) {
-                            my %child_hierarchy = map { $_ => 1 } keys %{$account->{children}};
-                            $output .= render_accounts_improved($data, \%child_hierarchy, $periods, $level + 1, $section_name);
+                            my $should_show_children = 1;
+                            if (defined($max_visible_level) && $account_level >= $max_visible_level) {
+                                $should_show_children = 0;
+                            }
+                            
+                            if ($should_show_children) {
+                                my %child_hierarchy = map { $_ => 1 } keys %{$account->{children}};
+                                $output .= render_accounts_improved($data, \%child_hierarchy, $periods, $level + 1, $section_name, $heading_level);
+                            }
                         }
                         
-                        # Add total row for header accounts that have children
+                        # Add total row for header accounts that have children (only when children are visible)
                         if ($is_header && keys %{$account->{children}}) {
-                            $output .= '<tr class="section-total">';
-                            $output .= qq{<td class="account-label $final_indent_class"><strong>TOTAL } . uc($account->{label}) . '</strong></td>';
-                            
-                            for my $period (@$periods) {
-                                my $amount = $account->{amounts}{$period->{label}} || '';
-                                $output .= qq{<td class="account-amount number"><strong>$amount</strong></td>};
+                            my $show_section_total = 1;
+                            if (defined($max_visible_level) && $account_level >= $max_visible_level) {
+                                $show_section_total = 0;
                             }
-                            $output .= '</tr>';
                             
-                            # Add spacer row
-                            $output .= '<tr class="spacer-row"><td colspan="100%"></td></tr>';
+                            if ($show_section_total) {
+                                $output .= '<tr class="section-total">';
+                                $output .= qq{<td class="account-label $final_indent_class"><strong>TOTAL } . uc($account->{label}) . '</strong></td>';
+                                
+                                for my $period (@$periods) {
+                                    my $amount = $account->{amounts}{$period->{label}} || '';
+                                    $output .= qq{<td class="account-amount number"><strong>$amount</strong></td>};
+                                }
+                                $output .= '</tr>';
+                                
+                                # Add spacer row
+                                $output .= '<tr class="spacer-row"><td colspan="100%"></td></tr>';
+                            }
                         }
                     }
                     return $output;
                 }
             %>
             
-            <%== render_accounts_improved($assets_data, $assets_hierarchy, $periods, 0, 'ASSETS') %>
+            <%== render_accounts_improved($assets_data, $assets_hierarchy, $periods, 0, 'ASSETS', $heading_level) %>
             
             <tr class="grand-total">
                 <td class="account-label"><strong>TOTAL AKTIVEN</strong></td>
@@ -271,7 +309,7 @@
                 % }
             </tr>
             
-            <%== render_accounts_improved($liabilities_data, $liabilities_hierarchy, $periods, 0, 'LIABILITIES') %>
+            <%== render_accounts_improved($liabilities_data, $liabilities_hierarchy, $periods, 0, 'LIABILITIES', $heading_level) %>
             
             <tr class="section-total">
                 <td class="account-label"><strong>TOTAL KURZFRISTIGES FREMDKAPITAL</strong></td>
@@ -290,7 +328,7 @@
                 % }
             </tr>
             
-            <%== render_accounts_improved($equity_data, $equity_hierarchy, $periods, 0, 'EQUITY') %>
+            <%== render_accounts_improved($equity_data, $equity_hierarchy, $periods, 0, 'EQUITY', $heading_level) %>
             
             <!-- Current Earnings Row -->
             <tr class="account-row">
