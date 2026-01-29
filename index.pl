@@ -10986,6 +10986,7 @@ $api->get(
         $form->{accounttype}     = $params->{accounttype}   // "standard";
         $form->{l_accno}         = $params->{l_accno}       // 0;
         $form->{usetemplate}     = $params->{usetemplate}   // '';
+        $form->{heading_level}   = $params->{heading_level} // '';
 
         my $periods = [];
         foreach my $key ( keys %$params ) {
@@ -11032,6 +11033,7 @@ $api->get(
                 expense_hierarchy => $form->{expense_hierarchy},
                 formatted_totals  => $form->{formatted_totals},
                 logo              => $logo_base64,
+                heading_level     => $form->{heading_level},
             };
 
             my $html_content = $c->render_to_string(
@@ -11548,6 +11550,7 @@ $api->get(
         $form->{l_accno}         = $params->{l_accno}       // 0;
         $form->{usetemplate}     = $params->{usetemplate}   // '';
         $form->{heading_only}    = $params->{heading_only}  // 0;
+        $form->{heading_level}   = $params->{heading_level} // '';
 
         my $periods = [];
         foreach my $key ( keys %$params ) {
@@ -11599,6 +11602,7 @@ $api->get(
                 current_earnings      => $form->{current_earnings},
                 net_totals            => $form->{net_totals},
                 logo                  => $logo_base64,
+                heading_level         => $form->{heading_level},
             };
             warn Dumper $template_data;
 
