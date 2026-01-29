@@ -181,7 +181,8 @@ helper central_dbs => sub {
     return $dbs;
 };
 
-plugin Minion => { Pg => "postgresql://$postgres_user:$postgres_password\@localhost/centraldb" };
+plugin Minion => { Pg =>
+      "postgresql://$postgres_user:$postgres_password\@localhost/centraldb" };
 
 helper validate_date => sub {
     my ( $c, $date ) = @_;
@@ -3298,6 +3299,7 @@ helper check_perms => sub {
     $form->{revtrans}     = $defaults->{revtrans}                || 0;
     $form->{audittrail}   = $defaults->{audittrail}              || 0;
     $form->{profile_id}   = $profile->{profile_id};
+    $form->{paymentfile}  = $defaults->{paymentfile} ? 1 : 0;
 
     # admin/owner bypass
     my $admin = $central->query(
@@ -4659,7 +4661,8 @@ $api->get(
                 line_tax             => to_boolean( $form->{linetax} ),
                 sort_names_by_number => to_boolean( $form->{namesbynumber} ),
                 xe_latex             => to_boolean( $form->{xelatex} ),
-                type_of_contact      => $form->{typeofcontact} || ""
+                type_of_contact      => $form->{typeofcontact} || "",
+                paymentfile          => $form->{paymentfile}   || 0
             },
 
             account_defaults => {
@@ -4821,6 +4824,7 @@ $api->post(
             $mapped_data->{xelatex} = $json_data->{settings}->{xe_latex};
             $mapped_data->{typeofcontact} =
               $json_data->{settings}->{type_of_contact};
+            $mapped_data->{paymentfile} = $json_data->{settings}->{paymentfile};
         }
 
  # Map account defaults (these appear to be ID values only in the old structure)
@@ -4887,7 +4891,7 @@ $api->post(
         warn( Dumper $form );
 
         $form->{optional} =
-"company street post_office address address1 address2 city state zip country tel fax companyemail companywebsite yearend weightunit businessnumber closedto revtrans audittrail method cdt namesbynumber xelatex typeofcontact roundchange referenceurl annualinterest latepaymentfee restockingcharge checkinventory hideaccounts linetax forcewarehouse glnumber sinumber sonumber vinumber batchnumber vouchernumber ponumber sqnumber rfqnumber partnumber projectnumber employeenumber customernumber vendornumber lock_glnumber lock_sinumber lock_sonumber lock_ponumber lock_sqnumber lock_rfqnumber lock_employeenumber lock_customernumber lock_vendornumber clearing transition";
+"company street post_office address address1 address2 city state zip country tel fax companyemail companywebsite yearend weightunit businessnumber closedto revtrans audittrail method cdt namesbynumber xelatex typeofcontact roundchange referenceurl annualinterest latepaymentfee restockingcharge checkinventory hideaccounts linetax forcewarehouse glnumber sinumber sonumber vinumber batchnumber vouchernumber ponumber sqnumber rfqnumber partnumber projectnumber employeenumber customernumber vendornumber lock_glnumber lock_sinumber lock_sonumber lock_ponumber lock_sqnumber lock_rfqnumber lock_employeenumber lock_customernumber lock_vendornumber clearing transition paymentfile";
 
         # Save the defaults
         my $result = AM->save_defaults( $c->slconfig, $form );
@@ -6428,6 +6432,7 @@ $api->get(
         my $defaults           = $c->get_defaults($client);
         my $parts              = $c->get_items( $dbs, $client );
         my $formatted_closedto = $defaults->{closedto};
+        my $paymentfile        = $defaults->{paymentfile};
 
         if (   $formatted_closedto
             && $formatted_closedto =~ /^(\d{4})(\d{2})(\d{2})$/ )
@@ -6518,7 +6523,8 @@ $api->get(
                 connection    => $connection,
                 record        => $defaults->{ap_accno_id},
                 stations      => $stations,
-                user_stations => $user_stations
+                user_stations => $user_stations,
+                paymentfile   => $paymentfile
             };
         }
 
@@ -7865,7 +7871,6 @@ $api->get(
         $form->{id} = $id;
         $form->{vc} = $vc;
         $form->create_links( $transaction_type, $c->slconfig, $vc );
-        Dumper( warn $form );
 
 # Calculate total amount before applying multiplier to determine if it's negative
         my $total_amount   = 0;
@@ -7980,7 +7985,6 @@ $api->get(
             $payment_file =
               $dbs->query( "SELECT * FROM payments WHERE transaction_id = ?",
                 $form->{id} )->hash;
-            warn( Dumper $payment_file );
             if ($payment_file) {
                 $payment_file = 1;
             }
@@ -8017,7 +8021,9 @@ $api->get(
             files            => $files,
             station_id       => $station_id       ? $station_id       : undef,
             history          => $transfer_history ? $transfer_history : undef,
-            payment_file     => $payment_file     ? $payment_file     : 0,
+            payment_file     => $payment_file
+            ? $payment_file
+            : $form->{paymentfile},
         };
 
         # Add tax information if present
