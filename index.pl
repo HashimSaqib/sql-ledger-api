@@ -8306,7 +8306,6 @@ $api->get(
             IR->retrieve_invoice( $c->slconfig, $form );
             IR->invoice_details( $c->slconfig, $form );
         }
-        warn( Dumper $form );
         my $ml = 1;
 
         # Create payments array
@@ -8418,7 +8417,6 @@ $api->get(
           : ( 'customernumber', 'customer_id' );
 
         my $files = FM->get_files( $dbs, $c, $form );
-        warn( Dumper $form->{acc_trans} );
 
         # Build JSON response
         my $json_data = {
@@ -8580,8 +8578,6 @@ helper process_invoice => sub {
             $dbs->query( "SELECT id FROM chart WHERE accno = ?", $accno )
               ->into( my $chart_id );
             $form->{"paymentmethod_$i"} = "0--$chart_id" if defined $chart_id;
-            warn($accno);
-            warn($chart_id);
         }
     }
 
@@ -8643,6 +8639,10 @@ helper process_invoice => sub {
     }
     else {
         IR->post_invoice( $c->slconfig, $form );
+    }
+
+    if ( $ai_plugin && $invoice_type eq 'AR' && $form->{id} ) {
+        eval { $c->sync_moco_invoice_payments( $client, $form->{id} ); };
     }
 
     if ( $data->{files} && ref $data->{files} eq 'ARRAY' ) {
@@ -9010,8 +9010,6 @@ $api->post(
             );
         }
 
-        warn Dumper($form);
-
         my $result = IS->consolidate_invoices( $c->slconfig, $form );
 
         # Render the result
@@ -9078,8 +9076,6 @@ $api->get(
         $form->{year}     = $c->param('year');
         $form->{month}    = $c->param('month');
         $form->{interval} = $c->param('interval');
-
-        warn Dumper($form);
 
         RP->tax_report( $c->slconfig, $form );
 
@@ -9429,8 +9425,6 @@ $api->get(
         # Customer/Vendor filtering
         $form->{$vc} = $c->param('vc_name') || '';
 
-        warn Dumper($form);
-
         # Call the payments report function
         RP->payments( $c->slconfig, $form );
 
@@ -9590,7 +9584,6 @@ $api->get(
         $form->{vc} = $vc;
         $form->{id} = $id;
         OE->retrieve( $c->slconfig, $form );
-        warn Dumper($form);
 
         my $arap_key = $vc eq 'vendor'   ? 'AP' : 'AR';
         my $ml       = $vc eq 'customer' ? -1   : 1;
@@ -10868,7 +10861,6 @@ $api->get(
 
         RP->trial_balance( $c->slconfig, $form );
 
-        warn($form);
         $c->render( json => $form->{TB} );
 
     }
@@ -10916,7 +10908,6 @@ $api->get(
             {    # iterate using the 'hash' method
                 last if $row->{charttype} eq 'H';
                 push @child_accnos, $row->{accno};
-                warn( $row->{accno} );
             }
 
             my @combined_transactions;
@@ -10958,7 +10949,6 @@ $api->get(
 
         my $client = $c->param('client');
         my $params = $c->req->params->to_hash;
-        warn Dumper $params;
 
         my $form   = Form->new;
         my $locale = Locale->new;
@@ -11522,7 +11512,6 @@ $api->get(
         return unless $c->check_perms('reports.balance');
         my $client = $c->param('client');
         my $params = $c->req->params->to_hash;
-        warn Dumper $params;
 
         my $form   = Form->new;
         my $locale = Locale->new;
@@ -11562,7 +11551,6 @@ $api->get(
         $form->{periods} = $periods;
 
         RP->balance_sheet_periods( $c->slconfig, $form, $locale );
-        warn Dumper $form;
 
         if ( $form->{usetemplate} eq 'Y' ) {
 
@@ -11604,7 +11592,6 @@ $api->get(
                 logo                  => $logo_base64,
                 heading_level         => $form->{heading_level},
             };
-            warn Dumper $template_data;
 
             # Render using Mojolicious template
             my $html_content = $c->render_to_string(
@@ -11640,7 +11627,6 @@ $api->get(
         my $dbs = $c->dbs($client);
         $form->{dbs} = $c->dbs($client);
         my $rows = RP->alltaxes($form);
-        warn Dumper $rows;
 
         # Get all tax data and chart data in separate queries
         my $tax_lookup   = {};
