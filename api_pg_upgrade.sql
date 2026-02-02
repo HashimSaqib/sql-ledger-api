@@ -374,3 +374,6 @@ CREATE INDEX idx_notification_history_profile ON notification_history(profile_id
 CREATE INDEX idx_notification_history_subscription ON notification_history(subscription_id);
 
 INSERT INTO db_updates (version, last_update) VALUES ('013', 'Notification System');
+
+
+CREATE TABLE widget_config (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL, config JSONB NOT NULL);

@@ -3334,6 +3334,40 @@ helper check_perms => sub {
     return 0;
 };
 
+# Check if user has a specific permission without rendering a 403 error
+# Returns 1 if user has permission, 0 otherwise
+helper has_perm => sub {
+    my ( $c, $form, $permission ) = @_;
+    my $client = $c->param('client');
+
+    my $central = $c->central_dbs;
+    my $dataset =
+      $central->query( "SELECT * FROM dataset WHERE db_name = ?", $client )
+      ->hash;
+    return 0 unless $dataset && $dataset->{id};
+
+    # admin/owner bypass - they have all permissions
+    my $admin = $central->query(
+        "SELECT 1 FROM dataset_access WHERE profile_id = ? 
+         AND access_level IN ('admin','owner') AND dataset_id = ? LIMIT 1",
+        $form->{profile_id}, $dataset->{id}
+    )->array;
+    return 1 if $admin;
+
+    # check individual permissions from role
+    my $acs = $central->query(
+        "SELECT r.acs
+         FROM role r
+         JOIN dataset_access da ON r.id = da.role_id
+         WHERE da.profile_id = ? AND da.dataset_id = ?",
+        $form->{profile_id}, $dataset->{id}
+    )->hash->{acs} // '[]';
+    my $perms   = ref($acs) eq 'ARRAY' ? $acs : decode_json($acs);
+    my %allowed = map { $_ => 1 } @$perms;
+
+    return $allowed{$permission} ? 1 : 0;
+};
+
 $api->post(
     '/auth/validate_api' => sub {
         my $c       = shift;
@@ -11766,84 +11800,6 @@ $api->get(
         $c->render( json => $rows );
     }
 );
-$api->get(
-    '/reports/metrics' => sub {
-        my $c           = shift;
-        my $client      = $c->param('client');
-        my $start_date  = $c->param('start_date');     # Format: YYYY-MM-DD
-        my $end_date    = $c->param('end_date');       # Format: YYYY-MM-DD
-        my $consolidate = $c->param('consolidate');    # 'monthly' or 'daily'
-
-        # Create the DBIx::Simple handle
-        $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
-        my $dbs = $c->dbs($client);
-
-        my $period_field =
-          $consolidate eq 'monthly'
-          ? "date_trunc('month', transdate)"
-          : "transdate::date";
-
-        # Query for expenses
-        my $expenses_query = qq{
-            SELECT 
-                $period_field as period,
-                ABS(SUM(amount)) as amount
-            FROM acc_trans ac
-            JOIN chart c ON c.id = ac.chart_id
-            WHERE c.category = 'E'
-            AND transdate >= ?
-            AND transdate <= ?
-            AND amount < 0
-            GROUP BY period
-            ORDER BY period
-        };
-
-        # Query for sales
-        my $sales_query = qq{
-            SELECT 
-                $period_field as period,
-                SUM(amount) as amount
-            FROM acc_trans ac
-            JOIN chart c ON c.id = ac.chart_id
-            WHERE c.category = 'I'
-            AND transdate >= ?
-            AND transdate <= ?
-            AND amount > 0
-            GROUP BY period
-            ORDER BY period
-        };
-
-        my @results;
-
-        # Fetch and format expenses data
-        my $expenses_results =
-          $dbs->query( $expenses_query, $start_date, $end_date );
-        while ( my $row = $expenses_results->hash ) {
-            push @results,
-              {
-                period => $row->{period},
-                type   => 'expenses',
-                amount => $row->{amount}
-              };
-        }
-
-        # Fetch and format sales data
-        my $sales_results = $dbs->query( $sales_query, $start_date, $end_date );
-        while ( my $row = $sales_results->hash ) {
-            push @results,
-              {
-                period => $row->{period},
-                type   => 'sales',
-                amount => $row->{amount}
-              };
-        }
-        warn( "Expenses Results: " . Dumper( \@results ) );
-        warn( "Sales Results: " . Dumper( \@results ) );
-
-        # Return combined results
-        $c->render( json => \@results );
-    }
-);
 
 #########################
 ####                 ####
@@ -14019,4 +13975,203 @@ $api->post(
               { success => 1, message => "Onboarding updated successfully" } );
     }
 );
+
+#########################
+####                 ####
+####  DASHBOARD      ####
+####  WIDGETS        ####
+####                 ####
+#########################
+
+$api->get(
+    '/dashboard/widgets' => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+        return unless my $form = $c->check_perms("dashboard");
+        my $dbs    = $c->dbs($client);
+        my $params = $c->req->params->to_hash;
+
+        # Get widget config for the user (can be empty)
+        my $widget_config = $dbs->query(
+            "SELECT config FROM widget_config WHERE user_id = ?",
+            $form->{profile_id}
+        )->hash;
+
+        my $config = $widget_config ? $widget_config->{config} : {};
+
+        my $response = { config => $config };
+
+        # Check if user has customer.overview permission
+        if ( $c->has_perm( $form, 'customer.overview' ) ) {
+            $response->{customer_overview} =
+              $c->get_overview_data( $dbs, 'customer', $params );
+        }
+
+        # Check if user has vendor.overview permission
+        if ( $c->has_perm( $form, 'vendor.overview' ) ) {
+            $response->{vendor_overview} =
+              $c->get_overview_data( $dbs, 'vendor', $params );
+        }
+
+        # Check if ai_plugin is enabled and user has stations.get permission
+        if ( $ai_plugin && $c->has_perm( $form, 'stations.get' ) ) {
+            $response->{workflow_pending} =
+              $c->get_workflow_pending_invoices( $dbs, $form, $client );
+        }
+
+        $c->render( json => $response );
+    }
+);
+
+# Helper to get overview data (reused from /arap/overview/:vc logic)
+helper get_overview_data => sub {
+    my ( $c, $dbs, $vc, $params ) = @_;
+    $params //= {};
+
+    my $table = ( $vc eq 'customer' ) ? 'ar' : 'ap';
+
+    my $query = qq|
+        SELECT
+            a.id,
+            a.invnumber AS invnum,
+            a.${vc}_id AS vc_id,
+            vc.name AS vc_name,
+            a.transdate,
+            a.duedate,
+            a.amount AS totalamount,
+            a.paid AS amountpaid,
+            a.description,
+            a.invoice
+        FROM $table a
+        JOIN $vc vc ON (a.${vc}_id = vc.id)
+        WHERE a.approved = '1'
+    |;
+
+    my @binds;
+
+    if ( $params->{transdatefrom} ) {
+        $query .= " AND a.transdate >= ?";
+        push @binds, $params->{transdatefrom};
+    }
+    if ( $params->{transdateto} ) {
+        $query .= " AND a.transdate <= ?";
+        push @binds, $params->{transdateto};
+    }
+    if ( $params->{"${vc}_id"} ) {
+        $query .= " AND a.${vc}_id = ?";
+        push @binds, $params->{"${vc}_id"};
+    }
+    if ( $params->{$vc} ) {
+        $query .= " AND lower(vc.name) LIKE lower(?)";
+        push @binds, "%" . $params->{$vc} . "%";
+    }
+    if ( $params->{invnumber} ) {
+        $query .= " AND lower(a.invnumber) LIKE lower(?)";
+        push @binds, "%" . $params->{invnumber} . "%";
+    }
+    if ( $params->{description} ) {
+        $query .= " AND lower(a.description) LIKE lower(?)";
+        push @binds, "%" . $params->{description} . "%";
+    }
+
+    $query .= " ORDER BY a.transdate DESC";
+
+    my $rows = $dbs->query( $query, @binds )->hashes;
+
+    my $summary = {
+        transactions => {
+            open     => { no => 0, amount => 0, transactions => [] },
+            closed   => { no => 0, amount => 0, transactions => [] },
+            overdue  => { no => 0, amount => 0, transactions => [] },
+            overpaid => { no => 0, amount => 0, transactions => [] },
+        }
+    };
+
+    my ( $sec, $min, $hour, $mday, $mon, $year ) = localtime();
+    my $today = sprintf( "%04d-%02d-%02d", $year + 1900, $mon + 1, $mday );
+
+    foreach my $r (@$rows) {
+        my $amount           = $r->{totalamount} // 0;
+        my $paid             = $r->{amountpaid}  // 0;
+        my $status           = 'open';
+        my $remaining_amount = 0;
+
+        if ( abs($paid) > abs($amount) ) {
+            $status = 'overpaid';
+            $remaining_amount = abs($paid) - abs($amount);
+        }
+        elsif ( abs($paid) == abs($amount) ) {
+            $status           = 'closed';
+            $remaining_amount = abs($amount);
+        }
+        else {
+            $remaining_amount = abs($amount) - abs($paid);
+
+            if ( $r->{duedate} && $r->{duedate} lt $today ) {
+                $status = 'overdue';
+            }
+            else {
+                $status = 'open';
+            }
+        }
+
+        $summary->{transactions}->{$status}->{no}++;
+        $summary->{transactions}->{$status}->{amount} += $remaining_amount;
+
+        $r->{status}           = $status;
+        $r->{remaining_amount} = $remaining_amount;
+
+        push @{ $summary->{transactions}->{$status}->{transactions} }, $r;
+    }
+
+    return $summary;
+};
+
+$api->post(
+    '/dashboard/widgets' => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+        return unless my $form = $c->check_perms("dashboard");
+        my $dbs  = $c->dbs($client);
+        my $data = $c->req->json;
+
+        unless ( $data && ref($data) eq 'HASH' ) {
+            return $c->render(
+                status => 400,
+                json   => { error => 'Invalid request body. Expected JSON object.' }
+            );
+        }
+
+        # Check if config already exists for this user
+        my $existing = $dbs->query(
+            "SELECT id FROM widget_config WHERE user_id = ?",
+            $form->{profile_id}
+        )->hash;
+
+        if ($existing) {
+            # Update existing config
+            $dbs->query(
+                "UPDATE widget_config SET config = ? WHERE user_id = ?",
+                encode_json( $data->{config} // {} ),
+                $form->{profile_id}
+            );
+        }
+        else {
+            # Insert new config
+            $dbs->query(
+                "INSERT INTO widget_config (user_id, config) VALUES (?, ?)",
+                $form->{profile_id},
+                encode_json( $data->{config} // {} )
+            );
+        }
+
+        $c->render(
+            json => {
+                success => 1,
+                message => "Widget configuration saved successfully"
+            }
+        );
+    }
+);
+
 app->start;
