@@ -1,0 +1,1 @@
+CREATE TABLE widget_config (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL, config JSONB NOT NULL);
