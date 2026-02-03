@@ -8012,6 +8012,7 @@ $api->get(
         my $station_id;
         my $transfer_history;
         my $payment_file;
+        my $payment_amount;
         if ( $vc eq 'vendor' && $ai_plugin ) {
             my $station_info = $c->invoice_station_info( $form->{id} );
             $station_id       = $station_info->{station_id};
@@ -8021,6 +8022,15 @@ $api->get(
                 $form->{id} )->hash;
             if ($payment_file) {
                 $payment_file = 1;
+            }
+            my $ap_row =
+              $dbs->query( "SELECT external_info FROM ap WHERE id = ?",
+                $form->{id} )->hash;
+            if ( $ap_row && $ap_row->{external_info} ) {
+                my $info =
+                  eval { decode_json( $ap_row->{external_info} ) } || {};
+                $payment_amount = $info->{payment_amount}
+                  if defined $info->{payment_amount};
             }
         }
 
@@ -8058,6 +8068,7 @@ $api->get(
             payment_file     => $payment_file
             ? $payment_file
             : $form->{paymentfile},
+            payment_amount => $payment_amount,
         };
 
         # Add tax information if present
@@ -8242,9 +8253,11 @@ helper process_transaction => sub {
         }
     }
 
+    my $payment_amount = $data->{payment_amount} || 0;
+
     if ( $ai_plugin && $vc eq 'vendor' ) {
         if ( $data->{payment_file} ) {
-            $c->add_payment( $form->{id}, $dbs );
+            $c->add_payment( $form->{id}, $dbs, $payment_amount );
         }
     }
 
@@ -13992,10 +14005,9 @@ $api->get(
         my $params = $c->req->params->to_hash;
 
         # Get widget config for the user (can be empty)
-        my $widget_config = $dbs->query(
-            "SELECT config FROM widget_config WHERE user_id = ?",
-            $form->{profile_id}
-        )->hash;
+        my $widget_config =
+          $dbs->query( "SELECT config FROM widget_config WHERE user_id = ?",
+            $form->{profile_id} )->hash;
 
         my $config = $widget_config ? $widget_config->{config} : {};
 
@@ -14097,7 +14109,7 @@ helper get_overview_data => sub {
         my $remaining_amount = 0;
 
         if ( abs($paid) > abs($amount) ) {
-            $status = 'overpaid';
+            $status           = 'overpaid';
             $remaining_amount = abs($paid) - abs($amount);
         }
         elsif ( abs($paid) == abs($amount) ) {
@@ -14138,17 +14150,18 @@ $api->post(
         unless ( $data && ref($data) eq 'HASH' ) {
             return $c->render(
                 status => 400,
-                json   => { error => 'Invalid request body. Expected JSON object.' }
+                json   =>
+                  { error => 'Invalid request body. Expected JSON object.' }
             );
         }
 
         # Check if config already exists for this user
-        my $existing = $dbs->query(
-            "SELECT id FROM widget_config WHERE user_id = ?",
-            $form->{profile_id}
-        )->hash;
+        my $existing =
+          $dbs->query( "SELECT id FROM widget_config WHERE user_id = ?",
+            $form->{profile_id} )->hash;
 
         if ($existing) {
+
             # Update existing config
             $dbs->query(
                 "UPDATE widget_config SET config = ? WHERE user_id = ?",
@@ -14160,9 +14173,7 @@ $api->post(
             # Insert new config
             $dbs->query(
                 "INSERT INTO widget_config (user_id, config) VALUES (?, ?)",
-                $form->{profile_id},
-                encode_json( $data->{config} // {} )
-            );
+                $form->{profile_id}, encode_json( $data->{config} // {} ) );
         }
 
         $c->render(
