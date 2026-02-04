@@ -1,5 +1,12 @@
 %%% Defines the header section of the template %%%
 
+% Logo at top-left (only if logo.png exists in the template folder)
+\IfFileExists{../<%templates%>/logo.png}{%
+  \begin{textblock*}{5cm}(1.8cm,1.0cm)%
+  \includegraphics[width=5cm,height=1.5cm,keepaspectratio]{../<%templates%>/logo.png}%
+  \end{textblock*}%
+}{}
+
 % Place of the address block:
 \ifthenelse{\equal{\Addressblock}{left}}{\begin{textblock*}{6.5cm}(11.85cm,6.10cm)}{}
 \ifthenelse{\equal{\Addressblock}{pingenleft}}{\begin{textblock*}{6.5cm}(11.85cm,6.10cm)}{}
