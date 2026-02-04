@@ -8735,10 +8735,14 @@ helper generate_invoice_pdf => sub {
     my $defaults  = $c->get_defaults();
 
     # get the transdate from the invoice for folder structure
+    # accept both yyyy-mm-dd (ISO) and dd-mm-yyyy (display format from build_invoice)
     my $transdate = $form->{invdate} || $form->{transdate};
     my ( $year, $month );
     if ( $transdate && $transdate =~ /^(\d{4})-(\d{2})-\d{2}$/ ) {
         ( $year, $month ) = ( $1, $2 );
+    }
+    elsif ( $transdate && $transdate =~ /^(\d{1,2})-(\d{1,2})-(\d{4})$/ ) {
+        ( $year, $month ) = ( $3, sprintf( "%02d", $2 ) );
     }
     else {
         my @lt = localtime;
@@ -12194,6 +12198,26 @@ sub build_invoice {
     }
     else {
         IR->invoice_details( $c->slconfig, $form );
+    }
+
+    # Format dates as dd-mm-yyyy for display (Form's format_date expects yyyymmdd)
+    my $fmt_dd_mm_yyyy = sub {
+        my ($d) = @_;
+        return '' unless $d;
+        my $yyyymmdd = $d;
+        $yyyymmdd =~ s/-//g;
+        return $d unless $yyyymmdd =~ /^\d{8}$/;
+        return $form->format_date( 'dd-mm-yyyy', $yyyymmdd );
+    };
+    for my $field (qw(invdate transdate duedate)) {
+        if ( $form->{$field} ) {
+            $form->{$field} = $fmt_dd_mm_yyyy->( $form->{$field} );
+        }
+    }
+    for my $i ( 1 .. $form->{rowcount} - 1 ) {
+        if ( $form->{"deliverydate_$i"} ) {
+            $form->{"deliverydate_$i"} = $fmt_dd_mm_yyyy->( $form->{"deliverydate_$i"} );
+        }
     }
 
     my $credit_remaining = $dbs->query(
