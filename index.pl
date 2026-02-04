@@ -8707,17 +8707,24 @@ helper process_invoice => sub {
 helper generate_invoice_pdf => sub {
     my ( $c, $client, $invoice_id, $vc, $template, $format ) = @_;
 
-    $template ||= 'invoice';
-    $format   ||= 'tex';
+    $template = 'invoice';
+    $format   = 'tex';
 
     my $dbs = $c->dbs($client);
     $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
 
     my $form = Form->new;
     $form->{vc} = $vc;
+    if ( $vc eq 'vendor' ) {
+        $template = 'vendor_invoice';
+    }
+
     $form->{id} = $invoice_id;
 
     build_invoice( $c, $client, $form, $dbs );
+    if ( $form->{type} eq 'credit_invoice' ) {
+        $template = 'credit_invoice';
+    }
 
     $form->{lastpage}          = 0;
     $form->{sumcarriedforward} = 0;
@@ -12271,7 +12278,7 @@ sub build_invoice {
     $form->{display_credit_before} = $display_credit_before;
     $form->{credit_before}         = $credit_before;
 
-    my $format = $c->param("format");
+    my $format = $c->param("format") || 'tex';
     if ( $format eq 'tex' ) {
 
         my @escape_fields = qw(
