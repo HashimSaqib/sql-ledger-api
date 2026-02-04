@@ -8698,8 +8698,8 @@ helper process_invoice => sub {
         FM->upload_files( $dbs, $c, $form, $vc );
     }
 
-    # generate and store the invoice PDF
-    $c->generate_invoice_pdf( $client, $form->{id}, $vc, 'invoice', 'tex' );
+# generate and store the invoice PDF using the correct template for this document type
+    $c->generate_invoice_pdf( $client, $form->{id}, $vc, $form->{type}, 'tex' );
 
     return $form->{id};
 };
