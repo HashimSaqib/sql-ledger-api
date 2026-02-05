@@ -4696,7 +4696,9 @@ $api->get(
                 sort_names_by_number => to_boolean( $form->{namesbynumber} ),
                 xe_latex             => to_boolean( $form->{xelatex} ),
                 type_of_contact      => $form->{typeofcontact} || "",
-                paymentfile          => $form->{paymentfile}   || 0
+                paymentfile          => $form->{paymentfile}   || 0,
+                term_days              => $form->{term_days}           || 0
+               
             },
 
             account_defaults => {
@@ -4859,6 +4861,7 @@ $api->post(
             $mapped_data->{typeofcontact} =
               $json_data->{settings}->{type_of_contact};
             $mapped_data->{paymentfile} = $json_data->{settings}->{paymentfile};
+            $mapped_data->{term_days} = $json_data->{settings}->{term_days};
         }
 
  # Map account defaults (these appear to be ID values only in the old structure)
@@ -4925,7 +4928,7 @@ $api->post(
         warn( Dumper $form );
 
         $form->{optional} =
-"company street post_office address address1 address2 city state zip country tel fax companyemail companywebsite yearend weightunit businessnumber closedto revtrans audittrail method cdt namesbynumber xelatex typeofcontact roundchange referenceurl annualinterest latepaymentfee restockingcharge checkinventory hideaccounts linetax forcewarehouse glnumber sinumber sonumber vinumber batchnumber vouchernumber ponumber sqnumber rfqnumber partnumber projectnumber employeenumber customernumber vendornumber lock_glnumber lock_sinumber lock_sonumber lock_ponumber lock_sqnumber lock_rfqnumber lock_employeenumber lock_customernumber lock_vendornumber clearing transition paymentfile";
+"company street post_office address address1 address2 city state zip country tel fax companyemail companywebsite yearend weightunit businessnumber closedto revtrans audittrail method cdt namesbynumber xelatex typeofcontact roundchange referenceurl annualinterest latepaymentfee restockingcharge checkinventory hideaccounts linetax forcewarehouse glnumber sinumber sonumber vinumber batchnumber vouchernumber ponumber sqnumber rfqnumber partnumber projectnumber employeenumber customernumber vendornumber lock_glnumber lock_sinumber lock_sonumber lock_ponumber lock_sqnumber lock_rfqnumber lock_employeenumber lock_customernumber lock_vendornumber clearing transition paymentfile term_days";
 
         # Save the defaults
         my $result = AM->save_defaults( $c->slconfig, $form );
@@ -6521,7 +6524,8 @@ $api->get(
                 revtrans     => $defaults->{revtrans},
                 closedto     => $formatted_closedto,
                 connection   => $connection,
-                record       => $defaults->{ar_accno_id}
+                record       => $defaults->{ar_accno_id},
+                term_days => $defaults->{term_days} || 0
             };
         }
 
@@ -6558,7 +6562,8 @@ $api->get(
                 record        => $defaults->{ap_accno_id},
                 stations      => $stations,
                 user_stations => $user_stations,
-                paymentfile   => $paymentfile
+                paymentfile   => $paymentfile,
+                term_days     => $defaults->{term_days} || 0
             };
         }
 
@@ -8734,8 +8739,8 @@ helper generate_invoice_pdf => sub {
     my $userspath = "tmp";
     my $defaults  = $c->get_defaults();
 
-    # get the transdate from the invoice for folder structure
-    # accept both yyyy-mm-dd (ISO) and dd-mm-yyyy (display format from build_invoice)
+# get the transdate from the invoice for folder structure
+# accept both yyyy-mm-dd (ISO) and dd-mm-yyyy (display format from build_invoice)
     my $transdate = $form->{invdate} || $form->{transdate};
     my ( $year, $month );
     if ( $transdate && $transdate =~ /^(\d{4})-(\d{2})-\d{2}$/ ) {
@@ -12200,7 +12205,7 @@ sub build_invoice {
         IR->invoice_details( $c->slconfig, $form );
     }
 
-    # Format dates as dd-mm-yyyy for display (Form's format_date expects yyyymmdd)
+  # Format dates as dd-mm-yyyy for display (Form's format_date expects yyyymmdd)
     my $fmt_dd_mm_yyyy = sub {
         my ($d) = @_;
         return '' unless $d;
@@ -12216,7 +12221,8 @@ sub build_invoice {
     }
     for my $i ( 1 .. $form->{rowcount} - 1 ) {
         if ( $form->{"deliverydate_$i"} ) {
-            $form->{"deliverydate_$i"} = $fmt_dd_mm_yyyy->( $form->{"deliverydate_$i"} );
+            $form->{"deliverydate_$i"} =
+              $fmt_dd_mm_yyyy->( $form->{"deliverydate_$i"} );
         }
     }
 
@@ -14032,8 +14038,34 @@ $api->get(
         my $c      = shift;
         my $client = $c->param('client');
         return unless my $form = $c->check_perms("dashboard");
-        my $dbs    = $c->dbs($client);
-        my $params = $c->req->params->to_hash;
+        my $dbs           = $c->dbs($client);
+        my $params        = $c->req->params->to_hash;
+        my $bank_accounts = $dbs->query(
+            "SELECT c.id, c.accno, c.description, c.closed,
+                 bk.name, bk.iban
+                 FROM chart c
+                 LEFT JOIN bank bk ON (bk.id = c.id)
+                 WHERE c.link LIKE '%_paid%'
+                 ORDER BY 2"
+        )->hashes;
+
+        # Single query for all acc_trans for these bank accounts (uses acc_trans_chart_id_key)
+        my $acc_trans_rows = $dbs->query(
+            "SELECT chart_id, (amount * -1) AS amount, transdate, approved
+                 FROM acc_trans
+                 WHERE chart_id IN (
+                     SELECT c.id FROM chart c WHERE c.link LIKE '%_paid%'
+                 )
+                AND approved = '1' ORDER BY chart_id, transdate DESC"
+        )->hashes;
+
+        my %acc_trans_by_chart;
+        for my $row ( @{$acc_trans_rows} ) {
+            push @{ $acc_trans_by_chart{ $row->{chart_id} } }, $row;
+        }
+        for my $account ( @{$bank_accounts} ) {
+            $account->{acc_trans} = $acc_trans_by_chart{ $account->{id} } // [];
+        }
 
         # Get widget config for the user (can be empty)
         my $widget_config =
@@ -14060,6 +14092,10 @@ $api->get(
         if ( $ai_plugin && $c->has_perm( $form, 'stations.get' ) ) {
             $response->{workflow_pending} =
               $c->get_workflow_pending_invoices( $dbs, $form, $client );
+        }
+
+        if ( $c->has_perm( $form, 'gl.transactions' ) ) {
+            $response->{bank_accounts} = $bank_accounts;
         }
 
         $c->render( json => $response );
