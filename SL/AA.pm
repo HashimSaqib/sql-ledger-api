@@ -133,6 +133,8 @@ sub post_transaction {
       $project_id ||= 'NULL';
       ($accno) = split /--/, $form->{"${ARAP}_amount_$i"};
 
+      next unless $accno;
+
       if ($keepcleared) {
         $cleared = $form->dbquote($form->{"cleared_$i"}, SQL_DATE);
       }
