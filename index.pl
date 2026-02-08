@@ -4697,8 +4697,8 @@ $api->get(
                 xe_latex             => to_boolean( $form->{xelatex} ),
                 type_of_contact      => $form->{typeofcontact} || "",
                 paymentfile          => $form->{paymentfile}   || 0,
-                term_days              => $form->{term_days}           || 0
-               
+                term_days            => $form->{term_days}     || 0
+
             },
 
             account_defaults => {
@@ -4861,7 +4861,7 @@ $api->post(
             $mapped_data->{typeofcontact} =
               $json_data->{settings}->{type_of_contact};
             $mapped_data->{paymentfile} = $json_data->{settings}->{paymentfile};
-            $mapped_data->{term_days} = $json_data->{settings}->{term_days};
+            $mapped_data->{term_days}   = $json_data->{settings}->{term_days};
         }
 
  # Map account defaults (these appear to be ID values only in the old structure)
@@ -6525,7 +6525,7 @@ $api->get(
                 closedto     => $formatted_closedto,
                 connection   => $connection,
                 record       => $defaults->{ar_accno_id},
-                term_days => $defaults->{term_days} || 0
+                term_days    => $defaults->{term_days} || 0
             };
         }
 
@@ -7964,8 +7964,6 @@ $api->get(
         # Create payments array
         my @payments;
 
-        warn( Dumper $form );
-
         # Check if payments exist
         if ( defined $form->{acc_trans}{"${transaction_type}_paid"}
             && ref( $form->{acc_trans}{"${transaction_type}_paid"} ) eq
@@ -8231,6 +8229,10 @@ helper process_transaction => sub {
 
     }
 
+    my $default_curr_result = $dbs->query("SELECT curr FROM curr WHERE rn = 1");
+    my $default_curr_row    = $default_curr_result->hash;
+    $form->{defaultcurrency} = $default_curr_row ? $default_curr_row->{curr} : $form->{currency};
+
     # Post the transaction
     eval { AA->post_transaction( $c->slconfig, $form ); } or do {
         warn( Dumper $form );
@@ -8359,6 +8361,7 @@ $api->get(
             IR->invoice_details( $c->slconfig, $form );
         }
         my $ml = 1;
+        my $qty_ml = 1;
 
         # Create payments array
         my @payments;
@@ -8366,8 +8369,23 @@ $api->get(
         # For AR-paid or AP-paid, the key is the same pattern:
         #   AR_paid or AP_paid in the acc_trans hash.
         my $paid_key = $arap_key . '_paid';
-
         if ( $vc eq 'customer' ) { $ml = -1; }
+
+        if ( $form->{type} eq 'invoice' ) {
+            return unless $c->check_perms("$vc.invoice");
+        }
+        else { return unless $c->check_perms("$vc.invoice.return"); }
+        if (
+            $form->{type}
+            && (   $form->{type} eq 'credit_invoice'
+                || $form->{type} eq 'debit_invoice' )
+          )
+        {
+            $ml = $ml *-1;
+        }
+        if ( $form->{type} eq 'credit_invoice') {
+            $qty_ml = -1;
+        }
 
         if ( defined $form->{acc_trans}{$paid_key}
             && ref $form->{acc_trans}{$paid_key} eq 'ARRAY' )
@@ -8388,22 +8406,6 @@ $api->get(
             }
         }
 
-        if ( $form->{type} eq 'invoice' ) {
-            return unless $c->check_perms("$vc.invoice");
-        }
-        else { return unless $c->check_perms("$vc.invoice.return"); }
-        if (
-            $form->{type}
-            && (   $form->{type} eq 'credit_invoice'
-                || $form->{type} eq 'debit_invoice' )
-          )
-        {
-            $ml = -1;
-        }
-        else {
-            $ml = 1;
-        }
-
       # Build line items
       # (The same structure should come out of invoice_details whether AR or AP)
         my @lines;
@@ -8413,7 +8415,7 @@ $api->get(
                     id          => $_->{id},
                     partnumber  => $_->{partnumber},
                     description => $_->{description},
-                    qty         => $_->{qty} * $ml,
+                    qty         => $_->{qty} * $qty_ml,
                     onhand      => $_->{onhand},
                     unit        => $_->{unit},
                     price       => $_->{fxsellprice}
@@ -14049,7 +14051,7 @@ $api->get(
                  ORDER BY 2"
         )->hashes;
 
-        # Single query for all acc_trans for these bank accounts (uses acc_trans_chart_id_key)
+# Single query for all acc_trans for these bank accounts (uses acc_trans_chart_id_key)
         my $acc_trans_rows = $dbs->query(
             "SELECT chart_id, (amount * -1) AS amount, transdate, approved
                  FROM acc_trans
