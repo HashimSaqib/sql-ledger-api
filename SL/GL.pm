@@ -226,7 +226,9 @@ sub post_transaction {
       $amount = $debit * -1;
     }
     if ($form->{"source_$i"}) {
-      $dist_amounts{$form->{"source_$i"}} += $amount;
+      my $abs = abs($amount);
+      $dist_amounts{$form->{"source_$i"}} = $abs
+        if $abs > ($dist_amounts{$form->{"source_$i"}} || 0);
     }
     # add the record
     (undef, $project_id) = split /--/, $form->{"projectnumber_$i"};
