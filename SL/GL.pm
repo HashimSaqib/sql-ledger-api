@@ -178,6 +178,9 @@ sub post_transaction {
 
   $form->{exchangerate} = $form->parse_amount($myconfig, $form->{exchangerate}) || 1;
 
+  $form->{taxincluded} = ( $form->{taxincluded} && $form->{taxincluded} !~ /^(0|f|false)$/i ) ? 1 : 0;
+  my $taxincluded_sql = $form->{taxincluded} ? "'true'" : "'false'";
+
   $query = qq|UPDATE gl SET 
 	      reference = |.$dbh->quote($form->{reference}).qq|,
 	      description = |.$dbh->quote($form->{description}).qq|,
@@ -185,7 +188,8 @@ sub post_transaction {
 	      transdate = '$form->{transdate}',
 	      department_id = $department_id,
 	      curr = '$form->{currency}',
-	      exchangerate = $form->{exchangerate}
+	      exchangerate = $form->{exchangerate},
+	      taxincluded = $taxincluded_sql
 	      WHERE id = $form->{id}|;
   $dbh->do($query) || $form->dberror($query);
 
@@ -217,13 +221,24 @@ sub post_transaction {
 
     # extract accno
     ($accno) = split(/--/, $form->{"accno_$i"});
-    
+    ( $tax_accno, $null ) = split /--/, $form->{"tax_$i"};
+    ($tax_chart_id) = $dbh->selectrow_array("SELECT id FROM chart WHERE accno = '$tax_accno'");
+    $tax_chart_id *= 1;
+
     if ($credit) {
       $amount = $credit;
       $bramount += $form->round_amount($amount * $form->{exchangerate}, $form->{precision});
     }
     if ($debit) {
       $amount = $debit * -1;
+    }
+    # If taxincluded, subtract tax from the line amount before storing in acc_trans
+    if ($form->{taxincluded} && $tax_chart_id && $linetaxamount) {
+      if ($credit) {
+        $amount = $form->round_amount($credit - $linetaxamount, $form->{precision});
+      } else {
+        $amount = -$form->round_amount($debit - $linetaxamount, $form->{precision});
+      }
     }
     if ($form->{"source_$i"}) {
       my $abs = abs($amount);
@@ -244,10 +259,6 @@ sub post_transaction {
     
     if ($amount || $form->{"source_$i"} || $form->{"memo_$i"} || ($project_id ne 'NULL')) {
 
-      ( $tax_accno, $null ) = split /--/, $form->{"tax_$i"};
-      ($tax_chart_id) = $dbh->selectrow_array("SELECT id FROM chart WHERE accno = '$tax_accno'");
-      $tax_chart_id *= 1;
-
       $query = qq|INSERT INTO acc_trans (trans_id, chart_id, amount, transdate,
 		  source, fx_transaction, project_id, memo, cleared, approved, tax_chart_id, linetaxamount)
       VALUES
@@ -260,6 +271,19 @@ sub post_transaction {
 		  $project_id, |.$dbh->quote($form->{"memo_$i"}).qq|,
 		  $cleared, '$approved', $tax_chart_id, $linetaxamount)|;
       $dbh->do($query) || $form->dberror($query);
+
+      # For each linetax with a tax account and linetaxamount, add an additional acc_trans line for the tax
+      if ($tax_chart_id && $linetaxamount) {
+        my $tax_line_amount = $credit ? $linetaxamount : -$linetaxamount;
+        $query = qq|INSERT INTO acc_trans (trans_id, chart_id, amount, transdate,
+		  source, fx_transaction, project_id, memo, cleared, approved, tax_chart_id, linetaxamount)
+		  VALUES
+		  ($form->{id}, $tax_chart_id, $tax_line_amount, '$form->{transdate}', |
+		  .$dbh->quote($form->{"source_$i"}).qq|,
+		  '0', $project_id, |.$dbh->quote($form->{"memo_$i"}).qq|,
+		  $cleared, '$approved', 0, 0)|;
+        $dbh->do($query) || $form->dberror($query);
+      }
 
       if ($form->{currency} ne $form->{defaultcurrency}) {
 
@@ -1032,21 +1056,40 @@ sub transaction {
     $form->{currency} = $form->{curr};
     $sth->finish;
   
-    # retrieve individual rows
+    # retrieve individual rows in insertion order (ac.id) so tax-only lines follow their main line
     $query = qq|SELECT ac.*, c.accno, c.description, p.projectnumber,
-                    l.description AS translation, tc.accno tax_accno, tc.description tax_description
+                    l.description AS translation, tc.accno tax_accno, tc.description tax_description,
+                    (SELECT chart_id FROM tax WHERE chart_id = ac.chart_id LIMIT 1) AS tax_table_chart_id
 	        FROM acc_trans ac
 	        JOIN chart c ON (ac.chart_id = c.id)
 	        LEFT JOIN project p ON (p.id = ac.project_id)
 		LEFT JOIN translation l ON (l.trans_id = c.id AND l.language_code = '$myconfig->{countrycode}')
         LEFT JOIN chart tc ON tc.id = ac.tax_chart_id
 	        WHERE ac.trans_id = $form->{id}
-	        ORDER BY c.accno|;
+	        ORDER BY ac.id|;
     $sth = $dbh->prepare($query);
     $sth->execute || $form->dberror($query);
-    
+
+    my $taxincluded = $form->{taxincluded} ? 1 : 0;
     while ($ref = $sth->fetchrow_hashref(NAME_lc)) {
+      # Tax-only line: tax_chart_id is 0, linetaxamount is 0, and this chart is a tax account (from tax table).
+      # These were inserted as separate acc_trans rows for the tax; skip them so we don't duplicate lines.
+      my $is_tax_only = ( !$ref->{tax_chart_id} || $ref->{tax_chart_id} == 0 )
+        && ( !defined $ref->{linetaxamount} || $ref->{linetaxamount} == 0 )
+        && $ref->{tax_table_chart_id};
+      if ($is_tax_only) {
+        next;
+      }
       $ref->{description} = $ref->{translation} if $ref->{translation};
+      # When taxincluded, we stored net amount (debit/credit minus tax); add tax back for display
+      if ($taxincluded && $ref->{tax_chart_id} && $ref->{linetaxamount}) {
+        my $linetax = $form->round_amount($ref->{linetaxamount}, $form->{precision});
+        if ($ref->{amount} > 0) {
+          $ref->{amount} = $form->round_amount($ref->{amount} + $linetax, $form->{precision});
+        } else {
+          $ref->{amount} = $form->round_amount($ref->{amount} - $linetax, $form->{precision});
+        }
+      }
       push @gl, $ref;
       if ($ref->{fx_transaction}) {
 	$fxdr += $ref->{amount} if $ref->{amount} < 0;

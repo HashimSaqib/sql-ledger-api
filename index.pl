@@ -3843,6 +3843,16 @@ $api->get(
             $form->{id} )->list;
         my $offset_accno = $dbs->query( "SELECT accno FROM chart WHERE id = ?",
             $offset_account_id )->list;
+        my $offset_tax_id =
+          $dbs->query( "SELECT offset_tax_id FROM gl WHERE id = ?",
+            $form->{id} )->list;
+        my $offset_tax_accno = undef;
+        if ($offset_tax_id) {
+            $offset_tax_accno = $dbs->query(
+                "SELECT c.accno FROM tax t JOIN chart c ON c.id = t.chart_id WHERE t.id = ?",
+                $offset_tax_id
+            )->list;
+        }
         my $response = {
             id            => $form->{id},
             reference     => $form->{reference},
@@ -3860,7 +3870,9 @@ $api->get(
             lines         => \@lines,
             files         => $files,
             offset_accno  => $offset_accno,
-            pending       => $form->{approved} ? 0 : 1
+            offset_tax_accno => $offset_tax_accno,
+            pending       => $form->{approved} ? 0 : 1,
+            taxincluded   => $form->{taxincluded} ? 1 : 0
         };
 
         $c->render( status => 200, json => $response );
@@ -4163,12 +4175,15 @@ helper api_gl_transaction => sub {
     $form->{defaultcurrency} = $default_currency;
     $form->{pending}         = $data->{pending} ? 1 : 0;
     $form->{login}           = $data->{login};
+    $form->{taxincluded}     = $data->{taxincluded} ? 1 : 0;
 
     my $total_debit       = 0;
     my $total_credit      = 0;
     my $i                 = 1;
     my $offset_accno      = $data->{offset_accno};
     my $offset_account_id = undef;
+    my $offset_tax_accno  = $data->{offset_tax_accno};
+    my $offset_tax_id     = undef;
 
     # Validate offset account if provided
     if ($offset_accno) {
@@ -4184,6 +4199,33 @@ helper api_gl_transaction => sub {
             );
         }
         $offset_account_id = $offset_acc_result->hash->{id};
+    }
+
+    # Validate offset tax account if provided (resolve accno -> tax id at transdate)
+    if ($offset_tax_accno) {
+        my $offset_tax_result = $dbs->query(
+            q{
+              SELECT t.id
+                FROM tax t
+                JOIN chart c ON c.id = t.chart_id
+               WHERE c.accno = ?
+                 AND (t.validto IS NULL OR t.validto >= ?)
+            ORDER BY COALESCE(t.validto, '9999-12-31') ASC
+               LIMIT 1
+            },
+            $offset_tax_accno,
+            $transdate
+        );
+        unless ( $offset_tax_result->rows ) {
+            return (
+                400,
+                {
+                    message =>
+"Offset tax account with the accno $offset_tax_accno does not exist or has no tax effective at transdate."
+                }
+            );
+        }
+        $offset_tax_id = $offset_tax_result->hash->{id};
     }
 
     foreach my $line ( @{ $data->{lines} } ) {
@@ -4243,8 +4285,15 @@ helper api_gl_transaction => sub {
             }
 
             $form->{"accno_$i"}         = $offset_accno;
-            $form->{"tax_$i"}           = 0;
-            $form->{"linetaxamount_$i"} = 0;
+            if ($offset_tax_accno) {
+                $form->{"tax_$i"}           = $offset_tax_accno;
+                $form->{"linetaxamount_$i"} =
+                  calc_line_tax( $dbs, $transdate, $amount, $offset_tax_accno );
+            }
+            else {
+                $form->{"tax_$i"}           = 0;
+                $form->{"linetaxamount_$i"} = 0;
+            }
             $form->{"cleared_$i"}       = $line->{cleared};
             $form->{"memo_$i"}          = $line->{memo};
             $form->{"source_$i"}        = $line->{source};
@@ -4278,8 +4327,9 @@ helper api_gl_transaction => sub {
     }
 
     if ( $form->{id} ) {
-        my $update_sql = "UPDATE gl SET offset_account_id = ? WHERE id = ?";
-        $dbs->query( $update_sql, $offset_account_id, $form->{id} );
+        my $update_sql =
+          "UPDATE gl SET offset_account_id = ?, offset_tax_id = ? WHERE id = ?";
+        $dbs->query( $update_sql, $offset_account_id, $offset_tax_id, $form->{id} );
 
         my @sources =
           map { $_->{source} } grep { $_->{source} } @{ $data->{lines} };
