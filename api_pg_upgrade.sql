@@ -375,5 +375,10 @@ CREATE INDEX idx_notification_history_subscription ON notification_history(subsc
 
 INSERT INTO db_updates (version, last_update) VALUES ('013', 'Notification System');
 
-
 CREATE TABLE widget_config (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL, config JSONB NOT NULL);
+INSERT INTO db_updates (version, last_update) VALUES ('014', 'Widgets');
+
+ALTER TABLE gl ADD COLUMN taxincluded BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE gl ADD COLUMN offset_tax_id INTEGER;
+
+INSERT INTO db_updates (version, last_update) VALUES ('015', 'GL Line Tax');
