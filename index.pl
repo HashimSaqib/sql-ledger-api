@@ -3849,30 +3849,30 @@ $api->get(
         my $offset_tax_accno = undef;
         if ($offset_tax_id) {
             $offset_tax_accno = $dbs->query(
-                "SELECT c.accno FROM tax t JOIN chart c ON c.id = t.chart_id WHERE t.id = ?",
+"SELECT c.accno FROM tax t JOIN chart c ON c.id = t.chart_id WHERE t.id = ?",
                 $offset_tax_id
             )->list;
         }
         my $response = {
-            id            => $form->{id},
-            reference     => $form->{reference},
-            approved      => $form->{approved},
-            ts            => $form->{ts},
-            curr          => $form->{curr},
-            description   => $form->{description},
-            notes         => $form->{notes},
-            department    => $form->{department},
-            department_id => $form->{department_id},
-            transdate     => $form->{transdate},
-            ts            => $form->{ts},
-            exchangeRate  => $form->{exchangerate},
-            employeeId    => $form->{employee_id},
-            lines         => \@lines,
-            files         => $files,
-            offset_accno  => $offset_accno,
+            id               => $form->{id},
+            reference        => $form->{reference},
+            approved         => $form->{approved},
+            ts               => $form->{ts},
+            curr             => $form->{curr},
+            description      => $form->{description},
+            notes            => $form->{notes},
+            department       => $form->{department},
+            department_id    => $form->{department_id},
+            transdate        => $form->{transdate},
+            ts               => $form->{ts},
+            exchangeRate     => $form->{exchangerate},
+            employeeId       => $form->{employee_id},
+            lines            => \@lines,
+            files            => $files,
+            offset_accno     => $offset_accno,
             offset_tax_accno => $offset_tax_accno,
-            pending       => $form->{approved} ? 0 : 1,
-            taxincluded   => $form->{taxincluded} ? 1 : 0
+            pending          => $form->{approved}    ? 0 : 1,
+            taxincluded      => $form->{taxincluded} ? 1 : 0
         };
 
         $c->render( status => 200, json => $response );
@@ -4201,7 +4201,7 @@ helper api_gl_transaction => sub {
         $offset_account_id = $offset_acc_result->hash->{id};
     }
 
-    # Validate offset tax account if provided (resolve accno -> tax id at transdate)
+# Validate offset tax account if provided (resolve accno -> tax id at transdate)
     if ($offset_tax_accno) {
         my $offset_tax_result = $dbs->query(
             q{
@@ -4284,9 +4284,9 @@ helper api_gl_transaction => sub {
                 $form->{"credit_$i"} = 0;
             }
 
-            $form->{"accno_$i"}         = $offset_accno;
+            $form->{"accno_$i"} = $offset_accno;
             if ($offset_tax_accno) {
-                $form->{"tax_$i"}           = $offset_tax_accno;
+                $form->{"tax_$i"} = $offset_tax_accno;
                 $form->{"linetaxamount_$i"} =
                   calc_line_tax( $dbs, $transdate, $amount, $offset_tax_accno );
             }
@@ -4329,7 +4329,8 @@ helper api_gl_transaction => sub {
     if ( $form->{id} ) {
         my $update_sql =
           "UPDATE gl SET offset_account_id = ?, offset_tax_id = ? WHERE id = ?";
-        $dbs->query( $update_sql, $offset_account_id, $offset_tax_id, $form->{id} );
+        $dbs->query( $update_sql, $offset_account_id, $offset_tax_id,
+            $form->{id} );
 
         my @sources =
           map { $_->{source} } grep { $_->{source} } @{ $data->{lines} };
@@ -8281,7 +8282,8 @@ helper process_transaction => sub {
 
     my $default_curr_result = $dbs->query("SELECT curr FROM curr WHERE rn = 1");
     my $default_curr_row    = $default_curr_result->hash;
-    $form->{defaultcurrency} = $default_curr_row ? $default_curr_row->{curr} : $form->{currency};
+    $form->{defaultcurrency} =
+      $default_curr_row ? $default_curr_row->{curr} : $form->{currency};
 
     # Post the transaction
     eval { AA->post_transaction( $c->slconfig, $form ); } or do {
@@ -8410,7 +8412,7 @@ $api->get(
             IR->retrieve_invoice( $c->slconfig, $form );
             IR->invoice_details( $c->slconfig, $form );
         }
-        my $ml = 1;
+        my $ml     = 1;
         my $qty_ml = 1;
 
         # Create payments array
@@ -8431,9 +8433,9 @@ $api->get(
                 || $form->{type} eq 'debit_invoice' )
           )
         {
-            $ml = $ml *-1;
+            $ml = $ml * -1;
         }
-        if ( $form->{type} eq 'credit_invoice') {
+        if ( $form->{type} eq 'credit_invoice' ) {
             $qty_ml = -1;
         }
 
@@ -8693,6 +8695,9 @@ helper process_invoice => sub {
             push @taxaccounts, $tax->{accno};
 
             $form->{"$tax->{accno}_rate"} = $tax->{rate};
+            if ( defined $tax->{amount} ) {
+                $form->{"tax_$tax->{accno}"} = $tax->{amount};
+            }
         }
         $form->{taxaccounts} = join( ' ', @taxaccounts );
         $form->{taxincluded} = $data->{taxincluded};

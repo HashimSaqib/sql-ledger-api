@@ -1879,10 +1879,23 @@ qq|INSERT INTO invoicetax (trans_id, invoice_id, chart_id, amount, taxamount)
     $invnetamount = $amount;
 
     $amount = 0;
+    my $used_provided_tax = 0;
     for ( split / /, $form->{taxaccounts} ) {
-        $amount += $form->{acc_trans}{ $form->{id} }{$_}{amount} =
-          $form->round_amount( $form->{acc_trans}{ $form->{id} }{$_}{amount},
-            $form->{precision} );
+        my $tax_amt;
+        if ( defined $form->{"tax_$_"} ) {
+            $tax_amt = $form->parse_amount( $myconfig, $form->{"tax_$_"} );
+            $tax_amt = $form->round_amount( $tax_amt, $form->{precision} );
+            $used_provided_tax = 1;
+        }
+        else {
+            $tax_amt = $form->round_amount(
+                $form->{acc_trans}{ $form->{id} }{$_}{amount},
+                $form->{precision} );
+        }
+        $form->{acc_trans}{ $form->{id} }{$_}{amount}  = $tax_amt;
+        $form->{acc_trans}{ $form->{id} }{$_}{fxamount} = $tax_amt
+          if defined $form->{"tax_$_"};
+        $amount += $tax_amt;
     }
     $invamount = $invnetamount + $amount;
 
@@ -1898,6 +1911,7 @@ qq|INSERT INTO invoicetax (trans_id, invoice_id, chart_id, amount, taxamount)
     $invamount    += $fxdiff;
 
     $fxtax = $form->round_amount( $fxtax, $form->{precision} );
+    $fxtax = $amount if $used_provided_tax;
 
     if (
         $form->round_amount( $form->{paid} - ( $fxamount + $fxtax ),
