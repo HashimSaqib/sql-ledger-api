@@ -1885,6 +1885,8 @@ qq|INSERT INTO invoicetax (trans_id, invoice_id, chart_id, amount, taxamount)
         if ( defined $form->{"tax_$_"} ) {
             $tax_amt = $form->parse_amount( $myconfig, $form->{"tax_$_"} );
             $tax_amt = $form->round_amount( $tax_amt, $form->{precision} );
+            # Apply document sign for credit_invoice (sw = -1) so tax is negative
+            $tax_amt *= $sw;
             $used_provided_tax = 1;
         }
         else {
