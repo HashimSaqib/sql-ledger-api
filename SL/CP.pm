@@ -751,7 +751,12 @@ sub post_payment {
   my $arap;
   my (undef, $paymentmethod_id) = split /--/, $form->{paymentmethod};
   $paymentmethod_id *= 1;
-  
+
+  # When matching with only one transaction, allocate the full payment to it (no overpayment)
+  if ($form->{rowcount} == 1 && $form->{"checked_1"}) {
+    $form->{"paid_1"} = $form->{amount};
+  }
+
   # go through line by line
   for my $i (1 .. $form->{rowcount}) {
 
