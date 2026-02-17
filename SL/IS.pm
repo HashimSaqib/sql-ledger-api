@@ -1885,7 +1885,8 @@ qq|INSERT INTO invoicetax (trans_id, invoice_id, chart_id, amount, taxamount)
         if ( defined $form->{"tax_$_"} ) {
             $tax_amt = $form->parse_amount( $myconfig, $form->{"tax_$_"} );
             $tax_amt = $form->round_amount( $tax_amt, $form->{precision} );
-            # Apply document sign for credit_invoice (sw = -1) so tax is negative
+
+           # Apply document sign for credit_invoice (sw = -1) so tax is negative
             $tax_amt *= $sw;
             $used_provided_tax = 1;
         }
@@ -1894,7 +1895,7 @@ qq|INSERT INTO invoicetax (trans_id, invoice_id, chart_id, amount, taxamount)
                 $form->{acc_trans}{ $form->{id} }{$_}{amount},
                 $form->{precision} );
         }
-        $form->{acc_trans}{ $form->{id} }{$_}{amount}  = $tax_amt;
+        $form->{acc_trans}{ $form->{id} }{$_}{amount}   = $tax_amt;
         $form->{acc_trans}{ $form->{id} }{$_}{fxamount} = $tax_amt
           if defined $form->{"tax_$_"};
         $amount += $tax_amt;
@@ -2075,6 +2076,7 @@ qq|INSERT INTO invoicetax (trans_id, invoice_id, chart_id, amount, taxamount)
     my $paymentid = 1;
     my $paymentaccno;
     my $paymentmethod_id;
+    my %dist_amounts;
 
     # record payments and offsetting AR
     for $i ( 1 .. $form->{paidaccounts} ) {
@@ -2151,6 +2153,10 @@ qq|id = $form->{voucher}{payment}{$voucherid}{br_id}|,
             # record payment
             $amount = $form->{"paid_$i"} * -1;
 
+            if ( $form->{"source_$i"} ) {
+                $dist_amounts{ $form->{"source_$i"} } += $form->{"paid_$i"};
+            }
+
             if ($keepcleared) {
                 $cleared = $form->dbquote( $form->{"cleared_$i"}, SQL_DATE );
             }
@@ -2220,6 +2226,55 @@ qq|id = $form->{voucher}{payment}{$voucherid}{br_id}|,
                 $dbh->do($query) || $form->dberror($query);
             }
         }
+    }
+
+    my @valid_sources;
+    if ( keys %dist_amounts ) {
+        my $placeholders = join ', ', ('?') x keys %dist_amounts;
+        my $query_dist =
+          qq|SELECT transaction_id FROM bank_transactions WHERE transaction_id IN ($placeholders)|;
+        my $sth_dist = $dbh->prepare($query_dist) || $form->dberror($query_dist);
+        $sth_dist->execute( keys %dist_amounts ) || $form->dberror($query_dist);
+        while ( my ($source) = $sth_dist->fetchrow_array ) {
+            push @valid_sources, $source;
+            my $abs_amount = abs( $dist_amounts{$source} );
+
+            my $query_check =
+              qq|SELECT id FROM transaction_distribution WHERE transaction_id = ? AND trans_id = ?|;
+            my $sth_check = $dbh->prepare($query_check);
+            $sth_check->execute( $source, $form->{id} );
+            my ($dist_id) = $sth_check->fetchrow_array;
+            $sth_check->finish;
+
+            if ($dist_id) {
+                my $query_update =
+                  qq|UPDATE transaction_distribution SET amount = ?, module = ? WHERE id = ?|;
+                my $sth_update = $dbh->prepare($query_update);
+                $sth_update->execute( $abs_amount, 'ar', $dist_id )
+                  || $form->dberror($query_update);
+            }
+            else {
+                my $query_insert =
+                  qq|INSERT INTO transaction_distribution (transaction_id, trans_id, amount, module) VALUES (?, ?, ?, 'ar')|;
+                my $sth_insert = $dbh->prepare($query_insert);
+                $sth_insert->execute( $source, $form->{id}, $abs_amount )
+                  || $form->dberror($query_insert);
+            }
+        }
+        $sth_dist->finish;
+    }
+
+    if (@valid_sources) {
+        my $placeholders = join ', ', ('?') x @valid_sources;
+        my $query_clean =
+          qq|DELETE FROM transaction_distribution WHERE trans_id = $form->{id} AND transaction_id NOT IN ($placeholders)|;
+        my $sth_clean = $dbh->prepare($query_clean);
+        $sth_clean->execute(@valid_sources) || $form->dberror($query_clean);
+    }
+    else {
+        my $query_clean =
+          qq|DELETE FROM transaction_distribution WHERE trans_id = $form->{id}|;
+        $dbh->do($query_clean) || $form->dberror($query_clean);
     }
 
     ($paymentaccno) = split /--/, $form->{"AR_paid_$form->{paidaccounts}"};
@@ -3003,7 +3058,7 @@ sub reverse_invoice {
     $sth->finish;
 
     for (
-        qw(acc_trans dpt_trans invoice invoicetax inventory cargo shipto vr payment)
+        qw(acc_trans dpt_trans invoice invoicetax inventory cargo shipto vr payment transaction_distribution)
       )
     {
         $query = qq|DELETE FROM $_ WHERE trans_id = $form->{id}|;
