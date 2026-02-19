@@ -8015,6 +8015,8 @@ $api->get(
         # Create payments array
         my @payments;
 
+        warn Dumper $form->{acc_trans}{"${transaction_type}_paid"};
+
         # Check if payments exist
         if ( defined $form->{acc_trans}{"${transaction_type}_paid"}
             && ref( $form->{acc_trans}{"${transaction_type}_paid"} ) eq
@@ -8233,7 +8235,7 @@ helper process_transaction => sub {
         $form->{"source_$i"}       = $payment->{source} || '';
         $form->{"memo_$i"}         = $payment->{memo}   || '';
         $form->{"paid_$i"}         = $payment->{amount};
-        $form->{"exchangerate_$i"} = $payment->{exchangerate} || 1;
+        $form->{"exchangerate_$i"} = $payment->{exchangerate} || '';
 
         $form->{ $form->{vc} eq 'vendor' ? "AP_paid_$i" : "AR_paid_$i" } =
           $payment->{account} . "--";
@@ -8287,7 +8289,7 @@ helper process_transaction => sub {
 
     # Post the transaction
     eval { AA->post_transaction( $c->slconfig, $form ); } or do {
-        warn( Dumper $form );
+        
         my $error = $@;
         return {
             error   => 'post_transaction_failed',
