@@ -382,3 +382,6 @@ ALTER TABLE gl ADD COLUMN taxincluded BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE gl ADD COLUMN offset_tax_id INTEGER;
 
 INSERT INTO db_updates (version, last_update) VALUES ('015', 'GL Line Tax');
+
+ALTER TABLE chart ADD COLUMN detail TEXT;
+INSERT INTO db_updates (version, last_update) VALUES ('016', 'Chart Detail');
