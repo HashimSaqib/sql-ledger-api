@@ -6268,6 +6268,7 @@ helper get_defaults => sub {
     my $c        = shift;
     my $client   = shift // $c->param('client');
     my $dbs      = $c->dbs($client);
+    return {} unless $dbs;
     my $defaults = $dbs->query("SELECT * FROM defaults")->hashes;
 
     return {} unless ( $defaults && @$defaults );
@@ -8797,7 +8798,7 @@ helper generate_invoice_pdf => sub {
     $form->{IN}                = "$template.$format";
 
     my $userspath = "tmp";
-    my $defaults  = $c->get_defaults();
+    my $defaults  = $c->get_defaults($client);
 
 # get the transdate from the invoice for folder structure
 # accept both yyyy-mm-dd (ISO) and dd-mm-yyyy (display format from build_invoice)
