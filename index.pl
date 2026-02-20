@@ -8076,7 +8076,8 @@ $api->get(
             $payment_file =
               $dbs->query( "SELECT * FROM payments WHERE transaction_id = ?",
                 $form->{id} )->hash;
-            if ($payment_file) {
+             my $ai_processing = $dbs->query("SELECT * FROM ai_processing WHERE reference_id = ?", $form->{id})->hash;
+            if ($payment_file || $ai_processing) {
                 $payment_file = 1;
             }
             my $ap_row =
