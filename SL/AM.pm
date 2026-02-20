@@ -117,6 +117,7 @@ sub save_account {
 		gifi_accno = '$form->{gifi_accno}',
 		category = '$form->{category}',
 		link = '$form->{link}',
+		detail = '$form->{detail}',
 		contra = '$form->{contra}',
                 closed = '$form->{closed}',
                 parent_id = '$form->{parent_id}',
@@ -125,12 +126,12 @@ sub save_account {
   } else {
     $query = qq|INSERT INTO chart 
                 (accno, description, charttype, gifi_accno, category, link,
-		contra, closed, parent_id, allow_gl)
+		detail, contra, closed, parent_id, allow_gl)
                 VALUES ('$form->{accno}',|
 		.$dbh->quote($form->{description}).qq|,
 		'$form->{charttype}', |
 		.$dbh->quote($form->{gifi_accno}).qq|,
-		'$form->{category}', '$form->{link}', '$form->{contra}',
+		'$form->{category}', '$form->{link}', '$form->{detail}', '$form->{contra}',
                 '$form->{closed}', '$form->{parent_id}', '$form->{allow_gl}')|;
   }
   $dbh->do($query) || $form->dberror($query);
