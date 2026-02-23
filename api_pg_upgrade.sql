@@ -385,3 +385,6 @@ INSERT INTO db_updates (version, last_update) VALUES ('015', 'GL Line Tax');
 
 ALTER TABLE chart ADD COLUMN detail TEXT;
 INSERT INTO db_updates (version, last_update) VALUES ('016', 'Chart Detail');
+
+CREATE TABLE messages ( id SERIAL, message_type VARCHAR(255) NOT NULL, language_code VARCHAR(15) NOT NULL, content TEXT, trans_id INTEGER);
+INSERT INTO db_updates (version, last_update) VALUES ('017', 'Messages');

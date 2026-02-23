@@ -294,7 +294,7 @@ get '/logo/:client/' => sub {
 ###############################
 
 my $neoledger_perms =
-'["dashboard", "cash", "cash.recon", "gl", "gl.add", "gl.transactions", "items", "items.part", "items.service", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income", "system", "system.currencies", "system.projects", "system.departments", "system.defaults", "system.chart", "system.chart.list", "system.chart.add", "system.chart.gifi", "system.taxes",  "system.templates", "system.audit", "system.yearend", "system.batch", "import", "import.gl", "import.customer", "import.ar_invoice", "import.ar_transaction", "import.vendor", "import.ap_invoice", "import.ap_transaction", "reports.balance", "customer", "customer.transaction", "customer.invoice", "customer.transaction_return", "customer.invoice_return", "customer.add", "customer.batch", "customer.reminder", "customer.consolidate", "customer.transactions", "customer.search", "customer.history", "vendor", "vendor.transaction", "vendor.invoice", "vendor.transaction_return", "vendor.invoice_return", "vendor.add", "vendor.transactions", "vendor.search", "vendor.history", "reports.alltaxes", "vendor.taxreport", "customer.taxreport", "cash.payments", "cash.receipts", "cash.report.customer", "cash.report.vendor", "system.bank", "import.bank", "customer.order", "customer.orders", "customer.quotation", "customer.quotations", "vendor.order", "vendor.orders", "vendor.quotation", "vendor.quotations", "stations.manage", "stations.get", "ai.prompts", "bank.payments", "stations.bank_transactions", "customer.upload", "vendor.upload", "document.list","integrations.manage","customer.overview","vendor.overview", "system.notifications"]';
+'["dashboard", "cash", "cash.recon", "gl", "gl.add", "gl.transactions", "items", "items.part", "items.service", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income", "system", "system.currencies", "system.projects", "system.departments", "system.defaults", "system.chart", "system.chart.list", "system.chart.add", "system.chart.gifi", "system.taxes",  "system.templates", "system.audit", "system.yearend", "system.batch", "import", "import.gl", "import.customer", "import.ar_invoice", "import.ar_transaction", "import.vendor", "import.ap_invoice", "import.ap_transaction", "reports.balance", "customer", "customer.transaction", "customer.invoice", "customer.transaction_return", "customer.invoice_return", "customer.add", "customer.batch", "customer.reminder", "customer.consolidate", "customer.transactions", "customer.search", "customer.history", "vendor", "vendor.transaction", "vendor.invoice", "vendor.transaction_return", "vendor.invoice_return", "vendor.add", "vendor.transactions", "vendor.search", "vendor.history", "reports.alltaxes", "vendor.taxreport", "customer.taxreport", "cash.payments", "cash.receipts", "cash.report.customer", "cash.report.vendor", "system.bank", "import.bank", "customer.order", "customer.orders", "customer.quotation", "customer.quotations", "vendor.order", "vendor.orders", "vendor.quotation", "vendor.quotations", "stations.manage", "stations.get", "ai.prompts", "bank.payments", "stations.bank_transactions", "customer.upload", "vendor.upload", "document.list","integrations.manage","customer.overview","vendor.overview", "system.notifications", "system.messages"]';
 
 my $reports_only =
 '["dashboard", "gl", "gl.transactions", "items", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income",  "reports.balance", "customer", "customer.transactions", "customer.search", "customer.history", "vendor", "vendor.search", "vendor.history", "vendor.transactions", "reports.alltaxes", "vendor.taxreport", "customer.taxreport", "cash.report.customer", "cash.report.vendor", "customer.orders", "customer.quotations", "vendor.orders", "vendor.quotations","customer.overview","vendor.overview"]';
@@ -4672,6 +4672,207 @@ $api->delete(
         return $c->render( status => 204, data => '' );
     }
 );
+
+$api->get(
+    '/system/languages' => sub {
+        my $c = shift;
+        return unless my $form = $c->check_perms("system.messages");
+        my $client = $c->param('client');
+        my $dbs    = $c->dbs($client);
+
+        my $languages;
+        eval {
+            $languages = $dbs->query(
+                "SELECT code, description FROM language ORDER BY code")->hashes;
+        };
+
+        if ($@) {
+            return $c->render(
+                status => 500,
+                json   =>
+                  { error => { message => 'Failed to retrieve languages' } }
+            );
+        }
+
+        $c->render( json => $languages );
+    }
+);
+
+$api->post(
+    '/system/languages' => sub {
+        my $c = shift;
+        return unless my $form = $c->check_perms("system.messages");
+        my $client = $c->param('client');
+
+        my $params = $c->req->json;
+        my $code   = ref($params) eq 'HASH' ? $params->{code} : undef;
+        my $description =
+          ref($params) eq 'HASH' ? $params->{description} : undef;
+        $code        = '' unless defined $code;
+        $description = '' unless defined $description;
+
+        if ( length($code) < 1 || length($code) > 6 ) {
+            return $c->render(
+                status => 400,
+                json   => {
+                    error =>
+                      { message => 'code must be between 1 and 6 characters' }
+                }
+            );
+        }
+
+        my $dbs = $c->dbs($client);
+
+        eval {
+            $dbs->query(
+                "INSERT INTO language (code, description) VALUES (?, ?) "
+                  . "ON CONFLICT (code) DO UPDATE SET description = EXCLUDED.description",
+                $code, $description
+            );
+        };
+
+        if ($@) {
+            return $c->render(
+                status => 500,
+                json   => { error => { message => 'Failed to save language' } }
+            );
+        }
+
+        return $c->render(
+            status => 201,
+            json   => { message => 'Language saved successfully' }
+        );
+    }
+);
+
+$api->get(
+    '/system/messages' => sub {
+        my $c = shift;
+        return unless my $form = $c->check_perms("system.messages");
+        my $client = $c->param('client');
+        my $dbs    = $c->dbs($client);
+        my $params = $c->req->params->to_hash;
+
+        my @where;
+        my @binds;
+        if ( defined $params->{message_type} && $params->{message_type} ne '' )
+        {
+            push @where, "message_type = ?";
+            push @binds, $params->{message_type};
+        }
+        if ( defined $params->{language_code}
+            && $params->{language_code} ne '' )
+        {
+            push @where, "language_code = ?";
+            push @binds, $params->{language_code};
+        }
+        if ( defined $params->{trans_id} && $params->{trans_id} =~ /^\d+$/ ) {
+            push @where, "trans_id = ?";
+            push @binds, $params->{trans_id};
+        }
+
+        my $sql =
+"SELECT id, message_type, language_code, content, trans_id FROM messages";
+        $sql .= " WHERE " . join( " AND ", @where ) if @where;
+        $sql .= " ORDER BY id";
+
+        my $messages;
+        eval {
+            $messages =
+                @binds
+              ? $dbs->query( $sql, @binds )->hashes
+              : $dbs->query($sql)->hashes;
+        };
+
+        if ($@) {
+            return $c->render(
+                status => 500,
+                json   =>
+                  { error => { message => 'Failed to retrieve messages' } }
+            );
+        }
+
+        $c->render( json => $messages );
+    }
+);
+
+$api->post(
+    '/system/messages' => sub {
+        my $c = shift;
+        return unless my $form = $c->check_perms("system.messages");
+        my $client = $c->param('client');
+
+        my $params = $c->req->json;
+        $params = {} unless ref($params) eq 'HASH';
+
+        my $id            = $params->{id};
+        my $message_type  = $params->{message_type}  // '';
+        my $language_code = $params->{language_code} // '';
+        my $content       = $params->{content};
+        my $trans_id      = $params->{trans_id};
+
+        $content  = '' unless defined $content;
+        $trans_id = undef if defined $trans_id && $trans_id eq '';
+
+        if ( length($message_type) < 1 || length($message_type) > 255 ) {
+            return $c->render(
+                status => 400,
+                json   => {
+                    error => {
+                        message =>
+                          'message_type must be between 1 and 255 characters'
+                    }
+                }
+            );
+        }
+
+        my $dbs = $c->dbs($client);
+
+        if ( defined $id && $id =~ /^\d+$/ ) {
+            my $exists =
+              $dbs->query( "SELECT 1 FROM messages WHERE id = ?", $id )->array;
+            if ( $exists && $exists->[0] ) {
+                eval {
+                    $dbs->query(
+"UPDATE messages SET message_type = ?, language_code = ?, content = ?, trans_id = ? WHERE id = ?",
+                        $message_type, $language_code, $content, $trans_id,
+                        $id );
+                };
+                if ($@) {
+                    return $c->render(
+                        status => 500,
+                        json   => {
+                            error => { message => 'Failed to update message' }
+                        }
+                    );
+                }
+                return $c->render(
+                    status => 200,
+                    json   => { message => 'Message updated successfully' }
+                );
+            }
+        }
+
+        eval {
+            $dbs->query(
+"INSERT INTO messages (message_type, language_code, content, trans_id) VALUES (?, ?, ?, ?)",
+                $message_type, $language_code, $content, $trans_id );
+        };
+
+        if ($@) {
+            return $c->render(
+                status => 500,
+                json   => { error => { message => 'Failed to create message' } }
+            );
+        }
+
+        return $c->render(
+            status => 201,
+            json   => { message => 'Message created successfully' }
+        );
+    }
+);
+
 $api->get(
     '/system/companydefaults' => sub {
         my $c      = shift;
@@ -6265,9 +6466,9 @@ $api->get(
 ###############################
 
 helper get_defaults => sub {
-    my $c        = shift;
-    my $client   = shift // $c->param('client');
-    my $dbs      = $c->dbs($client);
+    my $c      = shift;
+    my $client = shift // $c->param('client');
+    my $dbs    = $c->dbs($client);
     return {} unless $dbs;
     my $defaults = $dbs->query("SELECT * FROM defaults")->hashes;
 
@@ -7477,6 +7678,14 @@ $api->get(
           ->hashes;
         $form->{bank_accounts} = $bank_accounts;
 
+        if ( $vc eq 'customer' ) {
+            my $email_content = $dbs->query(
+"SELECT content FROM messages WHERE message_type = 'invoice_send'"
+            )->hash;
+            my $email_message = $email_content ? $email_content->{content} : '';
+            $form->{email_message} = $email_message;
+        }
+
         # Render the form object as JSON
         $c->render( json => {%$form} );
     }
@@ -7729,6 +7938,7 @@ $api->get(
         return unless my $form = $c->check_perms("$vc.add");
         my $client = $c->param('client');
 
+        my $dbs = $c->dbs($client);
         $form->{id} = $id;
         $form->{db} = $vc;
 
@@ -8077,8 +8287,10 @@ $api->get(
             $payment_file =
               $dbs->query( "SELECT * FROM payments WHERE transaction_id = ?",
                 $form->{id} )->hash;
-             my $ai_processing = $dbs->query("SELECT * FROM ai_processing WHERE reference_id = ?", $form->{id})->hash;
-            if ($payment_file || $ai_processing) {
+            my $ai_processing =
+              $dbs->query( "SELECT * FROM ai_processing WHERE reference_id = ?",
+                $form->{id} )->hash;
+            if ( $payment_file || $ai_processing ) {
                 $payment_file = 1;
             }
             my $ap_row =
@@ -8291,7 +8503,7 @@ helper process_transaction => sub {
 
     # Post the transaction
     eval { AA->post_transaction( $c->slconfig, $form ); } or do {
-        
+
         my $error = $@;
         return {
             error   => 'post_transaction_failed',
@@ -13088,6 +13300,9 @@ $api->post(
         # Build invoice data (needed for intnotes and status updates)
         build_invoice( $c, $client, $form, $dbs );
 
+        warn( Dumper $form);
+        warn( Dumper $message);
+
         # Set up email attachments
         my @attachments = ();
 
@@ -13137,10 +13352,6 @@ $api->post(
           . qq|: $subject\n|;
         $int_notes .= qq|\n| . $locale->text('Message') . qq|:|;
         $int_notes .= ($message) ? $message : $locale->text('sent');
-        warn($int_notes);
-        warn( $form->{intnotes} );
-        warn( $form->{id} );
-        $form->{intnotes} = $int_notes;
         $form->save_intnotes( $c->slconfig, 'ar' );
 
         if ( $form->{emailed} !~ /$type/ ) {
