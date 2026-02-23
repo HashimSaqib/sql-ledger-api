@@ -132,6 +132,10 @@ sub post_transaction {
       (undef, $project_id) = split /--/, $form->{"projectnumber_$i"};
       $project_id ||= 'NULL';
       ($accno) = split /--/, $form->{"${ARAP}_amount_$i"};
+      # Tax-only lines (0 amount, no expense account) use tax account so the line is saved with linetaxamount
+      if (!$accno && $form->{"linetaxamount_$i"}) {
+        ($accno) = split /--/, $form->{"tax_$i"};
+      }
 
       next unless $accno;
 
