@@ -6712,6 +6712,8 @@ $api->get(
          JOIN chart c ON (c.id = t.chart_id)
          ORDER BY c.accno"
         )->hashes;
+        
+        my $languages = $dbs->query("SELECT * FROM language")->hashes;
 
         my $accounts           = $c->get_accounts($client);
         my $currencies         = $c->get_currencies($client);
@@ -6778,7 +6780,8 @@ $api->get(
                 closedto     => $formatted_closedto,
                 connection   => $connection,
                 record       => $defaults->{ar_accno_id},
-                term_days    => $defaults->{term_days} || 0
+                term_days    => $defaults->{term_days} || 0,
+                languages    => $languages
             };
         }
 
@@ -6816,7 +6819,8 @@ $api->get(
                 stations      => $stations,
                 user_stations => $user_stations,
                 paymentfile   => $paymentfile,
-                term_days     => $defaults->{term_days} || 0
+                term_days     => $defaults->{term_days} || 0,
+                languages     => $languages
             };
         }
 
@@ -7678,12 +7682,27 @@ $api->get(
           ->hashes;
         $form->{bank_accounts} = $bank_accounts;
 
-        if ( $vc eq 'customer' ) {
-            my $email_content = $dbs->query(
-"SELECT content FROM messages WHERE message_type = 'invoice_send'"
-            )->hash;
-            my $email_message = $email_content ? $email_content->{content} : '';
-            $form->{email_message} = $email_message;
+        # Appropriate invoice_send message: VC-specific, then general by VC language, then first general
+        my $template = $dbs->query(
+          "SELECT content FROM messages WHERE trans_id = ? AND message_type = 'invoice_send'",
+          $id
+        )->hash;
+        if ( $template && defined $template->{content} && $template->{content} ne '' ) {
+            $form->{email_message} = $template->{content};
+        }
+        else {
+            if ( $form->{language_code} && $form->{language_code} =~ /\S/ ) {
+                $template = $dbs->query(
+                  "SELECT content FROM messages WHERE trans_id IS NULL AND message_type = 'invoice_send' AND language_code = ? ORDER BY id LIMIT 1",
+                  $form->{language_code}
+                )->hash;
+            }
+            else {
+                $template = $dbs->query(
+                  "SELECT content FROM messages WHERE trans_id IS NULL AND message_type = 'invoice_send' ORDER BY id LIMIT 1"
+                )->hash;
+            }
+            $form->{email_message} = ( $template && defined $template->{content} ) ? ( $template->{content} // '' ) : '';
         }
 
         # Render the form object as JSON
@@ -7958,6 +7977,13 @@ $api->get(
 
         $form->{discount} *= 100;
 
+        # Include invoice_send message for this VC
+        my $msg_row = $dbs->query(
+          "SELECT content FROM messages WHERE trans_id = ? AND message_type = ?",
+          $id, 'invoice_send'
+        )->hash;
+        $form->{message} = ( $msg_row && defined $msg_row->{content} ) ? $msg_row->{content} : '';
+
         # Render the filtered JSON response
         $c->render( json => {%$form} );
     }
@@ -7974,6 +8000,7 @@ $api->post(
 
         $form->{db} = lc($vc);
         for ( keys %$params ) { $form->{$_} = $params->{$_} if $params->{$_} }
+        $form->{message} = $params->{message} if exists $params->{message};
         $form->{ $vc =~ /^vendor$/i ? 'vendornumber' : 'customernumber' } =
           $params->{vcnumber};
         CT->save( $c->slconfig, $form );
@@ -12712,7 +12739,6 @@ sub build_transaction {
 
     # Prepare the form with transaction links/info.
     $form->create_links( $transaction_type, $c->slconfig, $vc );
-    warn( Dumper $form );
     ### --- FLATTEN LINE ITEMS --- ###
     # Build parallel arrays for line item data (similar to build_invoice)
     my ( @lineitem_ids, @lineitem_accno, @lineitem_account,
@@ -13300,8 +13326,17 @@ $api->post(
         # Build invoice data (needed for intnotes and status updates)
         build_invoice( $c, $client, $form, $dbs );
 
-        warn( Dumper $form);
-        warn( Dumper $message);
+        # Replace any {variable} placeholders in message with form values
+        my %seen;
+        for my $key ( grep { !$seen{$_}++ } ( $message =~ /\{(\w+)\}/g ) ) {
+            my $val = ( defined $form->{$key} && !ref $form->{$key} )
+                ? $form->{$key}
+                : '';
+            # Escape only \ and $ so replacement is literal (no \Q which would escape . and space)
+            $val =~ s/\\/\\\\/g;
+            $val =~ s/\$/\\\$/g;
+            $message =~ s/\Q{$key}\E/$val/g;
+        }
 
         # Set up email attachments
         my @attachments = ();
