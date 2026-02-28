@@ -4961,8 +4961,10 @@ $api->get(
                   || undef,
                 cash_over_short_account_id => $form->{cashovershort_accno_id}
                   || undef,
-                ar_account_id => $form->{ar_accno_id} || undef,
-                ap_account_id => $form->{ap_accno_id} || undef
+                ar_account_id  => $form->{ar_accno_id} || undef,
+                ap_account_id  => $form->{ap_accno_id} || undef,
+                ar_payment_id  => $form->{AR_paid}     || undef,
+                ap_payment_id  => $form->{AP_paid}     || undef
             },
 
             number_sequences => {
@@ -5132,6 +5134,10 @@ $api->post(
               $json_data->{account_defaults}->{ar_account_id};
             $mapped_data->{AP} =
               $json_data->{account_defaults}->{ap_account_id};
+            $mapped_data->{AR_paid} =
+              $json_data->{account_defaults}->{ar_payment_id};
+            $mapped_data->{AP_paid} =
+              $json_data->{account_defaults}->{ap_payment_id};
         }
 
         # Map number sequences
@@ -5180,7 +5186,7 @@ $api->post(
         warn( Dumper $form );
 
         $form->{optional} =
-"company street post_office address address1 address2 city state zip country tel fax companyemail companywebsite yearend weightunit businessnumber closedto revtrans audittrail method cdt namesbynumber xelatex typeofcontact roundchange referenceurl annualinterest latepaymentfee restockingcharge checkinventory hideaccounts linetax forcewarehouse glnumber sinumber sonumber vinumber batchnumber vouchernumber ponumber sqnumber rfqnumber partnumber projectnumber employeenumber customernumber vendornumber lock_glnumber lock_sinumber lock_sonumber lock_ponumber lock_sqnumber lock_rfqnumber lock_employeenumber lock_customernumber lock_vendornumber clearing transition paymentfile term_days";
+"company street post_office address address1 address2 city state zip country tel fax companyemail companywebsite yearend weightunit businessnumber closedto revtrans audittrail method cdt namesbynumber xelatex typeofcontact roundchange referenceurl annualinterest latepaymentfee restockingcharge checkinventory hideaccounts linetax forcewarehouse glnumber sinumber sonumber vinumber batchnumber vouchernumber ponumber sqnumber rfqnumber partnumber projectnumber employeenumber customernumber vendornumber lock_glnumber lock_sinumber lock_sonumber lock_ponumber lock_sqnumber lock_rfqnumber lock_employeenumber lock_customernumber lock_vendornumber clearing transition paymentfile term_days AR_paid AP_paid";
 
         # Save the defaults
         my $result = AM->save_defaults( $c->slconfig, $form );
@@ -6780,6 +6786,7 @@ $api->get(
                 closedto     => $formatted_closedto,
                 connection   => $connection,
                 record       => $defaults->{ar_accno_id},
+                payment => $defaults->{AR_paid},
                 term_days    => $defaults->{term_days} || 0,
                 languages    => $languages
             };
@@ -6816,6 +6823,7 @@ $api->get(
                 closedto      => $formatted_closedto,
                 connection    => $connection,
                 record        => $defaults->{ap_accno_id},
+                payment       => $defaults->{AP_paid},
                 stations      => $stations,
                 user_stations => $user_stations,
                 paymentfile   => $paymentfile,
