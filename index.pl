@@ -6765,7 +6765,7 @@ $api->get(
         #----------------
         # CUSTOMER module
         #----------------
-        elsif ( $module eq 'customer' ) {
+        elsif ( lc($module) eq 'customer' ) {
             return unless $c->check_perms('customer');
 
             my $lock        = $c->lock_number( $dbs, 'sinumber' );
@@ -6795,7 +6795,7 @@ $api->get(
         #-------------
         # VENDOR module
         #-------------
-        elsif ( $module eq 'vendor' ) {
+        elsif ( lc($module) eq 'vendor' ) {
             return unless my $form = $c->check_perms('customer');
 
             my $lock        = $c->lock_number( $dbs, 'vinumber' );
