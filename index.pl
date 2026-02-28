@@ -6705,7 +6705,7 @@ $api->get(
 
         # List of valid modules
         my @valid_modules =
-          qw(customer vendor ic gl chart gl_report projects incomestatement employees reminder import alltaxes tax_report payments payments_report import_bank);
+          qw(customer vendor Vendor Customer ic gl chart gl_report projects incomestatement employees reminder import alltaxes tax_report payments payments_report import_bank);
 
         # Return empty JSON object if module not valid
         return $c->render( json => {} )
