@@ -303,15 +303,69 @@ helper send_email_central => sub {
     use Email::Stuffer;
     use Data::Dumper;
     use MIME::Base64;
-    my ( $c, $to, $subject, $content, $attachments, $options ) = @_;
+    my ( $c, $to, $subject, $content, $attachments, $options, $client ) = @_;
 
     # Options can include: cc => [], bcc => []
     $options //= {};
     my $cc_list  = $options->{cc}  || [];
     my $bcc_list = $options->{bcc} || [];
 
-    # Check if Send in Blue should be used
-    if ( $ENV{SEND_IN_BLUE} ) {
+    # Resolve per-DB SMTP config when a client is provided
+    my ( $smtp_host, $smtp_port, $smtp_ssl, $smtp_sasl,
+        $smtp_username, $smtp_password, $smtp_from_name );
+
+    if ($client) {
+        my $dbs = eval { $c->dbs($client) };
+        if ($dbs) {
+            my $defaults_rows = $dbs->query("SELECT fldname, fldvalue FROM defaults WHERE fldname IN ('smtp_host','smtp_port','smtp_ssl','smtp_sasl','smtp_username','smtp_from_name')")->hashes;
+            my %d = map { $_->{fldname} => $_->{fldvalue} } @$defaults_rows;
+
+            if ( $d{smtp_host} && $d{smtp_username} ) {
+                my $key_row = $dbs->query(
+                    "SELECT fldvalue FROM connection_keys WHERE fldname = 'smtp_password'"
+                )->hash;
+
+                if ($key_row) {
+                    my $aes_key = $ENV{aes_key};
+                    if ($aes_key) {
+                        my $fldvalue = $key_row->{fldvalue};
+                        my $enc_pw = eval {
+                            my $decoded = ref($fldvalue) eq 'HASH'
+                                ? $fldvalue
+                                : decode_json($fldvalue);
+                            $decoded->{password};
+                        };
+                        if ($enc_pw) {
+                            my $decrypted = _aes_decrypt( $enc_pw, $aes_key );
+                            if ($decrypted) {
+                                $smtp_host      = $d{smtp_host};
+                                $smtp_port      = $d{smtp_port}     || 587;
+                                $smtp_ssl       = $d{smtp_ssl}      || 'starttls';
+                                $smtp_sasl      = $d{smtp_sasl}     // 1;
+                                $smtp_username  = $d{smtp_username};
+                                $smtp_from_name = $d{smtp_from_name} || '';
+                                $smtp_password  = $decrypted;
+                            }
+                        } # end if $enc_pw
+                    }
+                }
+            }
+        }
+    }
+
+    # Fall back to system-level env vars if no per-DB config resolved
+    unless ($smtp_host) {
+        $smtp_host      = $ENV{SMTP_HOST};
+        $smtp_port      = $ENV{SMTP_PORT};
+        $smtp_ssl       = $ENV{SMTP_SSL};
+        $smtp_sasl      = $ENV{SMTP_SASL};
+        $smtp_username  = $ENV{SMTP_USERNAME};
+        $smtp_password  = $ENV{SMTP_PASSWORD};
+        $smtp_from_name = $ENV{SMTP_FROM_NAME};
+    }
+
+    # Check if Send in Blue should be used (system-level only, no per-DB override)
+    if ( $ENV{SEND_IN_BLUE} && !$client ) {
 
         # Use Send in Blue API with Mojo::UserAgent
         my $api_key = $ENV{SEND_IN_BLUE};
@@ -332,8 +386,8 @@ helper send_email_central => sub {
         # Prepare the payload for Send in Blue API
         my $payload = {
             sender => {
-                email => $ENV{SMTP_USERNAME},
-                name  => $ENV{SMTP_FROM_NAME}
+                email => $smtp_username,
+                name  => $smtp_from_name
             },
             to => [
                 {
@@ -404,19 +458,20 @@ helper send_email_central => sub {
 
     # Fall back to the original email sending method
     my $transport = Email::Sender::Transport::SMTP->new(
-        host          => $ENV{SMTP_HOST},
-        port          => $ENV{SMTP_PORT},
-        ssl           => $ENV{SMTP_SSL},
-        sasl_username => $ENV{SMTP_USERNAME},
-        sasl_password => $ENV{SMTP_PASSWORD},
-        sasl          => $ENV{SMTP_SASL},
+        host          => $smtp_host,
+        port          => $smtp_port,
+        ssl           => $smtp_ssl,
+        sasl_username => $smtp_username,
+        sasl_password => $smtp_password,
+        sasl          => $smtp_sasl,
     );
 
     # Create the Email::Stuffer object
+    my $from_name = $smtp_from_name || $ENV{PRODUCT_NAME};
     my $from =
-      $ENV{PRODUCT_NAME}
-      ? "$ENV{PRODUCT_NAME} <$ENV{SMTP_USERNAME}>"
-      : $ENV{SMTP_USERNAME};
+      $from_name
+      ? "$from_name <$smtp_username>"
+      : $smtp_username;
 
     # Detect if content is HTML or plain text
     my $email_obj = Email::Stuffer->from($from)->to($to)->subject($subject);
@@ -2482,8 +2537,10 @@ EMAIL
         }
 
         # Use the provided email helper to send the email
-        my $email_result =
-          $c->send_email_central( $recipient_email, $subject, $content );
+        my $email_result = $c->send_email_central(
+            $recipient_email, $subject, $content,
+            undef, undef, $dataset->{db_name}
+        );
         if ( $email_result->{error} ) {
             return $c->render(
                 status => 500,
@@ -5031,6 +5088,21 @@ $api->get(
             all_accounts => $all_accounts->{all}
         );
 
+        # Check if per-DB SMTP is configured (password stored in connection_keys)
+        my $smtp_key = $dbs->query(
+            "SELECT fldvalue FROM connection_keys WHERE fldname = 'smtp_password'"
+        )->hash;
+        my $smtp_host = $form->{smtp_host} || '';
+        $restructured_response{smtp} = {
+            host     => $smtp_host,
+            port     => $form->{smtp_port}     || '',
+            username => $form->{smtp_username} || '',
+            from_name => $form->{smtp_from_name} || '',
+            ssl      => $form->{smtp_ssl}      || '',
+            sasl     => $form->{smtp_sasl}     || '',
+            active   => ( $smtp_key && $smtp_host ) ? JSON::true : JSON::false,
+        };
+
         $c->render( json => \%restructured_response );
     }
 );
@@ -5041,8 +5113,6 @@ $api->post(
         my $client = $c->param('client');
 
         my $json_data = $c->req->json;
-        warn( Dumper $json_data );
-
         my $mapped_data = {};
 
         if ( $json_data->{company_info} ) {
@@ -5178,15 +5248,29 @@ $api->post(
             $mapped_data->{lock_vendornumber} = $sequences->{vendor}->{locked};
         }
 
+        # Handle SMTP settings
+        my $smtp_data = $json_data->{smtp} // {};
+
+        if ( $smtp_data->{host} || $smtp_data->{username} ) {
+            $mapped_data->{smtp_host}      = $smtp_data->{host}      // '';
+            $mapped_data->{smtp_port}      = $smtp_data->{port}      // '';
+            $mapped_data->{smtp_username}  = $smtp_data->{username}  // '';
+            $mapped_data->{smtp_from_name} = $smtp_data->{from_name} // '';
+            $mapped_data->{smtp_ssl}       = $smtp_data->{ssl}       // '';
+            $mapped_data->{smtp_sasl}      = $smtp_data->{sasl}      // '';
+        }
+
+        if ( my $err = _test_and_save_smtp_password( $c, $client, $smtp_data ) ) {
+            return $c->render( status => $err->{status}, json => $err );
+        }
+
         # Transfer mapped data to form object
         foreach my $key ( keys %$mapped_data ) {
             $form->{$key} = $mapped_data->{$key};
         }
 
-        warn( Dumper $form );
-
         $form->{optional} =
-"company street post_office address address1 address2 city state zip country tel fax companyemail companywebsite yearend weightunit businessnumber closedto revtrans audittrail method cdt namesbynumber xelatex typeofcontact roundchange referenceurl annualinterest latepaymentfee restockingcharge checkinventory hideaccounts linetax forcewarehouse glnumber sinumber sonumber vinumber batchnumber vouchernumber ponumber sqnumber rfqnumber partnumber projectnumber employeenumber customernumber vendornumber lock_glnumber lock_sinumber lock_sonumber lock_ponumber lock_sqnumber lock_rfqnumber lock_employeenumber lock_customernumber lock_vendornumber clearing transition paymentfile term_days AR_paid AP_paid";
+"company street post_office address address1 address2 city state zip country tel fax companyemail companywebsite yearend weightunit businessnumber closedto revtrans audittrail method cdt namesbynumber xelatex typeofcontact roundchange referenceurl annualinterest latepaymentfee restockingcharge checkinventory hideaccounts linetax forcewarehouse glnumber sinumber sonumber vinumber batchnumber vouchernumber ponumber sqnumber rfqnumber partnumber projectnumber employeenumber customernumber vendornumber lock_glnumber lock_sinumber lock_sonumber lock_ponumber lock_sqnumber lock_rfqnumber lock_employeenumber lock_customernumber lock_vendornumber clearing transition paymentfile term_days AR_paid AP_paid smtp_host smtp_port smtp_username smtp_from_name smtp_ssl smtp_sasl";
 
         # Save the defaults
         my $result = AM->save_defaults( $c->slconfig, $form );
@@ -5218,6 +5302,121 @@ sub format_date {
     }
 
     return $date;    # return original if not matched
+}
+
+sub _aes_encrypt {
+    use IPC::Open2;
+    my ( $data, $key ) = @_;
+    return undef unless defined $data && defined $key;
+
+    local $ENV{OPENSSL_PASS} = $key;
+    my $pid = open2(
+        my $chld_out, my $chld_in,
+        'openssl', 'enc', '-aes-256-cbc', '-a', '-salt',
+        '-pass', 'env:OPENSSL_PASS', '-pbkdf2'
+    );
+    print $chld_in $data;
+    close $chld_in;
+    my $encrypted = do { local $/; <$chld_out> };
+    waitpid( $pid, 0 );
+    return undef if ( $? >> 8 ) != 0;
+    chomp($encrypted) if $encrypted;
+    return $encrypted;
+}
+
+sub _aes_decrypt {
+    use IPC::Open2;
+    my ( $data, $key ) = @_;
+    return undef unless defined $data && defined $key;
+
+    # openssl base64 decoder requires a trailing newline
+    $data .= "\n" unless $data =~ /\n$/;
+
+    local $ENV{OPENSSL_PASS} = $key;
+    my $pid = open2(
+        my $chld_out, my $chld_in,
+        'openssl', 'enc', '-aes-256-cbc', '-d', '-a',
+        '-pass', 'env:OPENSSL_PASS', '-pbkdf2'
+    );
+    print $chld_in $data;
+    close $chld_in;
+    my $decrypted = do { local $/; <$chld_out> };
+    waitpid( $pid, 0 );
+    return undef if ( $? >> 8 ) != 0;
+    chomp($decrypted) if $decrypted;
+    return $decrypted;
+}
+
+# Tests an SMTP connection and, if successful, encrypts and stores the password
+# in connection_keys. Returns undef on success, or a hashref with status/message
+# on failure. Only runs when host, username, and password are all provided.
+sub _test_and_save_smtp_password {
+    use Email::Sender::Transport::SMTP;
+    use Email::Stuffer;
+    my ( $c, $client, $smtp_data ) = @_;
+
+    return undef
+      unless $smtp_data->{host}
+      && $smtp_data->{username}
+      && $smtp_data->{password};
+
+    # Get the current user's email directly to avoid get_user_profile's render side-effect
+    my $user_email = do {
+        my $sessionkey = $c->req->headers->header('Authorization');
+        my $row = eval {
+            $c->central_dbs->query(
+                "SELECT p.email FROM session s LEFT JOIN profile p ON s.profile_id = p.id WHERE s.sessionkey = ?",
+                $sessionkey
+            )->hash;
+        };
+        ( $row && $row->{email} ) ? $row->{email} : $smtp_data->{username};
+    };
+
+    my $from_name = $smtp_data->{from_name} || $ENV{PRODUCT_NAME} || '';
+    my $from = $from_name
+      ? "$from_name <$smtp_data->{username}>"
+      : $smtp_data->{username};
+
+    my $test_ok = eval {
+        my $transport = Email::Sender::Transport::SMTP->new(
+            host          => $smtp_data->{host},
+            port          => $smtp_data->{port} || 587,
+            ssl           => $smtp_data->{ssl}  || 'starttls',
+            sasl_username => $smtp_data->{username},
+            sasl_password => $smtp_data->{password},
+            sasl          => $smtp_data->{sasl} // 1,
+            timeout       => 15,
+        );
+        Email::Stuffer
+          ->from($from)
+          ->to($user_email)
+          ->subject('SMTP Connection Test')
+          ->text_body('This is a test email to confirm your SMTP settings are working correctly.')
+          ->transport($transport)
+          ->send_or_die;
+        1;
+    };
+    if ( !$test_ok || $@ ) {
+        my $err = $@ || 'Unknown error';
+        $err =~ s/ at \/.*? line \d+\.?\s*$//s;
+        return { status => 422, error => 'error',
+            message => "SMTP connection test failed: $err" };
+    }
+
+    my $aes_key = $ENV{aes_key};
+    return { status => 500, error => 'error', message => 'Encryption key not found' }
+      unless $aes_key;
+
+    my $enc_password = _aes_encrypt( $smtp_data->{password}, $aes_key );
+    return { status => 500, error => 'error', message => 'Failed to encrypt SMTP password' }
+      unless $enc_password;
+
+    my $dbs = $c->dbs($client);
+    $dbs->query("DELETE FROM connection_keys WHERE fldname = 'smtp_password'");
+    $dbs->insert( 'connection_keys',
+        { fldname => 'smtp_password', fldvalue => encode_json( { password => $enc_password } ) } );
+
+    return undef;
 }
 
 $api->get(
@@ -13380,8 +13579,8 @@ $api->post(
         my $locale = Locale->new;
 
         # Send email with or without attachments
-        my $status =
-          $c->send_email_central( $to, $subject, $message, \@attachments );
+        my $status = $c->send_email_central( $to, $subject, $message,
+            \@attachments, undef, $client );
         $cc  = $locale->text('Cc') . qq|: $cc\n|   if $cc;
         $bcc = $locale->text('Bcc') . qq|: $bcc\n| if $bcc;
         my $int_notes = qq| $form->{intnotes}\n\n|;
@@ -13614,7 +13813,7 @@ app->minion->add_task(
 
             # Send email with ZIP attachment
             $c->send_email_central( $adminemail, $subject, $result_message,
-                [$zip_file_path] );
+                [$zip_file_path], undef, $client );
 
             # Clean up ZIP file immediately after sending email
             unlink $zip_file_path if -e $zip_file_path;
@@ -13815,7 +14014,7 @@ app->minion->add_task(
 
                 # Send email with or without attachments
                 my $status = $c->send_email_central( $to, $subject, $message,
-                    \@attachments );
+                    \@attachments, undef, $client );
 
                 # Update internal notes
                 $cc  = $locale->text('Cc') . qq|: $cc\n|   if $cc;
@@ -13962,7 +14161,7 @@ app->minion->add_task(
             }
 
             $c->send_email_central( $adminemail, $subject, $result_message,
-                [] );
+                [], undef, $client );
         }
 
         # Update final progress status
