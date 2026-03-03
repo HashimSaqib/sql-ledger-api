@@ -4730,6 +4730,90 @@ $api->delete(
     }
 );
 
+# Suggested exchange rate (foreign -> CHF) from Swiss BAZG monthly average.
+# Base currency must be CHF. Requires gl.transaction, customer.transaction or vendor.transaction.
+$api->get(
+    '/get_exchange_rate' => sub {
+        my $c = shift;
+        return unless my $form = $c->check_perms("gl.transaction, customer.transaction, vendor.transaction");
+        my $client   = $c->param('client');
+        my $currency = $c->param('currency');
+        my $transdate = $c->param('transdate');
+
+        unless ( $currency && $transdate ) {
+            return $c->render(
+                status => 400,
+                json   => { message => "Missing required parameters: currency and transdate" }
+            );
+        }
+
+        my $dbs = $c->dbs($client);
+        my $base_row = $dbs->query("SELECT curr FROM curr WHERE rn = 1")->hash;
+        unless ( $base_row && uc( $base_row->{curr} // '' ) eq 'CHF' ) {
+            return $c->render(
+                status => 400,
+                json   => { message => "Exchange rate is only available when base currency is CHF" }
+            );
+        }
+
+        my $curr_uc = uc($currency);
+        if ( $curr_uc eq 'CHF' ) {
+            return $c->render(
+                status => 400,
+                json   => { message => "Currency must not be CHF when base is CHF" }
+            );
+        }
+
+        my ( $y, $m ) = ( $transdate =~ /^(\d{4})-(\d{2})/ );
+        unless ( $y && $m ) {
+            return $c->render(
+                status => 400,
+                json   => { message => "transdate must be in YYYY-MM-DD format" }
+            );
+        }
+
+        my $url = "https://www.backend-rates.bazg.admin.ch/api/xmlavgmonth?j=$y&m=$m";
+        my $ua  = Mojo::UserAgent->new;
+        my $tx  = $ua->get($url);
+        unless ( $tx->res->is_success ) {
+            return $c->render(
+                status => 502,
+                json   => { message => "Failed to fetch exchange rate from provider" }
+            );
+        }
+        my $xml = $tx->res->body;
+        unless ( defined $xml && $xml ne '' ) {
+            return $c->render(
+                status => 502,
+                json   => { message => "Empty response from exchange rate provider" }
+            );
+        }
+
+        my $curr_lc = lc($curr_uc);
+        unless ( $xml =~ /<devise\s+code="\Q$curr_lc\E"/ ) {
+            return $c->render(
+                status => 404,
+                json   => { message => "Exchange rate not found for currency: $currency" }
+            );
+        }
+
+        my ($kurs) = $xml =~ /<devise\s+code="\Q$curr_lc\E"[^>]*>.*?<kurs>([\d.]+)<\/kurs>/s;
+        my ($waehrung) = $xml =~ /<devise\s+code="\Q$curr_lc\E"[^>]*>.*?<waehrung>([^<]*)<\/waehrung>/s;
+        unless ( defined $kurs && $kurs ne '' && $kurs != 0 ) {
+            return $c->render(
+                status => 502,
+                json   => { message => "Invalid or missing rate data for currency: $currency" }
+            );
+        }
+        my $multiplier = 1;
+        $multiplier = $1 if defined $waehrung && $waehrung =~ /^(\d+)/;
+        $multiplier = 1 if $multiplier < 1;
+        my $rate = $kurs / $multiplier;
+
+        $c->render( json => { exchange_rate => $rate, currency => $curr_uc, transdate => $transdate } );
+    }
+);
+
 $api->get(
     '/system/languages' => sub {
         my $c = shift;
