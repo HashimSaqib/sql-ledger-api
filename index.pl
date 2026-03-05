@@ -9083,6 +9083,7 @@ $api->get(
             exchangerate     => $form->{"$form->{currency}"},
             id               => $form->{id},
             department_id    => $form->{department_id},
+            rounding         => $form->{rounding} + 0,
             files            => $files,
             lines            => \@lines,
             payments         => \@payments,
@@ -9143,6 +9144,7 @@ helper process_invoice => sub {
     $form->{till}         = $data->{till}         || '';
     $form->{department}   = $data->{department}   || '';
     $form->{dcn}          = $data->{dcn}          || '';
+    $form->{rounding}     = $data->{rounding}     || 0;
 
     # Set up AR or AP account from JSON
     # for AR, it's $form->{AR}, for AP, it's $form->{AP}.
