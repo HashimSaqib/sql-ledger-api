@@ -1347,8 +1347,11 @@ sub post_invoice {
     }
 
     my %defaults =
-      $form->get_defaults( $dbh, \@{ [ 'fx%_accno_id', 'cdt', 'precision', 'currencies' ] } );
+      $form->get_defaults( $dbh, \@{ [ 'fx%_accno_id', 'cdt', 'precision' ] } );
     $form->{precision} = $defaults{precision};
+
+    ($defaults{basecurrency}) = $dbh->selectrow_array(
+        qq|SELECT curr FROM curr WHERE rn = 1|);
 
     $query = qq|SELECT p.assembly, p.inventory_accno_id,
               p.income_accno_id, p.expense_accno_id, p.project_id
@@ -1944,8 +1947,12 @@ qq|INSERT INTO invoicetax (trans_id, invoice_id, chart_id, amount, taxamount)
     }
 
     my $rounding = 0;
+    warn "DEBUG rounding: form->{rounding}=" . ($form->{rounding} // 'undef')
+       . " form->{currency}=" . ($form->{currency} // 'undef')
+       . " basecurrency=" . ($defaults{basecurrency} // 'undef')
+       . " fxgainloss_accno_id=" . ($defaults{fxgainloss_accno_id} // 'undef');
     if (   $form->{rounding}
-        && $form->{currency} eq substr( $defaults{currencies}, 0, 3 ) )
+        && $form->{currency} eq $defaults{basecurrency} )
     {
         $rounding =
           $form->round_amount(
@@ -1953,6 +1960,10 @@ qq|INSERT INTO invoicetax (trans_id, invoice_id, chart_id, amount, taxamount)
             $form->{precision} );
         $invamount =
           $form->round_amount( $invamount + $rounding, $form->{precision} );
+        warn "DEBUG rounding: parsed=$rounding invamount_after=$invamount";
+    }
+    else {
+        warn "DEBUG rounding: skipped (rounding=0 or currency mismatch)";
     }
 
     $form->{receivables} = $invamount * -1;
@@ -1979,11 +1990,15 @@ qq|INSERT INTO invoicetax (trans_id, invoice_id, chart_id, amount, taxamount)
     }
 
     if ( $rounding && $defaults{fxgainloss_accno_id} ) {
+        warn "DEBUG rounding: inserting acc_trans rounding=$rounding chart_id=$defaults{fxgainloss_accno_id}";
         $query = qq|INSERT INTO acc_trans (trans_id, chart_id, amount,
                 transdate, source)
                 VALUES ($form->{id}, $defaults{fxgainloss_accno_id},
                 $rounding, '$form->{transdate}', 'auto_rounding')|;
         $dbh->do($query) || $form->dberror($query);
+    }
+    elsif ($rounding) {
+        warn "DEBUG rounding: rounding=$rounding but fxgainloss_accno_id is not set - acc_trans insert skipped";
     }
 
     $i = $form->{discount_index};
