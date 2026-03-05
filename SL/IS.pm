@@ -1347,7 +1347,7 @@ sub post_invoice {
     }
 
     my %defaults =
-      $form->get_defaults( $dbh, \@{ [ 'fx%_accno_id', 'cdt', 'precision' ] } );
+      $form->get_defaults( $dbh, \@{ [ 'fx%_accno_id', 'cdt', 'precision', 'currencies' ] } );
     $form->{precision} = $defaults{precision};
 
     $query = qq|SELECT p.assembly, p.inventory_accno_id,
@@ -1943,6 +1943,18 @@ qq|INSERT INTO invoicetax (trans_id, invoice_id, chart_id, amount, taxamount)
         $fxdiff = 0;
     }
 
+    my $rounding = 0;
+    if (   $form->{rounding}
+        && $form->{currency} eq substr( $defaults{currencies}, 0, 3 ) )
+    {
+        $rounding =
+          $form->round_amount(
+            $form->parse_amount( $myconfig, $form->{rounding} ) * $sw,
+            $form->{precision} );
+        $invamount =
+          $form->round_amount( $invamount + $rounding, $form->{precision} );
+    }
+
     $form->{receivables} = $invamount * -1;
 
     delete $form->{acc_trans}{lineitems};
@@ -1963,6 +1975,14 @@ qq|INSERT INTO invoicetax (trans_id, invoice_id, chart_id, amount, taxamount)
 		       (SELECT id FROM chart
 		        WHERE accno = '$araccno'),
                 $form->{receivables}, '$form->{transdate}')|;
+        $dbh->do($query) || $form->dberror($query);
+    }
+
+    if ( $rounding && $defaults{fxgainloss_accno_id} ) {
+        $query = qq|INSERT INTO acc_trans (trans_id, chart_id, amount,
+                transdate, source)
+                VALUES ($form->{id}, $defaults{fxgainloss_accno_id},
+                $rounding, '$form->{transdate}', 'auto_rounding')|;
         $dbh->do($query) || $form->dberror($query);
     }
 
@@ -3308,6 +3328,19 @@ sub retrieve_invoice {
             }
 
             push @{ $form->{invoice_details} }, $ref;
+        }
+        $sth->finish;
+
+        $form->{rounding} = 0;
+        $query = qq|SELECT ac.amount
+                FROM acc_trans ac
+                WHERE ac.trans_id = $form->{id}
+                AND ac.source = 'auto_rounding'
+                LIMIT 1|;
+        $sth = $dbh->prepare($query);
+        $sth->execute || $form->dberror($query);
+        if ( $ref = $sth->fetchrow_hashref(NAME_lc) ) {
+            $form->{rounding} = $ref->{amount};
         }
         $sth->finish;
 
