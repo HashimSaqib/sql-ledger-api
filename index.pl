@@ -541,13 +541,16 @@ WHERE s.sessionkey = ?",
     return $profile;
 };
 helper is_admin => sub {
-    my $c       = shift;
-    my $client  = $c->param('client');
-    my $profile = $c->get_user_profile();
-    my $dbs     = $c->central_dbs();
+    my $c            = shift;
+    my $check_only   = shift;    # if true, return 0 instead of rendering 403
+    my $client       = $c->param('client');
+    my $profile      = $c->get_user_profile();
+    my $dbs          = $c->central_dbs();
 
     my $dataset =
       $dbs->query( "SELECT id from dataset WHERE db_name = ?", $client )->hash;
+    return 0 if $check_only && !$dataset;
+
     my $sql =
 "SELECT access_level FROM dataset_access WHERE profile_id = ? AND dataset_id = ?";
     my $access =
@@ -559,6 +562,7 @@ helper is_admin => sub {
             || $access->{access_level} eq 'owner' )
       )
     {
+        return 0 if $check_only;
         return $c->render(
             status => 403,
             json   => { message => "Insufficient permissions" }

@@ -695,6 +695,25 @@ sub invoice_details {
         $form->{invtotal} = $form->{total} + $tax;
     }
 
+    # Include rounding in invoice total when present (from post_invoice/retrieve_invoice)
+    if ( $form->{rounding} ) {
+        my $rounding_amt =
+          $form->parse_amount( $myconfig, $form->{rounding} ) || $form->{rounding};
+        $form->{invtotal} += $rounding_amt;
+    }
+
+    # Retrieve path: when invoice_details was built from DB (id set, no rowcount loop),
+    # use ar amount/netamount so totals include rounding and match stored values
+    if ( $form->{id}
+        && ref $form->{invoice_details} eq 'ARRAY'
+        && @{ $form->{invoice_details} }
+        && $form->{total} == 0 )
+    {
+        $form->{invtotal} = $form->{amount};
+        $form->{subtotal} = $form->{netamount};
+        $form->{total}    = $form->{invtotal} - ( $form->{paid} || 0 );
+    }
+
     for (qw(subtotal invtotal)) { $form->{"cd_$_"} = $form->{$_} }
     my $cdt = $form->parse_amount( $myconfig, $form->{discount_paid} );
     $cdt ||= $form->{cd_available};
