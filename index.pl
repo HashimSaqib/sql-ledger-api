@@ -1480,7 +1480,6 @@ $central->get(
             $profile->{profile_id}
         )->hashes;
 
-        create_temp_columns( $c, $datasets );
 
         foreach my $dataset (@$datasets) {
             my $db_dbs = $c->dbs( $dataset->{db_name} );
@@ -1899,6 +1898,7 @@ $central->post(
 
         # If no rows have parent_id values, run the parent mapping SQL
         if ( $parent_id_count == 0 ) {
+            warn("Assigning Parent IDs to charts");
             my $parent_mapping_sql = q{
                 -- Create a CTE to get each 'A' row and the most recent preceding 'H' row
                 WITH parent_mapping AS (
@@ -7635,9 +7635,13 @@ $api->get(
             }
         }
 
-        # Handle entity-specific fields
-        if ( my $entity_id = $data->{"vc_id"} ) {
-            $form->{"${vc}_id"} = $entity_id;
+        # Handle entity-specific fields (single id or multiple: comma-separated / repeated param)
+        if ( defined $data->{"vc_id"} && $data->{"vc_id"} ne '' ) {
+            my $vc_ids = $data->{"vc_id"};
+            $vc_ids = [ $vc_ids ] unless ref $vc_ids eq 'ARRAY';
+            $vc_ids = [ split( /\s*,\s*/, $vc_ids->[0] ) ] if @$vc_ids == 1 && $vc_ids->[0] =~ /,/;
+            $vc_ids = [ grep { /\S/ } map { ref $_ ? $_ : $_ } @$vc_ids ];
+            $form->{"${vc}_id"} = @$vc_ids == 1 ? $vc_ids->[0] : $vc_ids;
         }
         if ( my $number = $data->{"${vc}number"} ) {
             $form->{"${vc}number"} = $number;
@@ -7752,8 +7756,14 @@ $api->get(
             push @binds, $params->{transdateto};
         }
         if ( $params->{"${vc}_id"} ) {
-            $query .= " AND a.${vc}_id = ?";
-            push @binds, $params->{"${vc}_id"};
+            my $vc_ids = $params->{"${vc}_id"};
+            $vc_ids = [ $vc_ids ] unless ref $vc_ids eq 'ARRAY';
+            $vc_ids = [ split( /\s*,\s*/, $vc_ids->[0] ) ] if @$vc_ids == 1 && $vc_ids->[0] =~ /,/;
+            $vc_ids = [ grep { /\S/ } map { ref $_ ? $_ : $_ } @$vc_ids ];
+            if (@$vc_ids) {
+                $query .= " AND a.${vc}_id IN (" . join( ", ", ("?") x @$vc_ids ) . ")";
+                push @binds, @$vc_ids;
+            }
         }
         if ( $params->{$vc} ) {
             $query .= " AND lower(vc.name) LIKE lower(?)";
@@ -14741,8 +14751,14 @@ helper get_overview_data => sub {
         push @binds, $params->{transdateto};
     }
     if ( $params->{"${vc}_id"} ) {
-        $query .= " AND a.${vc}_id = ?";
-        push @binds, $params->{"${vc}_id"};
+        my $vc_ids = $params->{"${vc}_id"};
+        $vc_ids = [ $vc_ids ] unless ref $vc_ids eq 'ARRAY';
+        $vc_ids = [ split( /\s*,\s*/, $vc_ids->[0] ) ] if @$vc_ids == 1 && $vc_ids->[0] =~ /,/;
+        $vc_ids = [ grep { /\S/ } map { ref $_ ? $_ : $_ } @$vc_ids ];
+        if (@$vc_ids) {
+            $query .= " AND a.${vc}_id IN (" . join( ", ", ("?") x @$vc_ids ) . ")";
+            push @binds, @$vc_ids;
+        }
     }
     if ( $params->{$vc} ) {
         $query .= " AND lower(vc.name) LIKE lower(?)";
