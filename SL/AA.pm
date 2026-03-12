@@ -947,9 +947,19 @@ sub transactions {
 |;
 
   my $where = "a.approved = '1'";
-  if ($form->{"$form->{vc}_id"} *= 1) {
-    $where .= qq| AND a.$form->{vc}_id = $form->{"$form->{vc}_id"}|;
-  } else {
+  my $vc_id_val = $form->{"$form->{vc}_id"};
+  my $filtered_by_vc_id = 0;
+  if (ref $vc_id_val eq 'ARRAY' && @$vc_id_val) {
+    my @ids = map { int($_) } grep { /\d/ } @$vc_id_val;
+    if (@ids) {
+      $where .= qq| AND a.$form->{vc}_id IN (| . join(',', @ids) . qq|)|;
+      $filtered_by_vc_id = 1;
+    }
+  } elsif ($vc_id_val && ($vc_id_val *= 1)) {
+    $where .= qq| AND a.$form->{vc}_id = $vc_id_val|;
+    $filtered_by_vc_id = 1;
+  }
+  if (!$filtered_by_vc_id) {
     if ($form->{$form->{vc}}) {
       $var = $form->like(lc $form->{$form->{vc}});
       $where .= " AND lower(vc.name) LIKE '$var'";
