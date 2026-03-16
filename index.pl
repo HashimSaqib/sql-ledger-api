@@ -1711,7 +1711,7 @@ $central->get(
         opendir( my $sql_dh, $sql_dir ) or return ();
         my @charts =
           sort map { ( basename($_) =~ s/-chart\.sql$//r ) }
-          grep     { /-chart\.sql$/ && -f $_ }
+          grep     { basename($_) =~ /^NEO.*-chart\.sql$/ && -f $_ }
           map      { $sql_dir . $_ } readdir($sql_dh);
         closedir($sql_dh);
 
