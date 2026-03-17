@@ -388,3 +388,55 @@ INSERT INTO db_updates (version, last_update) VALUES ('016', 'Chart Detail');
 
 CREATE TABLE messages ( id SERIAL, message_type VARCHAR(255) NOT NULL, language_code VARCHAR(15) NOT NULL, content TEXT, trans_id INTEGER);
 INSERT INTO db_updates (version, last_update) VALUES ('017', 'Messages');
+
+CREATE TABLE recurring_invoice (
+    id SERIAL PRIMARY KEY,
+    profile_id INTEGER,
+    name VARCHAR(255),
+    vc VARCHAR(20) NOT NULL DEFAULT 'customer',
+    invoice_payload JSONB NOT NULL,
+    frequency VARCHAR(20) NOT NULL,
+    delivery_time TIME NOT NULL DEFAULT '09:00:00',
+    custom_schedule JSONB,
+    start_date DATE NOT NULL,
+    end_date DATE,
+    last_run_at TIMESTAMP WITHOUT TIME ZONE,
+    is_active BOOLEAN DEFAULT true,
+    send_email BOOLEAN DEFAULT false,
+    message TEXT,
+    created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_recurring_invoice_active ON recurring_invoice(is_active);
+
+CREATE TABLE recurring_invoice_run (
+    id SERIAL PRIMARY KEY,
+    recurring_invoice_id INTEGER NOT NULL REFERENCES recurring_invoice(id) ON DELETE CASCADE,
+    ran_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    created_invoice_id INTEGER,
+    status VARCHAR(20) NOT NULL,
+    error_message TEXT
+);
+
+CREATE INDEX idx_recurring_invoice_run_schedule ON recurring_invoice_run(recurring_invoice_id, ran_at);
+
+INSERT INTO db_updates (version, last_update) VALUES ('018', 'Recurring Invoicing');
+
+CREATE TABLE chart_categories (
+    id          SERIAL PRIMARY KEY,
+    accno       text NOT NULL,
+    description text NOT NULL
+);
+
+CREATE TABLE chart_category_links (
+    id          SERIAL PRIMARY KEY,
+    chart_id    int NOT NULL,
+    category_id int NOT NULL REFERENCES chart_categories(id) ON DELETE CASCADE,
+    UNIQUE(chart_id, category_id)
+);
+
+CREATE INDEX idx_chart_category_links_chart_id ON chart_category_links(chart_id);
+CREATE INDEX idx_chart_category_links_category_id ON chart_category_links(category_id);
+
+INSERT INTO db_updates (version, last_update) VALUES ('019', 'Chart Categories');

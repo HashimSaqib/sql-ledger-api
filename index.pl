@@ -1926,6 +1926,37 @@ $central->post(
             $dataset_dbh->do($parent_mapping_sql);
         }
 
+        # Seed chart_categories and chart_category_links if not already populated
+        my $cat_sth = $dataset_dbh->prepare(
+            "SELECT COUNT(*) FROM chart_categories");
+        $cat_sth->execute();
+        my ($cat_count) = $cat_sth->fetchrow_array();
+        $cat_sth->finish();
+
+        if ( $cat_count == 0 ) {
+            warn("Seeding chart categories from header accounts");
+
+            # Create one category per header account, ordered by accno
+            $dataset_dbh->do(q{
+                INSERT INTO chart_categories (accno, description)
+                SELECT accno, description
+                FROM chart
+                WHERE charttype = 'H'
+                ORDER BY accno
+            });
+
+            # Link each bookable account to its direct parent's category
+            $dataset_dbh->do(q{
+                INSERT INTO chart_category_links (chart_id, category_id)
+                SELECT c.id, cc.id
+                FROM chart c
+                JOIN chart parent ON parent.id = c.parent_id
+                JOIN chart_categories cc ON cc.accno = parent.accno
+                WHERE c.charttype = 'A'
+                ON CONFLICT (chart_id, category_id) DO NOTHING
+            });
+        }
+
         # Check if the gifi file exists before running it
         my $gifi_file;
         if ( $chart =~ /^RMA/ ) {
@@ -5705,14 +5736,75 @@ $api->post(
     }
 );
 
+# Auto-seeds chart_categories from header accounts and assigns each bookable
+# account to its direct parent's category, if no categories exist yet.
+# Called from GET /system/chart/accounts so that existing datasets without
+# categories get populated on first access. Remove this call once all
+# datasets have been migrated.
+helper seed_chart_categories_if_empty => sub {
+    my ( $c, $dbs ) = @_;
+
+    my $cat_count =
+      $dbs->query("SELECT COUNT(*) FROM chart_categories")->array->[0];
+    return if $cat_count > 0;
+
+    $c->app->log->info("Seeding chart categories from header accounts");
+
+    $dbs->query(q{
+        INSERT INTO chart_categories (accno, description)
+        SELECT accno, description
+        FROM chart
+        WHERE charttype = 'H'
+        ORDER BY accno
+    });
+
+    $dbs->query(q{
+        INSERT INTO chart_category_links (chart_id, category_id)
+        SELECT c.id, cc.id
+        FROM chart c
+        JOIN chart parent ON parent.id = c.parent_id
+        JOIN chart_categories cc ON cc.accno = parent.accno
+        ON CONFLICT (chart_id, category_id) DO NOTHING
+    });
+};
+
 $api->get(
     '/system/chart/accounts' => sub {
         my $c = shift;
         return unless my $form = $c->check_perms("system.chart.list");
         my $client = $c->param('client');
+        my $dbs    = $c->dbs($client);
+
+        # Auto-seed categories for datasets that predate this feature
+        $c->seed_chart_categories_if_empty($dbs);
 
         my $result = CA->all_accounts( $c->slconfig, $form );
         if ($result) {
+            # Fetch all category assignments in one query and index by chart_id
+            my $links = $dbs->query(
+                q{SELECT ccl.chart_id,
+                         cc.id          AS category_id,
+                         cc.accno       AS category_accno,
+                         cc.description AS category_description
+                  FROM chart_category_links ccl
+                  JOIN chart_categories cc ON cc.id = ccl.category_id}
+            )->hashes;
+
+            my %cats_by_chart;
+            for my $row (@$links) {
+                push @{ $cats_by_chart{ $row->{chart_id} } }, {
+                    id          => $row->{category_id},
+                    accno       => $row->{category_accno},
+                    description => $row->{category_description},
+                };
+            }
+
+            # Attach categories array to each account
+            for my $account ( @{ $form->{CA} } ) {
+                $account->{categories} =
+                  $cats_by_chart{ $account->{id} } // [];
+            }
+
             $c->render( json => $form->{CA} );
         }
         else {
@@ -5752,6 +5844,17 @@ $api->get(
         $form->{has_defaults}     = $defaults->rows > 0     ? \1 : \0;
         $form->{has_parts}        = $parts->rows > 0        ? \1 : \0;
         if ($result) {
+            # Attach category assignments for this account
+            my $cats = $dbs->query(
+                q{SELECT cc.id, cc.accno, cc.description
+                  FROM chart_category_links ccl
+                  JOIN chart_categories cc ON cc.id = ccl.category_id
+                  WHERE ccl.chart_id = ?
+                  ORDER BY cc.accno},
+                $id
+            )->hashes;
+            $form->{categories} = $cats;
+
             $c->render( json => {%$form} );
         }
         else {
@@ -5770,9 +5873,14 @@ $api->post(
     '/system/chart/accounts/:id' => { id => undef } => sub {
         my $c = shift;
         return unless my $form = $c->check_perms("system.chart.add");
-        my $client = $c->param('client');
-        my $id     = $c->param("id");
-        my $params = $c->req->json;
+        my $client     = $c->param('client');
+        my $id         = $c->param("id");
+        my $params     = $c->req->json;
+        my $dbs        = $c->dbs($client);
+
+        # Extract category_ids before copying params into $form
+        my $category_ids = $params->{category_ids};
+        delete $params->{category_ids} if exists $params->{category_ids};
 
         for ( keys %$params ) { $form->{$_} = $params->{$_} if $params->{$_} }
         $form->{id} = $id // undef;
@@ -5780,6 +5888,36 @@ $api->post(
         my $result = AM->save_account( $c->slconfig, $form );
 
         if ($result) {
+            # $form->{id} is set by AM->save_account after insert
+            my $chart_id = $form->{id};
+
+            if ( defined $category_ids && ref $category_ids eq 'ARRAY' ) {
+                # Replace all category assignments for this account
+                $dbs->query(
+                    "DELETE FROM chart_category_links WHERE chart_id = ?",
+                    $chart_id );
+
+                for my $cat_id (@$category_ids) {
+                    $dbs->query(
+                        q{INSERT INTO chart_category_links (chart_id, category_id)
+                          VALUES (?, ?)
+                          ON CONFLICT (chart_id, category_id) DO NOTHING},
+                        $chart_id, $cat_id
+                    );
+                }
+            }
+
+            # Return the account with its current categories
+            my $cats = $dbs->query(
+                q{SELECT cc.id, cc.accno, cc.description
+                  FROM chart_category_links ccl
+                  JOIN chart_categories cc ON cc.id = ccl.category_id
+                  WHERE ccl.chart_id = ?
+                  ORDER BY cc.accno},
+                $chart_id
+            )->hashes;
+            $form->{categories} = $cats;
+
             $c->render( json => {%$form} );
         }
         else {
@@ -5859,6 +5997,206 @@ $api->delete(
         }
     }
 );
+##################################
+####                          ####
+####  CHART CATEGORIES        ####
+####                          ####
+##################################
+
+$api->get(
+    '/system/chart/categories' => sub {
+        my $c = shift;
+        return unless my $form = $c->check_perms("system.chart.list");
+        my $client = $c->param('client');
+        my $dbs    = $c->dbs($client);
+
+        $c->seed_chart_categories_if_empty($dbs);
+
+        my $categories = $dbs->query(
+            q{SELECT id, accno, description
+              FROM chart_categories
+              ORDER BY accno}
+        )->hashes;
+
+        my $link_rows = $dbs->query(
+            q{SELECT ccl.category_id,
+                     c.id          AS chart_id,
+                     c.accno       AS chart_accno,
+                     c.description AS chart_description
+              FROM chart_category_links ccl
+              JOIN chart c ON c.id = ccl.chart_id
+              ORDER BY ccl.category_id, c.accno}
+        )->hashes;
+
+        my %charts_by_category;
+        for my $row (@$link_rows) {
+            push @{ $charts_by_category{ $row->{category_id} } }, {
+                id          => $row->{chart_id} + 0,
+                accno       => $row->{chart_accno},
+                description => $row->{chart_description},
+            };
+        }
+
+        for my $cat (@$categories) {
+            $cat->{charts} = $charts_by_category{ $cat->{id} } // [];
+        }
+
+        $c->render( json => $categories );
+    }
+);
+
+$api->post(
+    '/system/chart/categories' => sub {
+        my $c = shift;
+        return unless my $form = $c->check_perms("system.chart.add");
+        my $client = $c->param('client');
+        my $dbs    = $c->dbs($client);
+        my $params = $c->req->json;
+
+        unless ( $params->{accno} && $params->{description} ) {
+            return $c->render(
+                status => 400,
+                json   => { error => 'accno and description are required' }
+            );
+        }
+
+        $dbs->query(
+            q{INSERT INTO chart_categories (accno, description)
+              VALUES (?, ?)},
+            $params->{accno},
+            $params->{description},
+        );
+
+        my $id = $dbs->last_insert_id( undef, undef, 'chart_categories', 'id' );
+        my $cat = $dbs->query(
+            "SELECT id, accno, description FROM chart_categories WHERE id = ?",
+            $id
+        )->hash;
+
+        $c->render( json => $cat );
+    }
+);
+
+$api->post(
+    '/system/chart/categories/:id' => sub {
+        my $c   = shift;
+        return unless my $form = $c->check_perms("system.chart.add");
+        my $client = $c->param('client');
+        my $id     = $c->param('id');
+        my $dbs    = $c->dbs($client);
+        my $params = $c->req->json;
+
+        my $existing = $dbs->query(
+            "SELECT id FROM chart_categories WHERE id = ?", $id )->hash;
+        unless ($existing) {
+            return $c->render(
+                status => 404,
+                json   => { error => 'Category not found' }
+            );
+        }
+
+        my @fields;
+        my @values;
+        for my $f (qw(accno description)) {
+            if ( exists $params->{$f} ) {
+                push @fields, "$f = ?";
+                push @values, $params->{$f};
+            }
+        }
+
+        if (@fields) {
+            $dbs->query(
+                "UPDATE chart_categories SET " . join( ', ', @fields ) .
+                " WHERE id = ?",
+                @values, $id
+            );
+        }
+
+        my $cat = $dbs->query(
+            "SELECT id, accno, description FROM chart_categories WHERE id = ?",
+            $id
+        )->hash;
+
+        $c->render( json => $cat );
+    }
+);
+
+$api->delete(
+    '/system/chart/categories/:id' => sub {
+        my $c = shift;
+        return unless my $form = $c->check_perms("system.chart.add");
+        my $client = $c->param('client');
+        my $id     = $c->param('id');
+        my $dbs    = $c->dbs($client);
+
+        my $existing = $dbs->query(
+            "SELECT id FROM chart_categories WHERE id = ?", $id )->hash;
+        unless ($existing) {
+            return $c->render(
+                status => 404,
+                json   => { error => 'Category not found' }
+            );
+        }
+
+        # chart_category_links will cascade-delete due to ON DELETE CASCADE
+        $dbs->query( "DELETE FROM chart_categories WHERE id = ?", $id );
+
+        $c->render( json => { success => 1, message => 'Category deleted' } );
+    }
+);
+
+# Replace all category assignments for a single account
+$api->post(
+    '/system/chart/accounts/:id/categories' => sub {
+        my $c = shift;
+        return unless my $form = $c->check_perms("system.chart.add");
+        my $client     = $c->param('client');
+        my $chart_id   = $c->param('id');
+        my $dbs        = $c->dbs($client);
+        my $params     = $c->req->json;
+
+        unless ( $params->{category_ids} && ref $params->{category_ids} eq 'ARRAY' ) {
+            return $c->render(
+                status => 400,
+                json   => { error => 'category_ids array is required' }
+            );
+        }
+
+        my $account = $dbs->query(
+            "SELECT id FROM chart WHERE id = ?", $chart_id )->hash;
+        unless ($account) {
+            return $c->render(
+                status => 404,
+                json   => { error => 'Account not found' }
+            );
+        }
+
+        # Replace all assignments atomically
+        $dbs->query(
+            "DELETE FROM chart_category_links WHERE chart_id = ?", $chart_id );
+
+        for my $cat_id ( @{ $params->{category_ids} } ) {
+            $dbs->query(
+                q{INSERT INTO chart_category_links (chart_id, category_id)
+                  VALUES (?, ?)
+                  ON CONFLICT (chart_id, category_id) DO NOTHING},
+                $chart_id, $cat_id
+            );
+        }
+
+        my $cats = $dbs->query(
+            q{SELECT cc.id, cc.accno, cc.description
+              FROM chart_category_links ccl
+              JOIN chart_categories cc ON cc.id = ccl.category_id
+              WHERE ccl.chart_id = ?
+              ORDER BY cc.accno},
+            $chart_id
+        )->hashes;
+
+        $c->render( json => { chart_id => $chart_id + 0, categories => $cats } );
+    }
+);
+
 $api->get(
     '/system/chart/gifi' => sub {
         my $c = shift;
