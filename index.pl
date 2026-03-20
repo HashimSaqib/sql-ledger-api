@@ -14990,33 +14990,13 @@ $api->get(
         my $c      = shift;
         my $client = $c->param('client');
         return unless my $form = $c->check_perms("dashboard");
-        my $dbs           = $c->dbs($client);
-        my $params        = $c->req->params->to_hash;
-        my $bank_accounts = $dbs->query(
-            "SELECT c.id, c.accno, c.description, c.closed,
-                 bk.name, bk.iban
-                 FROM chart c
-                 LEFT JOIN bank bk ON (bk.id = c.id)
-                 WHERE c.link LIKE '%_paid%'
-                 ORDER BY 2"
-        )->hashes;
+        my $dbs    = $c->dbs($client);
+        my $params = $c->req->params->to_hash;
 
-# Single query for all acc_trans for these bank accounts (uses acc_trans_chart_id_key)
-        my $acc_trans_rows = $dbs->query(
-            "SELECT chart_id, (amount * -1) AS amount, transdate, approved
-                 FROM acc_trans
-                 WHERE chart_id IN (
-                     SELECT c.id FROM chart c WHERE c.link LIKE '%_paid%'
-                 )
-                AND approved = '1' ORDER BY chart_id, transdate DESC"
-        )->hashes;
-
-        my %acc_trans_by_chart;
-        for my $row ( @{$acc_trans_rows} ) {
-            push @{ $acc_trans_by_chart{ $row->{chart_id} } }, $row;
-        }
-        for my $account ( @{$bank_accounts} ) {
-            $account->{acc_trans} = $acc_trans_by_chart{ $account->{id} } // [];
+        # Default start date to January 1st of the current year when not provided
+        unless ( $params->{transdatefrom} ) {
+            my ($year) = (localtime)[5];
+            $params->{transdatefrom} = sprintf( "%04d-01-01", $year + 1900 );
         }
 
         # Get widget config for the user (can be empty)
@@ -15024,29 +15004,100 @@ $api->get(
           $dbs->query( "SELECT config FROM widget_config WHERE user_id = ?",
             $form->{profile_id} )->hash;
 
-        my $config = $widget_config ? $widget_config->{config} : {};
-
+        my $config   = $widget_config ? $widget_config->{config} : {};
         my $response = { config => $config };
 
-        # Check if user has customer.overview permission
         if ( $c->has_perm( $form, 'customer.overview' ) ) {
             $response->{customer_overview} =
-              $c->get_overview_data( $dbs, 'customer', $params );
+              $c->get_overview_widget_data( $dbs, 'customer', $params );
         }
 
-        # Check if user has vendor.overview permission
         if ( $c->has_perm( $form, 'vendor.overview' ) ) {
             $response->{vendor_overview} =
-              $c->get_overview_data( $dbs, 'vendor', $params );
+              $c->get_overview_widget_data( $dbs, 'vendor', $params );
         }
 
-        # Check if ai_plugin is enabled and user has stations.get permission
         if ( $ai_plugin && $c->has_perm( $form, 'stations.get' ) ) {
             $response->{workflow_pending} =
               $c->get_workflow_pending_invoices( $dbs, $form, $client );
         }
 
         if ( $c->has_perm( $form, 'gl.transactions' ) ) {
+            $response->{revenue} =
+              $c->get_revenue_widget_data( $dbs, $params );
+
+            $response->{pl} =
+              $c->get_pl_widget_data( $dbs, $params );
+
+            $response->{balance_sheet} =
+              $c->get_balance_sheet_widget_data( $dbs, $params );
+
+            my $bank_accounts = $dbs->query(
+                "SELECT c.id, c.accno, c.description, c.closed,
+                     bk.name, bk.iban
+                     FROM chart c
+                     LEFT JOIN bank bk ON (bk.id = c.id)
+                     WHERE c.link LIKE '%_paid%'
+                     ORDER BY 2"
+            )->hashes;
+
+            my @chart_ids = map { $_->{id} } @{$bank_accounts};
+
+            if (@chart_ids) {
+                my $id_placeholders = join( ", ", ("?") x scalar @chart_ids );
+
+                # Build bind list: chart_ids first, then optional date_to, then optional date_from
+                my @bank_binds     = @chart_ids;
+                my $date_to_clause = '';
+                if ( $params->{transdateto} ) {
+                    $date_to_clause = " AND transdate <= ?";
+                    push @bank_binds, $params->{transdateto};
+                }
+
+                my $date_from_clause = '';
+                if ( $params->{transdatefrom} ) {
+                    my $from_month = substr( $params->{transdatefrom}, 0, 7 );
+                    $date_from_clause = " WHERE month >= ?";
+                    push @bank_binds, $from_month;
+                }
+
+                # Cumulative running balance per account per month.
+                # Inner query aggregates all history up to transdateto; outer query
+                # trims the visible months to transdatefrom onwards.
+                my $bank_query = qq|
+                    SELECT chart_id, month, running_balance
+                    FROM (
+                        SELECT
+                            chart_id,
+                            TO_CHAR(transdate, 'YYYY-MM') AS month,
+                            SUM(SUM(amount * -1)) OVER (
+                                PARTITION BY chart_id
+                                ORDER BY TO_CHAR(transdate, 'YYYY-MM')
+                            ) AS running_balance
+                        FROM acc_trans
+                        WHERE chart_id IN ($id_placeholders)
+                          AND approved = '1'
+                          $date_to_clause
+                        GROUP BY chart_id, TO_CHAR(transdate, 'YYYY-MM')
+                    ) sub
+                    $date_from_clause
+                    ORDER BY chart_id, month
+                |;
+
+                my $balance_rows = $dbs->query( $bank_query, @bank_binds )->hashes;
+
+                my %balance_by_account;
+                for my $row ( @{$balance_rows} ) {
+                    $balance_by_account{ $row->{chart_id} }{ $row->{month} } =
+                      $row->{running_balance} + 0;
+                }
+
+                for my $account ( @{$bank_accounts} ) {
+                    $account->{balance_by_month} =
+                      $balance_by_account{ $account->{id} } // {};
+                }
+            }
+
             $response->{bank_accounts} = $bank_accounts;
         }
 
@@ -15162,6 +15213,624 @@ helper get_overview_data => sub {
     }
 
     return $summary;
+};
+
+# Helper for the dashboard overview widget: returns pre-aggregated by_month + top10.
+# Does NOT return raw transactions — the /arap/overview/:vc endpoint keeps that shape.
+helper get_overview_widget_data => sub {
+    my ( $c, $dbs, $vc, $params ) = @_;
+    $params //= {};
+
+    my $table = ( $vc eq 'customer' ) ? 'ar' : 'ap';
+
+    my @binds;
+    my $date_filter = '';
+    if ( $params->{transdatefrom} ) {
+        $date_filter .= " AND a.transdate >= ?";
+        push @binds, $params->{transdatefrom};
+    }
+    if ( $params->{transdateto} ) {
+        $date_filter .= " AND a.transdate <= ?";
+        push @binds, $params->{transdateto};
+    }
+
+    # Monthly aggregation: bucket invoice amounts by month and current status.
+    # Status is determined against today so the chart reflects the live state of each invoice.
+    my $monthly_query = qq|
+        SELECT
+            TO_CHAR(a.transdate, 'YYYY-MM') AS month,
+            CASE
+                WHEN ABS(a.paid) > ABS(a.amount)                        THEN 'overpaid'
+                WHEN ABS(a.paid) = ABS(a.amount)                        THEN 'closed'
+                WHEN a.duedate IS NOT NULL AND a.duedate < CURRENT_DATE  THEN 'overdue'
+                ELSE 'open'
+            END AS status,
+            SUM(a.amount) AS total_amount
+        FROM $table a
+        JOIN $vc vc ON (a.${vc}_id = vc.id)
+        WHERE a.approved = '1'
+        $date_filter
+        GROUP BY TO_CHAR(a.transdate, 'YYYY-MM'), status
+        ORDER BY month, status
+    |;
+
+    my $monthly_rows = $dbs->query( $monthly_query, @binds )->hashes;
+
+    my %by_month;
+    my %totals = ( open => 0, overdue => 0, closed => 0, overpaid => 0 );
+
+    for my $row ( @{$monthly_rows} ) {
+        my $m      = $row->{month};
+        my $status = $row->{status};
+        my $amt    = $row->{total_amount} + 0;
+
+        $by_month{$m} //= { open => 0, overdue => 0, closed => 0, overpaid => 0 };
+        $by_month{$m}{$status} += $amt;
+        $totals{$status}       += $amt;
+    }
+
+    # Top 10 by total invoice amount over the date range
+    my $top10_query = qq|
+        SELECT
+            a.${vc}_id AS vc_id,
+            vc.name    AS vc_name,
+            SUM(a.amount) AS amount
+        FROM $table a
+        JOIN $vc vc ON (a.${vc}_id = vc.id)
+        WHERE a.approved = '1'
+        $date_filter
+        GROUP BY a.${vc}_id, vc.name
+        ORDER BY amount DESC
+        LIMIT 10
+    |;
+
+    my $top10_rows = $dbs->query( $top10_query, @binds )->hashes;
+
+    my @top10 = map {
+        {
+            vc_id   => $_->{vc_id},
+            vc_name => $_->{vc_name},
+            amount  => $_->{amount} + 0,
+        }
+    } @{$top10_rows};
+
+    return {
+        totals   => \%totals,
+        by_month => \%by_month,
+        top10    => \@top10,
+    };
+};
+
+# Helper for the revenue widget.
+# Resolves the full account hierarchy under a chart_categories root accno
+# (default '3' = revenue), then aggregates acc_trans by month for the
+# current year and — for the same months — the previous year.
+#
+# Revenue amounts in acc_trans are stored as positive credits (category='I'),
+# so SUM(amount) gives the correct positive revenue figure directly.
+# fx_transaction rows are excluded because they represent exchange-rate
+# adjustments, not actual revenue movements.
+#
+# Returns:
+#   by_month  – { "YYYY-MM" => { ac => N, py => N }, ... }
+#   ac_ytd    – sum of all ac values in the date range
+#   py_ytd    – sum of all py values for the matched months
+helper get_revenue_widget_data => sub {
+    my ( $c, $dbs, $params ) = @_;
+    $params //= {};
+
+    my $category_accno = $params->{category_accno} // '3';
+
+    # Resolve the full set of bookable (charttype='A') accounts that belong to
+    # the given category, walking through any intermediate heading accounts.
+    # A depth cap of 5 prevents runaway recursion on malformed data.
+    my $leaf_query = qq|
+        WITH RECURSIVE category_tree AS (
+            SELECT
+                c.id        AS chart_id,
+                c.accno     AS chart_accno,
+                c.charttype,
+                1           AS depth
+            FROM chart_categories cc
+            JOIN chart_category_links ccl ON ccl.category_id = cc.id
+            JOIN chart                 c   ON c.id = ccl.chart_id
+            WHERE cc.accno = ?
+
+            UNION ALL
+
+            SELECT
+                c2.id,
+                c2.accno,
+                c2.charttype,
+                ct.depth + 1
+            FROM category_tree ct
+            JOIN chart_categories  cc2  ON cc2.accno = ct.chart_accno
+            JOIN chart_category_links ccl2 ON ccl2.category_id = cc2.id
+            JOIN chart             c2   ON c2.id = ccl2.chart_id
+            WHERE ct.charttype = 'H'
+              AND ct.depth < 5
+        )
+        SELECT DISTINCT chart_id
+        FROM category_tree
+        WHERE charttype = 'A'
+    |;
+
+    my $leaf_rows = $dbs->query( $leaf_query, $category_accno )->hashes;
+    my @chart_ids = map { $_->{chart_id} } @{$leaf_rows};
+
+    return { by_month => {}, ac_ytd => 0, py_ytd => 0 } unless @chart_ids;
+
+    my $ids = join( ", ", ("?") x scalar @chart_ids );
+
+    # Derive the current-year date window
+    my $date_from = $params->{transdatefrom};
+    my ($cy)      = $date_from =~ /^(\d{4})/;
+    my $cy_end    = $params->{transdateto} // sprintf( "%04d-12-31", $cy );
+    my $py        = $cy - 1;
+    my $py_start  = sprintf( "%04d%s", $py, substr( $date_from, 4 ) );
+    my $py_end    = sprintf( "%04d%s", $py, substr( $cy_end,    4 ) );
+
+    # Query current-year monthly revenue
+    my $cy_query = qq|
+        SELECT
+            TO_CHAR(at.transdate, 'YYYY-MM') AS month,
+            SUM(at.amount)                   AS revenue
+        FROM acc_trans at
+        WHERE at.chart_id       IN ($ids)
+          AND at.approved        = '1'
+          AND at.fx_transaction  = 'f'
+          AND at.transdate      >= ?
+          AND at.transdate      <= ?
+        GROUP BY TO_CHAR(at.transdate, 'YYYY-MM')
+        ORDER BY month
+    |;
+
+    my $cy_rows = $dbs->query( $cy_query, @chart_ids, $date_from, $cy_end )->hashes;
+
+    my %by_month;
+    my $ac_ytd = 0;
+
+    for my $row ( @{$cy_rows} ) {
+        my $amt = $row->{revenue} + 0;
+        $by_month{ $row->{month} }{ac} = $amt;
+        $by_month{ $row->{month} }{py} = 0;
+        $ac_ytd += $amt;
+    }
+
+    # Query previous-year monthly revenue for the same calendar months
+    my $py_query = qq|
+        SELECT
+            TO_CHAR(at.transdate, 'YYYY-MM') AS month,
+            SUM(at.amount)                   AS revenue
+        FROM acc_trans at
+        WHERE at.chart_id       IN ($ids)
+          AND at.approved        = '1'
+          AND at.fx_transaction  = 'f'
+          AND at.transdate      >= ?
+          AND at.transdate      <= ?
+        GROUP BY TO_CHAR(at.transdate, 'YYYY-MM')
+        ORDER BY month
+    |;
+
+    my $py_rows = $dbs->query( $py_query, @chart_ids, $py_start, $py_end )->hashes;
+
+    my $py_ytd = 0;
+
+    for my $row ( @{$py_rows} ) {
+        my $amt = $row->{revenue} + 0;
+        # Map the PY month ("2024-03") to the CY equivalent ("2025-03")
+        # and only include it when there is corresponding CY data
+        my $cy_month = sprintf( "%04d%s", $cy, substr( $row->{month}, 4 ) );
+        if ( exists $by_month{$cy_month} ) {
+            $by_month{$cy_month}{py} = $amt;
+            $py_ytd += $amt;
+        }
+    }
+
+    return {
+        by_month => \%by_month,
+        ac_ytd   => $ac_ytd,
+        py_ytd   => $py_ytd,
+    };
+};
+
+# ─────────────────────────────────────────────────────────────────────────────
+# P&L widget helper
+#
+# Returns a pre-computed Profit & Loss summary for the requested date window
+# (default: current year to date) plus the equivalent prior-year period.
+#
+# ACCOUNT RESOLUTION
+# ──────────────────
+# Chart accounts are resolved from chart_categories / chart_category_links.
+# Because category 6 (Betriebsaufwand) mixes operating overhead (60-67),
+# depreciation (68), and financial items (690, 695), we resolve each
+# sub-category independently rather than using the parent '6' bucket.
+# This lets us build EBITDA (excludes 68, 690, 695) and EBIT (includes 68)
+# cleanly without post-processing.  690 and 695 are never queried, so they
+# are automatically excluded from every P&L line.
+#
+# SIGN CONVENTION
+# ───────────────
+# SQL-Ledger stores journal entries with the double-entry sign rule:
+#   credits → positive   (revenue accounts — category I — are credit-normal)
+#   debits  → negative   (expense accounts — category E — are debit-normal)
+#
+# This means all the arithmetic below is plain addition:
+#   DB1 = rev + mat  →  SUM(cat_3) + SUM(cat_4)
+#                        positive  + negative   = margin
+# No sign flip is ever needed; the signs already encode the direction.
+#
+# FX transactions (fx_transaction = 't') are exchange-rate adjustment entries
+# that would distort revenue and margin figures — they are excluded.
+#
+# P&L LINES
+# ──────────
+#   Umsatz  = cat_3
+#   DB 1    = cat_3 + cat_4                        (− Material & Drittleistungen)
+#   DB 2    = cat_3 + cat_4 + cat_5                (− Personalaufwand)
+#   EBITDA  = cat_3 + cat_4 + cat_5 + cat_60..67  (− Betriebsaufwand excl. Abschr.)
+#   EBIT    = cat_3 + cat_4 + cat_5 + cat_60..68  (− incl. Abschreibungen)
+#
+# RESPONSE SHAPE
+# ──────────────
+#   by_month  – monthly breakdown for charting, CY and PY side-by-side
+#   ytd       – aggregated year-to-date totals + margin % relative to Umsatz
+#
+# PY months are mapped to their CY equivalent key ("2024-03" → "2025-03")
+# and are only included when a CY entry exists for that month (avoids showing
+# prior-year data for months that haven't occurred in the current year yet).
+# ─────────────────────────────────────────────────────────────────────────────
+helper get_pl_widget_data => sub {
+    my ( $c, $dbs, $params ) = @_;
+    $params //= {};
+
+    # Root category accnos to resolve.  60-67 = operating overhead,
+    # 68 = depreciation.  690 / 695 (financial items) are intentionally absent.
+    my @cats = qw(3 4 5 60 61 62 63 64 65 66 67 68);
+    my $accno_placeholders = join( ", ", map {"?"} @cats );
+
+    # One recursive CTE resolves leaf accounts for ALL categories in a single
+    # database round-trip.  The root_category label is carried through every
+    # level of the recursion so each acc_trans row is attributed back to the
+    # top-level bucket it belongs to.  A DISTINCT dedup step (leaf_accounts)
+    # prevents double-counting when the same account appears via multiple paths.
+    my $sql = qq|
+        WITH RECURSIVE category_tree AS (
+
+            SELECT
+                c.id      AS chart_id,
+                c.accno   AS chart_accno,
+                c.charttype,
+                cc.accno  AS root_category,
+                1         AS depth
+            FROM chart_categories      cc
+            JOIN chart_category_links  ccl ON ccl.category_id = cc.id
+            JOIN chart                 c   ON c.id = ccl.chart_id
+            WHERE cc.accno = ANY( ARRAY[$accno_placeholders] )
+
+            UNION ALL
+
+            SELECT
+                c2.id,
+                c2.accno,
+                c2.charttype,
+                ct.root_category,
+                ct.depth + 1
+            FROM category_tree         ct
+            JOIN chart_categories      cc2  ON cc2.accno = ct.chart_accno
+            JOIN chart_category_links  ccl2 ON ccl2.category_id = cc2.id
+            JOIN chart                 c2   ON c2.id = ccl2.chart_id
+            WHERE ct.charttype = 'H'
+              AND ct.depth     < 5
+        ),
+
+        leaf_accounts AS (
+            SELECT DISTINCT chart_id, root_category
+            FROM  category_tree
+            WHERE charttype = 'A'
+        )
+
+        SELECT
+            la.root_category,
+            TO_CHAR(at.transdate, 'YYYY-MM') AS month,
+            SUM(at.amount)                   AS total
+        FROM   leaf_accounts la
+        JOIN   acc_trans at ON at.chart_id = la.chart_id
+        WHERE  at.approved       = '1'
+          AND  at.fx_transaction = 'f'
+          AND  at.transdate     >= ?
+          AND  at.transdate     <= ?
+        GROUP  BY la.root_category, TO_CHAR(at.transdate, 'YYYY-MM')
+        ORDER  BY la.root_category, month
+    |;
+
+    # ── Date window derivation ────────────────────────────────────────────────
+    my $date_from = $params->{transdatefrom};
+    my ($cy)      = $date_from =~ /^(\d{4})/;
+    my $cy_end    = $params->{transdateto} // sprintf( "%04d-12-31", $cy );
+    my $py        = $cy - 1;
+    my $py_start  = sprintf( "%04d%s", $py, substr( $date_from, 4 ) );
+    my $py_end    = sprintf( "%04d%s", $py, substr( $cy_end,    4 ) );
+
+    my @base_binds = @cats;
+
+    # ── Fetch CY and PY raw totals ────────────────────────────────────────────
+    my $cy_rows = $dbs->query( $sql, @base_binds, $date_from, $cy_end )->hashes;
+    my $py_rows = $dbs->query( $sql, @base_binds, $py_start,  $py_end )->hashes;
+
+    my ( %cat_ac, %cat_py );
+
+    for my $row ( @{$cy_rows} ) {
+        $cat_ac{ $row->{root_category} }{ $row->{month} } += $row->{total} + 0;
+    }
+    for my $row ( @{$py_rows} ) {
+        my $cy_month = sprintf( "%04d%s", $cy, substr( $row->{month}, 4 ) );
+        $cat_py{ $row->{root_category} }{$cy_month} += $row->{total} + 0;
+    }
+
+    # Helper closures to read a category/month value safely
+    my $ac  = sub { $cat_ac{ $_[0] }{ $_[1] } // 0 };
+    my $py_ = sub { $cat_py{ $_[0] }{ $_[1] } // 0 };
+
+    # ── Build by_month ────────────────────────────────────────────────────────
+    # Only produce entries for months that have at least one CY data point
+    my %all_cy_months;
+    $all_cy_months{$_} = 1 for map { keys %$_ } values %cat_ac;
+
+    my %by_month;
+    for my $m ( sort keys %all_cy_months ) {
+
+        my $u_ac = $ac->( '3', $m );
+        my $u_py = $py_->( '3', $m );
+
+        my $d1_ac = $u_ac + $ac->( '4', $m );
+        my $d1_py = $u_py + $py_->( '4', $m );
+
+        my $d2_ac = $d1_ac + $ac->( '5', $m );
+        my $d2_py = $d1_py + $py_->( '5', $m );
+
+        my $opex_ac = $ac->('60',$m) + $ac->('61',$m) + $ac->('62',$m)
+                    + $ac->('63',$m) + $ac->('64',$m) + $ac->('65',$m)
+                    + $ac->('66',$m) + $ac->('67',$m);
+        my $opex_py = $py_->('60',$m) + $py_->('61',$m) + $py_->('62',$m)
+                    + $py_->('63',$m) + $py_->('64',$m) + $py_->('65',$m)
+                    + $py_->('66',$m) + $py_->('67',$m);
+
+        my $eb_ac = $d2_ac + $opex_ac;
+        my $eb_py = $d2_py + $opex_py;
+
+        my $ei_ac = $eb_ac + $ac->( '68', $m );
+        my $ei_py = $eb_py + $py_->( '68', $m );
+
+        $by_month{$m} = {
+            umsatz => { ac => $u_ac  + 0, py => $u_py  + 0 },
+            db1    => { ac => $d1_ac + 0, py => $d1_py + 0 },
+            db2    => { ac => $d2_ac + 0, py => $d2_py + 0 },
+            ebitda => { ac => $eb_ac + 0, py => $eb_py + 0 },
+            ebit   => { ac => $ei_ac + 0, py => $ei_py + 0 },
+        };
+    }
+
+    # ── Compute YTD totals by summing all months ──────────────────────────────
+    my %ytd = map { $_ => { ac => 0, py => 0 } }
+              qw(umsatz db1 db2 ebitda ebit);
+
+    for my $m ( keys %by_month ) {
+        for my $line ( qw(umsatz db1 db2 ebitda ebit) ) {
+            $ytd{$line}{ac} += $by_month{$m}{$line}{ac};
+            $ytd{$line}{py} += $by_month{$m}{$line}{py};
+        }
+    }
+
+    # Margin percentages (relative to Umsatz) — only for sub-total lines
+    for my $line ( qw(db1 db2 ebitda ebit) ) {
+        $ytd{$line}{ac_pct} =
+            $ytd{umsatz}{ac} != 0
+            ? sprintf( "%.1f", $ytd{$line}{ac} / $ytd{umsatz}{ac} * 100 ) + 0
+            : 0;
+        $ytd{$line}{py_pct} =
+            $ytd{umsatz}{py} != 0
+            ? sprintf( "%.1f", $ytd{$line}{py} / $ytd{umsatz}{py} * 100 ) + 0
+            : 0;
+    }
+
+    return {
+        by_month => \%by_month,
+        ytd      => \%ytd,
+    };
+};
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Balance-sheet widget helper
+#
+# Returns the month-end BALANCE (cumulative running total) for each asset and
+# liability/equity category, suitable for a stacked-bar chart where assets
+# appear as positive bars above zero and liabilities as negative bars below.
+#
+# ASSETS vs LIABILITIES
+# ─────────────────────
+# Asset categories     : 10 (Flüssige Mittel), 11 (Forderungen),
+#                        13 (Aktive RAP), 14 (Finanzanlagen), 15 (Sachanlagen)
+# Liability/equity cats: 20 (Verbindlichkeiten L&L), 21 (Kurzfr. verzinslich),
+#                        22 (Übrige kurzfr.), 23 (Passive RAP),
+#                        26 (Rückstellungen), 29 (Reserven & Übriges)
+#
+# SIGN CONVENTION  (same rule for every category — multiply acc_trans by -1)
+# ───────────────────────────────────────────────────────────────────────────
+# SQL-Ledger encodes debits as negative and credits as positive.
+#
+#   Assets are debit-normal  → stored negative  → × -1 → positive for chart
+#   Liabilities are credit-normal → stored positive → × -1 → negative for chart
+#
+# Applying "amount × -1" uniformly gives:
+#   •  positive values for every asset category  (bars above zero)
+#   •  negative values for every liability/equity category (bars below zero)
+#
+# On a well-formed balance sheet the total assets and total liabilities sums
+# cancel exactly to zero — a useful sanity check in the frontend.
+#
+# BALANCE vs FLOW
+# ───────────────
+# Unlike the P&L widget (which sums flows within a date range), the balance
+# sheet shows a SNAPSHOT at the end of each month.  The cumulative running
+# balance must therefore include ALL historical transactions up to that date,
+# not only those within the requested window.
+#
+# Implementation:
+#   inner query  – pulls the whole history up to transdateto (no start filter)
+#   window func  – SUM … OVER (PARTITION BY category ORDER BY month) gives the
+#                  cumulative balance at each month-end
+#   outer filter – WHERE month >= transdatefrom trims the visible range
+#
+# RESPONSE SHAPE
+# ──────────────
+#   labels               – human-readable description per category accno
+#   asset_categories     – ordered list of asset accnos
+#   liability_categories – ordered list of liability/equity accnos
+#   by_month             – { "YYYY-MM": { assets: { "10": N, …, total: N },
+#                                         liabilities: { "20": N, …, total: N } } }
+#
+# The totals inside assets/liabilities are included so the frontend can plot
+# the overall balance envelope without iterating all sub-keys itself.
+# ─────────────────────────────────────────────────────────────────────────────
+helper get_balance_sheet_widget_data => sub {
+    my ( $c, $dbs, $params ) = @_;
+    $params //= {};
+
+    my @asset_cats     = qw(10 11 13 14 15);
+    my @liability_cats = qw(20 21 22 23 26 29);
+    my @all_cats       = ( @asset_cats, @liability_cats );
+
+    my $accno_ph = join( ", ", map {"?"} @all_cats );
+
+    # ── Single recursive CTE resolves every leaf account for all categories ──
+    # The running-balance window (SUM OVER ORDER BY month) accumulates the
+    # entire history; the outer WHERE month >= ? clips to the display window.
+    my $sql = qq|
+        WITH RECURSIVE category_tree AS (
+
+            SELECT
+                c.id      AS chart_id,
+                c.accno   AS chart_accno,
+                c.charttype,
+                cc.accno  AS root_category,
+                1         AS depth
+            FROM chart_categories      cc
+            JOIN chart_category_links  ccl ON ccl.category_id = cc.id
+            JOIN chart                 c   ON c.id = ccl.chart_id
+            WHERE cc.accno = ANY( ARRAY[$accno_ph] )
+
+            UNION ALL
+
+            SELECT
+                c2.id,
+                c2.accno,
+                c2.charttype,
+                ct.root_category,
+                ct.depth + 1
+            FROM category_tree         ct
+            JOIN chart_categories      cc2  ON cc2.accno = ct.chart_accno
+            JOIN chart_category_links  ccl2 ON ccl2.category_id = cc2.id
+            JOIN chart                 c2   ON c2.id = ccl2.chart_id
+            WHERE ct.charttype = 'H'
+              AND ct.depth     < 5
+        ),
+
+        leaf_accounts AS (
+            SELECT DISTINCT chart_id, root_category
+            FROM  category_tree
+            WHERE charttype = 'A'
+        ),
+
+        monthly_movement AS (
+            SELECT
+                la.root_category,
+                TO_CHAR(at.transdate, 'YYYY-MM') AS month,
+                SUM(at.amount * -1)               AS net
+            FROM   leaf_accounts la
+            JOIN   acc_trans at ON at.chart_id = la.chart_id
+            WHERE  at.approved       = '1'
+              AND  at.fx_transaction = 'f'
+              AND  at.transdate     <= ?
+            GROUP  BY la.root_category, TO_CHAR(at.transdate, 'YYYY-MM')
+        )
+
+        SELECT
+            root_category,
+            month,
+            SUM(net) OVER (
+                PARTITION BY root_category
+                ORDER BY month
+            ) AS balance
+        FROM  monthly_movement
+        WHERE month >= ?
+        ORDER BY root_category, month
+    |;
+
+    # ── Date window ──────────────────────────────────────────────────────────
+    my $date_from  = $params->{transdatefrom};
+    my $date_to    = $params->{transdateto} // do {
+        my ($y) = (localtime)[5];
+        sprintf( "%04d-12-31", $y + 1900 );
+    };
+    my $from_month = substr( $date_from, 0, 7 );
+
+    my $rows = $dbs->query( $sql, @all_cats, $date_to, $from_month )->hashes;
+
+    # ── Fetch human-readable descriptions from chart_categories ─────────────
+    my $label_rows = $dbs->query(
+        "SELECT accno, description FROM chart_categories
+          WHERE accno = ANY( ARRAY[$accno_ph] )",
+        @all_cats
+    )->hashes;
+    my %labels = map { $_->{accno} => $_->{description} } @{$label_rows};
+
+    # ── Organise raw balance data ────────────────────────────────────────────
+    my %cat_by_month;
+    for my $row ( @{$rows} ) {
+        $cat_by_month{ $row->{root_category} }{ $row->{month} } =
+          $row->{balance} + 0;
+    }
+
+    my %all_months;
+    $all_months{$_} = 1 for map { keys %$_ } values %cat_by_month;
+
+    my %by_month;
+    for my $m ( sort keys %all_months ) {
+
+        # Assets — positive values (debit-normal accounts × -1 already applied)
+        my %assets;
+        my $total_assets = 0;
+        for my $cat (@asset_cats) {
+            my $v = $cat_by_month{$cat}{$m} // 0;
+            $assets{$cat}  = $v + 0;
+            $total_assets += $v;
+        }
+        $assets{total} = $total_assets + 0;
+
+        # Liabilities — negative values (credit-normal accounts × -1 already applied)
+        my %liabilities;
+        my $total_liabilities = 0;
+        for my $cat (@liability_cats) {
+            my $v = $cat_by_month{$cat}{$m} // 0;
+            $liabilities{$cat}   = $v + 0;
+            $total_liabilities  += $v;
+        }
+        $liabilities{total} = $total_liabilities + 0;
+
+        $by_month{$m} = {
+            assets      => \%assets,
+            liabilities => \%liabilities,
+        };
+    }
+
+    return {
+        labels               => \%labels,
+        asset_categories     => \@asset_cats,
+        liability_categories => \@liability_cats,
+        by_month             => \%by_month,
+    };
 };
 
 $api->post(
