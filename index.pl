@@ -9390,7 +9390,7 @@ $api->get(
 
                # For AP/AR, you might invert or not depending on how your system
                # stores the amounts. Adjust if needed:
-                    amount => $_->{amount},
+                    amount => abs($_->{amount}),
                     rate   => $_->{rate},
                 }
             } @{ $form->{acc_trans}{$tax_key} };
