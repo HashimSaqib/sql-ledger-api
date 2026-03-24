@@ -7247,6 +7247,20 @@ helper get_accounts => sub {
         all            => ''
     );
 
+    my $link_matches_filter = sub {
+        my ( $link, $filter_str ) = @_;
+        return 0 unless defined $link;
+        return 1 if $filter_str eq '';
+        if ( index( $filter_str, ':' ) >= 0 ) {
+            my %have = map { $_ => 1 } grep { length $_ } split /:/, $link;
+            for my $tok ( grep { length $_ } split /:/, $filter_str ) {
+                return 0 unless $have{$tok};
+            }
+            return 1;
+        }
+        return $link =~ /\Q$filter_str\E/;
+    };
+
     # Create a hash to store filtered accounts for each type
     my %filtered_accounts;
     foreach my $type ( keys %filter_mapping ) {
@@ -7261,7 +7275,7 @@ helper get_accounts => sub {
         }
         else {
             @filtered =
-              grep { defined $_->{link} && $_->{link} =~ /\Q$filter_str\E/ }
+              grep { $link_matches_filter->( $_->{link}, $filter_str ) }
               @$accounts;
         }
         $filtered_accounts{$type} = \@filtered;
