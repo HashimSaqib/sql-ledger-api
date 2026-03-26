@@ -9198,7 +9198,17 @@ helper process_transaction => sub {
     if ( $data->{files} && ref $data->{files} eq 'ARRAY' ) {
         $form->{files}  = $data->{files};
         $form->{client} = $client;
-        FM->upload_files( $dbs, $c, $form, $vc );
+        my $upload_result = FM->upload_files( $dbs, $c, $form, $vc );
+        if ( ref($upload_result) ne 'HASH' || !$upload_result->{success} ) {
+            my $upload_error =
+              ref($upload_result) eq 'HASH' && $upload_result->{error}
+              ? $upload_result->{error}
+              : 'Unknown upload failure';
+            return {
+                error   => 'file_upload_failed',
+                message => "Failed to upload attachment: $upload_error"
+            };
+        }
     }
 
     if ( $data->{vc_bank_id} ) {
@@ -9659,7 +9669,14 @@ helper process_invoice => sub {
     if ( $data->{files} && ref $data->{files} eq 'ARRAY' ) {
         $form->{files}  = $c->decode_base64_files( $data->{files} );
         $form->{client} = $client;
-        FM->upload_files( $dbs, $c, $form, $vc );
+        my $upload_result = FM->upload_files( $dbs, $c, $form, $vc );
+        if ( ref($upload_result) ne 'HASH' || !$upload_result->{success} ) {
+            my $upload_error =
+              ref($upload_result) eq 'HASH' && $upload_result->{error}
+              ? $upload_result->{error}
+              : 'Unknown upload failure';
+            die "file_upload_failed: $upload_error";
+        }
     }
 
 # generate and store the invoice PDF using the correct template for this document type
