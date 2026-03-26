@@ -509,6 +509,12 @@ sub transactions {
     $arwhere .= " AND ac.project_id = '$form->{project_id}'";
     $apwhere .= " AND ac.project_id = '$form->{project_id}'";
   }
+  if (!$form->{fx_transaction}) {
+    $glwhere .= " AND ac.fx_transaction = '0'";
+    $arwhere .= " AND ac.fx_transaction = '0'";
+    $apwhere .= " AND ac.fx_transaction = '0'";
+  }
+ 
 
   unless ($form->{datefrom} || $form->{dateto}) {
     ($form->{datefrom}, $form->{dateto}) = $form->from_to($form->{year}, $form->{month}, $form->{interval}) if $form->{year} && $form->{month};
