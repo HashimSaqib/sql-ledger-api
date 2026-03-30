@@ -1027,7 +1027,12 @@ sub post_payment {
         my $query_clean = qq|DELETE FROM transaction_distribution WHERE trans_id = $form->{"id_$i"} AND transaction_id NOT IN ($placeholders)|;
         my $sth_clean = $dbh->prepare($query_clean);
         $sth_clean->execute(@valid_sources) || $form->dberror($query_clean);
-      } else {
+      }
+      elsif (keys %dist_amounts) {
+        # Legacy path: had source-based distribution but no matching bank row —
+        # clear links. When this payment had no source (e.g. second payment line
+        # from another GL account), do not delete; otherwise we wipe
+        # transaction_distribution from earlier payments on the same invoice.
         my $query_clean = qq|DELETE FROM transaction_distribution WHERE trans_id = $form->{"id_$i"}|;
         $dbh->do($query_clean) || $form->dberror($query_clean);
       }

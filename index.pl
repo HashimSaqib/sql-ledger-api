@@ -12002,10 +12002,10 @@ $api->get(
         }
         my $default_currency = substr( $currencies, 0, 3 );
 
-        $form->{department}      = $params->{department}    // "";
-        $form->{projectnumber}   = $params->{projectnumber} // "";
-        $form->{fromdate}        = $params->{fromdate}      // "";
-        $form->{todate}          = $params->{todate}        // "";
+        my $common_fromdate      = $params->{fromdate}      // "";
+        my $common_todate        = $params->{todate}        // "";
+        $form->{fromdate}        = $common_fromdate;
+        $form->{todate}          = $common_todate;
         $form->{currency}        = $params->{currency} || $default_currency;
         $form->{defaultcurrency} = $default_currency;
         $form->{decimalplaces}   = $params->{decimalplaces} // "2";
@@ -12017,13 +12017,110 @@ $api->get(
         $form->{usetemplate}     = $params->{usetemplate}   // '';
         $form->{heading_level}   = $params->{heading_level} // '';
 
+        # Parse departments — supports indexed (departments[0]=Name--ID),
+        # repeated params, or single (department=Name--ID)
+        my @departments;
+        {
+            my %dept_idx;
+            for my $key ( keys %$params ) {
+                if ( $key =~ /^departments\[(\d+)\]$/ ) {
+                    $dept_idx{$1} = $params->{$key};
+                }
+            }
+            if (%dept_idx) {
+                @departments =
+                  map { $dept_idx{$_} } sort { $a <=> $b } keys %dept_idx;
+            }
+            elsif ( exists $params->{department} ) {
+                my $d = $params->{department};
+                @departments = ref $d eq 'ARRAY' ? @$d : ($d);
+            }
+            @departments = grep { /\S/ } @departments;
+        }
+
+        # Parse projectnumbers — supports indexed (projectnumbers[0]=Name--ID),
+        # repeated params, or single (projectnumber=Name--ID)
+        my @projectnumbers;
+        {
+            my %proj_idx;
+            for my $key ( keys %$params ) {
+                if ( $key =~ /^projectnumbers\[(\d+)\]$/ ) {
+                    $proj_idx{$1} = $params->{$key};
+                }
+            }
+            if (%proj_idx) {
+                @projectnumbers =
+                  map { $proj_idx{$_} } sort { $a <=> $b } keys %proj_idx;
+            }
+            elsif ( exists $params->{projectnumber} ) {
+                my $p = $params->{projectnumber};
+                @projectnumbers = ref $p eq 'ARRAY' ? @$p : ($p);
+            }
+            @projectnumbers = grep { /\S/ } @projectnumbers;
+        }
+
+        # Parse periods — indexed: periods[N][label]=..., periods[N][fromdate]=...
         my $periods = [];
-        foreach my $key ( keys %$params ) {
+        for my $key ( keys %$params ) {
             if ( $key =~ /^periods\[(\d+)\]\[(\w+)\]$/ ) {
                 my ( $index, $field ) = ( $1, $2 );
                 $periods->[$index]{$field} = $params->{$key};
             }
         }
+
+        # Validate: at most one dimension may have multiple items
+        my $multi_count = ( scalar(@$periods)      > 1 ? 1 : 0 )
+                        + ( scalar(@departments)   > 1 ? 1 : 0 )
+                        + ( scalar(@projectnumbers) > 1 ? 1 : 0 );
+        if ( $multi_count > 1 ) {
+            return $c->render(
+                status => 400,
+                json   => {
+                    error =>
+                      'Only one comparison dimension is allowed at a time: multiple periods, departments, or projects'
+                }
+            );
+        }
+
+        if ( scalar(@departments) > 1 ) {
+            # Department comparison: each department becomes a column keyed by dept name
+            $form->{comparison_mode} = 'department';
+            $periods = [
+                map {
+                    my ($label) = split /--/, $_;
+                    {   label      => $label,
+                        department => $_,
+                        fromdate   => $common_fromdate,
+                        todate     => $common_todate,
+                    }
+                } @departments
+            ];
+            $form->{department}    = "";
+            $form->{projectnumber} = @projectnumbers ? $projectnumbers[0] : "";
+        }
+        elsif ( scalar(@projectnumbers) > 1 ) {
+            # Project comparison: each project becomes a column keyed by project name
+            $form->{comparison_mode} = 'project';
+            $periods = [
+                map {
+                    my ($label) = split /--/, $_;
+                    {   label         => $label,
+                        projectnumber => $_,
+                        fromdate      => $common_fromdate,
+                        todate        => $common_todate,
+                    }
+                } @projectnumbers
+            ];
+            $form->{department}    = @departments ? $departments[0] : "";
+            $form->{projectnumber} = "";
+        }
+        else {
+            # Period comparison (default): single dept/project filter, multiple date ranges
+            $form->{comparison_mode} = 'period';
+            $form->{department}    = @departments    ? $departments[0]    : "";
+            $form->{projectnumber} = @projectnumbers ? $projectnumbers[0] : "";
+        }
+
         $form->{periods} = $periods;
 
         RP->income_statement_periods( $c->slconfig, $form, $locale );
@@ -12566,9 +12663,8 @@ $api->get(
         my $default_currency = substr( $currencies, 0, 3 );
 
         # Assign parameters
-        $form->{department}      = $params->{department}    // "";
-        $form->{projectnumber}   = $params->{projectnumber} // "";
-        $form->{todate}          = $params->{todate}        // "";
+        my $common_todate        = $params->{todate}        // "";
+        $form->{todate}          = $common_todate;
         $form->{currency}        = $params->{currency} || $default_currency;
         $form->{defaultcurrency} = $default_currency;
         $form->{decimalplaces}   = $params->{decimalplaces} // "2";
@@ -12580,13 +12676,108 @@ $api->get(
         $form->{heading_only}    = $params->{heading_only}  // 0;
         $form->{heading_level}   = $params->{heading_level} // '';
 
+        # Parse departments — supports indexed (departments[0]=Name--ID),
+        # repeated params, or single (department=Name--ID)
+        my @departments;
+        {
+            my %dept_idx;
+            for my $key ( keys %$params ) {
+                if ( $key =~ /^departments\[(\d+)\]$/ ) {
+                    $dept_idx{$1} = $params->{$key};
+                }
+            }
+            if (%dept_idx) {
+                @departments =
+                  map { $dept_idx{$_} } sort { $a <=> $b } keys %dept_idx;
+            }
+            elsif ( exists $params->{department} ) {
+                my $d = $params->{department};
+                @departments = ref $d eq 'ARRAY' ? @$d : ($d);
+            }
+            @departments = grep { /\S/ } @departments;
+        }
+
+        # Parse projectnumbers — supports indexed (projectnumbers[0]=Name--ID),
+        # repeated params, or single (projectnumber=Name--ID)
+        my @projectnumbers;
+        {
+            my %proj_idx;
+            for my $key ( keys %$params ) {
+                if ( $key =~ /^projectnumbers\[(\d+)\]$/ ) {
+                    $proj_idx{$1} = $params->{$key};
+                }
+            }
+            if (%proj_idx) {
+                @projectnumbers =
+                  map { $proj_idx{$_} } sort { $a <=> $b } keys %proj_idx;
+            }
+            elsif ( exists $params->{projectnumber} ) {
+                my $p = $params->{projectnumber};
+                @projectnumbers = ref $p eq 'ARRAY' ? @$p : ($p);
+            }
+            @projectnumbers = grep { /\S/ } @projectnumbers;
+        }
+
+        # Parse periods — indexed: periods[N][label]=..., periods[N][todate]=...
         my $periods = [];
-        foreach my $key ( keys %$params ) {
+        for my $key ( keys %$params ) {
             if ( $key =~ /^periods\[(\d+)\]\[(\w+)\]$/ ) {
                 my ( $index, $field ) = ( $1, $2 );
                 $periods->[$index]{$field} = $params->{$key};
             }
         }
+
+        # Validate: at most one dimension may have multiple items
+        my $multi_count = ( scalar(@$periods)       > 1 ? 1 : 0 )
+                        + ( scalar(@departments)    > 1 ? 1 : 0 )
+                        + ( scalar(@projectnumbers) > 1 ? 1 : 0 );
+        if ( $multi_count > 1 ) {
+            return $c->render(
+                status => 400,
+                json   => {
+                    error =>
+                      'Only one comparison dimension is allowed at a time: multiple periods, departments, or projects'
+                }
+            );
+        }
+
+        if ( scalar(@departments) > 1 ) {
+            # Department comparison: each department becomes a column keyed by dept name
+            $form->{comparison_mode} = 'department';
+            $periods = [
+                map {
+                    my ($label) = split /--/, $_;
+                    {   label      => $label,
+                        department => $_,
+                        todate     => $common_todate,
+                    }
+                } @departments
+            ];
+            $form->{department}    = "";
+            $form->{projectnumber} = @projectnumbers ? $projectnumbers[0] : "";
+        }
+        elsif ( scalar(@projectnumbers) > 1 ) {
+            # Project comparison: each project becomes a column keyed by project name
+            $form->{comparison_mode} = 'project';
+            $periods = [
+                map {
+                    my ($label) = split /--/, $_;
+                    {   label         => $label,
+                        projectnumber => $_,
+                        todate        => $common_todate,
+                    }
+                } @projectnumbers
+            ];
+            $form->{department}    = @departments ? $departments[0] : "";
+            $form->{projectnumber} = "";
+        }
+        else {
+            # Period comparison (default): single dept/project filter, multiple snapshots
+            $form->{comparison_mode} = 'period';
+            $form->{department}    = @departments    ? $departments[0]    : "";
+            $form->{projectnumber} = @projectnumbers ? $projectnumbers[0] : "";
+        }
+
         $form->{periods} = $periods;
 
         RP->balance_sheet_periods( $c->slconfig, $form, $locale );
@@ -15717,8 +15908,10 @@ helper get_pl_widget_data => sub {
 # RESPONSE SHAPE
 # ──────────────
 #   labels               – human-readable description per category accno
-#   asset_categories     – ordered list of asset accnos
-#   liability_categories – ordered list of liability/equity accnos
+#   asset_categories     – ordered list of asset accnos (2-char chart_categories
+#                          roots with chart.category = A)
+#   liability_categories – ordered list of liability/equity accnos (2-char roots,
+#                          chart.category L or Q)
 #   by_month             – { "YYYY-MM": { assets: { "10": N, …, total: N },
 #                                         liabilities: { "20": N, …, total: N } } }
 #
@@ -15729,9 +15922,34 @@ helper get_balance_sheet_widget_data => sub {
     my ( $c, $dbs, $params ) = @_;
     $params //= {};
 
-    my @asset_cats     = qw(10 11 13 14 15);
-    my @liability_cats = qw(20 21 22 23 26 29);
-    my @all_cats       = ( @asset_cats, @liability_cats );
+    # Top-level balance-sheet groups: every chart_categories row whose accno is
+    # exactly two characters, scoped to balance-sheet chart categories (A/L/Q)
+    # via the matching header row in chart.
+    my $cat_rows = $dbs->query(
+        q{
+        SELECT cc.accno, cc.description, c.category
+          FROM chart_categories cc
+          JOIN chart c ON c.accno = cc.accno AND c.charttype = 'H'
+         WHERE char_length(cc.accno) = 2
+           AND c.category IN ('A', 'L', 'Q')
+        }
+    )->hashes;
+
+    my @sorted = sort { $a->{accno} cmp $b->{accno} } @{$cat_rows};
+    my @asset_cats =
+      map { $_->{accno} } grep { $_->{category} eq 'A' } @sorted;
+    my @liability_cats =
+      map { $_->{accno} } grep { $_->{category} =~ /^[LQ]$/ } @sorted;
+    my @all_cats = ( @asset_cats, @liability_cats );
+
+    unless (@all_cats) {
+        return {
+            labels               => {},
+            asset_categories     => [],
+            liability_categories => [],
+            by_month             => {},
+        };
+    }
 
     my $accno_ph = join( ", ", map {"?"} @all_cats );
 
@@ -15809,13 +16027,7 @@ helper get_balance_sheet_widget_data => sub {
 
     my $rows = $dbs->query( $sql, @all_cats, $date_to, $from_month )->hashes;
 
-    # ── Fetch human-readable descriptions from chart_categories ─────────────
-    my $label_rows = $dbs->query(
-        "SELECT accno, description FROM chart_categories
-          WHERE accno = ANY( ARRAY[$accno_ph] )",
-        @all_cats
-    )->hashes;
-    my %labels = map { $_->{accno} => $_->{description} } @{$label_rows};
+    my %labels = map { $_->{accno} => $_->{description} } @sorted;
 
     # ── Organise raw balance data ────────────────────────────────────────────
     my %cat_by_month;

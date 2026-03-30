@@ -82,11 +82,22 @@ sub income_statement_periods {
 
   # Process each category: Income (I) and Expense (E)
   for my $category (qw(I E)) {
-    # Process each defined period.
+    # Process each defined period (or department/project comparison column).
     foreach my $p (@{ $form->{periods} }) {
-      my $label = $p->{label};  # Use the provided label directly (e.g., 'Q1', 'Q2')
+      my $label    = $p->{label};
       my $fromdate = $form->datetonum($myconfig, $p->{fromdate});
       my $todate   = $form->datetonum($myconfig, $p->{todate});
+
+      # For department/project comparison temporarily override the filter so
+      # get_accounts queries the correct slice of data for each column.
+      my $saved_dept = $form->{department};
+      my $saved_proj = $form->{projectnumber};
+      if ( $form->{comparison_mode} eq 'department' && defined $p->{department} ) {
+        $form->{department} = $p->{department};
+      }
+      if ( $form->{comparison_mode} eq 'project' && defined $p->{projectnumber} ) {
+        $form->{projectnumber} = $p->{projectnumber};
+      }
 
       # Save the formatted period information using the label.
       $form->{period}{$label} = {
@@ -97,6 +108,10 @@ sub income_statement_periods {
       # Retrieve and add the account data using the label directly.
       my %c = &get_accounts($form, $dbh, $fromdate, $todate, $category, 1);
       &add_accounts($form, \%c, $label, $category);
+
+      # Restore dept/project filters for the next iteration.
+      $form->{department}    = $saved_dept;
+      $form->{projectnumber} = $saved_proj;
     }
   }
 
@@ -136,20 +151,36 @@ sub balance_sheet_periods {
   # Process each balance sheet category:
   # Assets (A), Liabilities (L), and Equity (Q)
   for my $category (qw(A L Q)) {
+    # Process each defined period (or department/project comparison column).
     foreach my $p (@{ $form->{periods} }) {
-      my $label = $p->{label};  # e.g., 'Period1', 'Period2'
+      my $label    = $p->{label};
       my $fromdate = $form->datetonum($myconfig, $p->{fromdate});
       my $todate   = $form->datetonum($myconfig, $p->{todate});
-      
+
+      # For department/project comparison temporarily override the filter so
+      # get_accounts queries the correct slice of data for each column.
+      my $saved_dept = $form->{department};
+      my $saved_proj = $form->{projectnumber};
+      if ( $form->{comparison_mode} eq 'department' && defined $p->{department} ) {
+        $form->{department} = $p->{department};
+      }
+      if ( $form->{comparison_mode} eq 'project' && defined $p->{projectnumber} ) {
+        $form->{projectnumber} = $p->{projectnumber};
+      }
+
       # Save the formatted period information using the label.
       $form->{period}{$label} = {
         fromdate => $locale->date($myconfig, $fromdate, $form->{longformat}),
         todate   => $locale->date($myconfig, $todate,   $form->{longformat}),
       };
-      
+
       # Retrieve and add the account data for the current category and period.
       my %c = &get_accounts($form, $dbh, undef, $todate, $category);
       &add_accounts($form, \%c, $label, $category);
+
+      # Restore dept/project filters for the next iteration.
+      $form->{department}    = $saved_dept;
+      $form->{projectnumber} = $saved_proj;
     }
   }
   
