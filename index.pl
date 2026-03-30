@@ -12002,10 +12002,6 @@ $api->get(
         }
         my $default_currency = substr( $currencies, 0, 3 );
 
-        my $common_fromdate      = $params->{fromdate}      // "";
-        my $common_todate        = $params->{todate}        // "";
-        $form->{fromdate}        = $common_fromdate;
-        $form->{todate}          = $common_todate;
         $form->{currency}        = $params->{currency} || $default_currency;
         $form->{defaultcurrency} = $default_currency;
         $form->{decimalplaces}   = $params->{decimalplaces} // "2";
@@ -12016,6 +12012,29 @@ $api->get(
         $form->{l_accno}         = $params->{l_accno}       // 0;
         $form->{usetemplate}     = $params->{usetemplate}   // '';
         $form->{heading_level}   = $params->{heading_level} // '';
+
+        # Parse periods first — indexed: periods[N][label]=..., periods[N][fromdate]=...
+        # We need these before determining the common date range below.
+        my $periods = [];
+        for my $key ( keys %$params ) {
+            if ( $key =~ /^periods\[(\d+)\]\[(\w+)\]$/ ) {
+                my ( $index, $field ) = ( $1, $2 );
+                $periods->[$index]{$field} = $params->{$key};
+            }
+        }
+
+        # Shared date range for department/project comparison mode.
+        # Prefer explicit top-level fromdate/todate; fall back to the first
+        # period's dates (the front-end may only send dates inside periods[]).
+        my $common_fromdate = ( $params->{fromdate} && $params->{fromdate} ne '' )
+                            ? $params->{fromdate}
+                            : ( $periods->[0]{fromdate} // "" );
+        my $common_todate   = ( $params->{todate} && $params->{todate} ne '' )
+                            ? $params->{todate}
+                            : ( $periods->[0]{todate} // "" );
+
+        $form->{fromdate} = $common_fromdate;
+        $form->{todate}   = $common_todate;
 
         # Parse departments — supports indexed (departments[0]=Name--ID),
         # repeated params, or single (department=Name--ID)
@@ -12057,15 +12076,6 @@ $api->get(
                 @projectnumbers = ref $p eq 'ARRAY' ? @$p : ($p);
             }
             @projectnumbers = grep { /\S/ } @projectnumbers;
-        }
-
-        # Parse periods — indexed: periods[N][label]=..., periods[N][fromdate]=...
-        my $periods = [];
-        for my $key ( keys %$params ) {
-            if ( $key =~ /^periods\[(\d+)\]\[(\w+)\]$/ ) {
-                my ( $index, $field ) = ( $1, $2 );
-                $periods->[$index]{$field} = $params->{$key};
-            }
         }
 
         # Validate: at most one dimension may have multiple items
@@ -12663,8 +12673,6 @@ $api->get(
         my $default_currency = substr( $currencies, 0, 3 );
 
         # Assign parameters
-        my $common_todate        = $params->{todate}        // "";
-        $form->{todate}          = $common_todate;
         $form->{currency}        = $params->{currency} || $default_currency;
         $form->{defaultcurrency} = $default_currency;
         $form->{decimalplaces}   = $params->{decimalplaces} // "2";
@@ -12675,6 +12683,24 @@ $api->get(
         $form->{usetemplate}     = $params->{usetemplate}   // '';
         $form->{heading_only}    = $params->{heading_only}  // 0;
         $form->{heading_level}   = $params->{heading_level} // '';
+
+        # Parse periods first — indexed: periods[N][label]=..., periods[N][todate]=...
+        # We need these before determining the common date range below.
+        my $periods = [];
+        for my $key ( keys %$params ) {
+            if ( $key =~ /^periods\[(\d+)\]\[(\w+)\]$/ ) {
+                my ( $index, $field ) = ( $1, $2 );
+                $periods->[$index]{$field} = $params->{$key};
+            }
+        }
+
+        # Shared todate for department/project comparison mode.
+        # Prefer explicit top-level todate; fall back to the first period's todate.
+        my $common_todate = ( $params->{todate} && $params->{todate} ne '' )
+                          ? $params->{todate}
+                          : ( $periods->[0]{todate} // "" );
+
+        $form->{todate} = $common_todate;
 
         # Parse departments — supports indexed (departments[0]=Name--ID),
         # repeated params, or single (department=Name--ID)
@@ -12716,15 +12742,6 @@ $api->get(
                 @projectnumbers = ref $p eq 'ARRAY' ? @$p : ($p);
             }
             @projectnumbers = grep { /\S/ } @projectnumbers;
-        }
-
-        # Parse periods — indexed: periods[N][label]=..., periods[N][todate]=...
-        my $periods = [];
-        for my $key ( keys %$params ) {
-            if ( $key =~ /^periods\[(\d+)\]\[(\w+)\]$/ ) {
-                my ( $index, $field ) = ( $1, $2 );
-                $periods->[$index]{$field} = $params->{$key};
-            }
         }
 
         # Validate: at most one dimension may have multiple items
