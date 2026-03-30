@@ -12093,12 +12093,14 @@ $api->get(
         }
 
         if ( scalar(@departments) > 1 ) {
-            # Department comparison: each department becomes a column keyed by dept name
+            # Department comparison: each department becomes a column keyed by
+            # its description looked up from the database.
+            my %labels = _lookup_comparison_labels(
+                $c->dbs($client), 'department', @departments );
             $form->{comparison_mode} = 'department';
             $periods = [
                 map {
-                    my ($label) = split /--/, $_;
-                    {   label      => $label,
+                    {   label      => $labels{$_},
                         department => $_,
                         fromdate   => $common_fromdate,
                         todate     => $common_todate,
@@ -12109,12 +12111,14 @@ $api->get(
             $form->{projectnumber} = @projectnumbers ? $projectnumbers[0] : "";
         }
         elsif ( scalar(@projectnumbers) > 1 ) {
-            # Project comparison: each project becomes a column keyed by project name
+            # Project comparison: each project becomes a column keyed by its
+            # description looked up from the database.
+            my %labels = _lookup_comparison_labels(
+                $c->dbs($client), 'project', @projectnumbers );
             $form->{comparison_mode} = 'project';
             $periods = [
                 map {
-                    my ($label) = split /--/, $_;
-                    {   label         => $label,
+                    {   label         => $labels{$_},
                         projectnumber => $_,
                         fromdate      => $common_fromdate,
                         todate        => $common_todate,
@@ -12640,6 +12644,44 @@ sub build_balance_sheet {
 }
 
 # Helper function to calculate account levels in hierarchy
+# Look up human-readable descriptions for a list of "value--id" strings from
+# either the 'department' or 'project' table.  Returns a hash mapping each
+# original value to its display label (falls back to the text before '--').
+sub _lookup_comparison_labels {
+    my ( $dbs, $table, @values ) = @_;
+
+    my %by_id;
+    for my $val (@values) {
+        my ( undef, $id ) = split /--/, $val;
+        $by_id{$id} = $val if defined $id && $id =~ /^\d+$/;
+    }
+
+    if (%by_id) {
+        my @ids  = keys %by_id;
+        my $rows = $dbs->query(
+            "SELECT id, description FROM $table WHERE id IN ("
+              . join( ',', ('?') x @ids ) . ')',
+            @ids
+        )->hashes;
+        for my $row (@$rows) {
+            my $orig = $by_id{ $row->{id} };
+            $by_id{ $row->{id} } = { orig => $orig, label => $row->{description} };
+        }
+    }
+
+    my %labels;
+    for my $val (@values) {
+        my ( $fallback, $id ) = split /--/, $val;
+        if ( defined $id && ref $by_id{$id} eq 'HASH' ) {
+            $labels{$val} = $by_id{$id}{label} // $fallback // $val;
+        }
+        else {
+            $labels{$val} = $fallback // $val;
+        }
+    }
+    return %labels;
+}
+
 sub _calculate_levels {
     my ( $data, $accno, $level ) = @_;
 
@@ -12759,12 +12801,14 @@ $api->get(
         }
 
         if ( scalar(@departments) > 1 ) {
-            # Department comparison: each department becomes a column keyed by dept name
+            # Department comparison: each department becomes a column keyed by
+            # its description looked up from the database.
+            my %labels = _lookup_comparison_labels(
+                $c->dbs($client), 'department', @departments );
             $form->{comparison_mode} = 'department';
             $periods = [
                 map {
-                    my ($label) = split /--/, $_;
-                    {   label      => $label,
+                    {   label      => $labels{$_},
                         department => $_,
                         todate     => $common_todate,
                     }
@@ -12774,12 +12818,14 @@ $api->get(
             $form->{projectnumber} = @projectnumbers ? $projectnumbers[0] : "";
         }
         elsif ( scalar(@projectnumbers) > 1 ) {
-            # Project comparison: each project becomes a column keyed by project name
+            # Project comparison: each project becomes a column keyed by its
+            # description looked up from the database.
+            my %labels = _lookup_comparison_labels(
+                $c->dbs($client), 'project', @projectnumbers );
             $form->{comparison_mode} = 'project';
             $periods = [
                 map {
-                    my ($label) = split /--/, $_;
-                    {   label         => $label,
+                    {   label         => $labels{$_},
                         projectnumber => $_,
                         todate        => $common_todate,
                     }
