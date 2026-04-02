@@ -13667,7 +13667,7 @@ sub transaction_append_swiss_qr_template_fields {
     my $iq = substr( $transaction->{invnumber} // '', 0, 24 );
     $iq = $form->string_replace( $iq, "%", "" );
     $iq = $form->string_replace( $iq, "/", "" );
-    $iq = $form->string_replace( $iq, "\\", "" );
+    $iq =~ s/\\//g;
     $transaction->{invnumberqr} = $iq;
 
     my $raw_desc = $bank_qr->{invdescriptionqr} // $transaction->{invdescription} // '';
