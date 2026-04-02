@@ -13918,11 +13918,12 @@ sub build_transaction {
     }
     $num2text->init;
 
-    # Compute overall invoice total.
-    my $invtotal = ( $subtotal + $taxtotal ) - $payment_total;
+    # Gross document total vs balance due (matches IS.pm: invtotal = full amount, total = due).
+    my $document_total_num = $subtotal + $taxtotal;
+    my $amount_due_num     = $document_total_num - $payment_total;
 
-    # Compute text representation and decimal portion of the invoice total.
-    my $formatted_total = sprintf( "%.2f", $invtotal );
+    # Amount in words reflects balance due (what remains to pay).
+    my $formatted_total = sprintf( "%.2f", $amount_due_num );
     my ( $integer, $decimal ) = split( /\./, $formatted_total );
     my $text_amount = $num2text->num2text($integer);
     my $vc_data     = build_vc( $c, $id, $vc );
@@ -14000,7 +14001,8 @@ sub build_transaction {
 
         ## Totals & Amount in Words
         subtotal    => $form->format_amount( $c->slconfig, $subtotal ),
-        invtotal    => $form->format_amount( $c->slconfig, $invtotal ),
+        invtotal    => $form->format_amount( $c->slconfig, $document_total_num ),
+        openamount  => $form->format_amount( $c->slconfig, $amount_due_num ),
         text_amount => $text_amount,
         decimal     => $decimal,
         currency    => $form->{currency},
@@ -14067,7 +14069,7 @@ sub build_transaction {
 
     transaction_append_swiss_qr_template_fields(
         $form, $c->slconfig, \%transaction,
-        $invtotal, \%bank_qr
+        $amount_due_num, \%bank_qr
     );
 
     return \%transaction;
