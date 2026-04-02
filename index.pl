@@ -13267,17 +13267,26 @@ sub build_letterhead {
 
     my $dbs = $c->dbs($client);
 
-    my $results = $dbs->query(
-"SELECT fldname, fldvalue FROM defaults WHERE fldname IN (?, ?, ?, ?, ?)",
-        'company',
-        'address',
-        'tel',
-        'companyemail',
-        'companywebsite'
+    my @defkeys = qw(
+        company address tel fax companyemail companywebsite
+        address1 address2 city state zipcode country
+        businessnumber iban bic
+    );
+    my $placeholders = join ',', ('?') x @defkeys;
+    my $results      = $dbs->query(
+        "SELECT fldname, fldvalue FROM defaults WHERE fldname IN ($placeholders)",
+        @defkeys
     )->hashes;
 
-    # Create a structured letterhead object
     my %letterhead = map { $_->{fldname} => $_->{fldvalue} } @$results;
+
+    # NEO footer / QR creditor address (defaults use plain address* keys)
+    $letterhead{companyaddress1} = $letterhead{address1}  // '';
+    $letterhead{companyaddress2} = $letterhead{address2}  // '';
+    $letterhead{companycity}     = $letterhead{city}      // '';
+    $letterhead{companyzip}      = $letterhead{zipcode}   // '';
+    $letterhead{companycountry}  = $letterhead{country}  // '';
+    $letterhead{companystate}    = $letterhead{state}    // '';
 
     return \%letterhead;
 }
@@ -13339,17 +13348,23 @@ sub build_vc {
         country  => $address_row->{country}  // '',
         contact  => $contact_name,
         email    => $email,
+        typeofcontact => $contact_row->{typeofcontact} // 'company',
+        firstname       => $contact_row->{firstname}    // '',
+        lastname        => $contact_row->{lastname}     // '',
+        salutation      => $contact_row->{salutation}   // '',
+        contacttitle    => $contact_row->{contacttitle}  // '',
         (
             $vc eq 'customer'
             ? (
-                customerphone => $phone,
-                customerfax   => $fax,
+                customerphone     => $phone,
+                customerfax       => $fax,
+                customertaxnumber => $vc_row->{taxnumber} // '',
               )
             : (
                 vendorphone     => $phone,
                 vendorfax       => $fax,
                 vendortaxnumber => $vc_row->{taxnumber} // '',
-            )
+              )
         ),
     );
 
@@ -13644,6 +13659,86 @@ $api->get(
     }
 );
 
+# Swiss QR / eBill placeholders (NEO content_qrinvoice*.tex), aligned with SL/IS.pm invoice_details.
+sub transaction_append_swiss_qr_template_fields {
+    my ( $form, $myconfig, $transaction, $open_amount_num, $bank_qr ) = @_;
+    $bank_qr ||= {};
+
+    my $iq = substr( $transaction->{invnumber} // '', 0, 24 );
+    $iq = $form->string_replace( $iq, "%", "" );
+    $iq = $form->string_replace( $iq, "/", "" );
+    $iq = $form->string_replace( $iq, "\\", "" );
+    $transaction->{invnumberqr} = $iq;
+
+    my $raw_desc = $bank_qr->{invdescriptionqr} // $transaction->{invdescription} // '';
+    my $idq = $form->format_line($raw_desc);
+    $idq = $form->string_replace( $idq, "%", "" );
+    $idq = $form->string_abbreviate( $idq, 55 );
+    $transaction->{invdescriptionqr}  = $idq;
+    $transaction->{invdescriptionqr2} = $idq;
+
+    my $qrb = $bank_qr->{qriban} // '';
+    $transaction->{qriban} = $qrb;
+    my $qrbqr = $qrb;
+    $qrbqr =~ s/\s//g;
+    $qrbqr = $form->string_replace( $qrbqr, "%", "" );
+    $transaction->{qribanqr} = $qrbqr;
+
+    for my $spec (
+        [qw(companyqr company 70)],
+        [qw(companyaddress1qr companyaddress1 70)],
+        [qw(companyzipqr companyzip 16)],
+        [qw(companycityqr companycity 35)],
+        [qw(nameqr name 70)],
+        [qw(address1qr address1 70)],
+        [qw(zipcodeqr zipcode 16)],
+        [qw(cityqr city 35)],
+      )
+    {
+        my ( $to, $from, $len ) = @$spec;
+        my $s = substr( $transaction->{$from} // '', 0, $len );
+        $s = $form->string_replace( $s, "%", "" );
+        $transaction->{$to} = $s;
+    }
+
+    for my $fld (qw(dcn rvc)) {
+        my $v = $bank_qr->{$fld} // '';
+        $transaction->{$fld} = $form->format_dcn($v);
+    }
+
+    my $str = $bank_qr->{strdbkginf} // '';
+    $str = $form->format_line($str);
+    $str = substr( $str, 0, 85 );
+    $str = $form->string_replace( $str, "%", "" );
+    $transaction->{strdbkginf}        = $str;
+    $transaction->{strdbkginfqr}      = $str;
+    $transaction->{strdbkginfline1qr} = substr( $str, 0,  50 );
+    $transaction->{strdbkginfline2qr} = substr( $str, 50, 35 );
+
+    my $fmt_amt = sprintf( "%.2f", 0 + $open_amount_num );
+    my ( $whole, $decimal ) = split /\./, $fmt_amt;
+    $decimal = substr( "${decimal}00", 0, 2 );
+    $transaction->{integer_out_amount} = $whole;
+    $transaction->{out_decimal}        = $decimal;
+
+    my $qr_nf = { numberformat => '1,000.00' };
+    my $ft = $form->format_amount( $qr_nf, $open_amount_num, 2 );
+    $ft =~ s/,/ /g;
+    $transaction->{total} = $ft;
+
+    if (   defined $transaction->{businessnumber}
+        && $transaction->{businessnumber} ne '' )
+    {
+        my @nums = $transaction->{businessnumber} =~ /(\d+)/g;
+        $transaction->{businessnumberqr} = join '', @nums;
+    }
+    else {
+        $transaction->{businessnumberqr} = '';
+    }
+
+    return;
+}
+
 sub build_transaction {
     my ( $c, $client, $vc, $id ) = @_;
 
@@ -13656,7 +13751,6 @@ sub build_transaction {
     my $dbs = $c->dbs($client);
     $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
 
-    # Process letterhead.
     my $letterhead = build_letterhead($c);
 
     # AR transactions use -1 as a multiplier for amounts.
@@ -13669,6 +13763,11 @@ sub build_transaction {
 
     # Prepare the form with transaction links/info.
     $form->create_links( $transaction_type, $c->slconfig, $vc );
+
+    if ( $form->{transdate} && $form->{duedate} ) {
+        $form->{terms} =
+          $form->datediff( $c->slconfig, $form->{transdate}, $form->{duedate} );
+    }
     ### --- FLATTEN LINE ITEMS --- ###
     # Build parallel arrays for line item data (similar to build_invoice)
     my ( @lineitem_ids, @lineitem_accno, @lineitem_account,
@@ -13723,21 +13822,91 @@ sub build_transaction {
     my $paid_1 = @paymentdate ? 1 : 0;
 
     ### --- FLATTEN TAX INFORMATION --- ###
-    # Build parallel arrays for tax data.
-    my ( @taxaccno, @taxamount, @taxrate, @taxdescription );
+    # Same shape as invoice printing (IS.pm): templates (e.g. NEO) use <%foreach tax%>,
+    # <%tax%>, <%taxrate%>, <%taxdescription%>, <%taxnumber%>, <%taxbase%>, <%taxbaseinclusive%>.
+    my (
+        @tax, @taxaccno, @taxamount, @taxrate, @taxdescription,
+        @taxnumber, @taxbase, @taxbaseinclusive
+    );
     my $taxtotal = 0;
-    if ( $form->{acc_trans}{"${transaction_type}_tax"}
-        && ref( $form->{acc_trans}{"${transaction_type}_tax"} ) eq 'ARRAY' )
-    {
-        foreach my $tax ( @{ $form->{acc_trans}{"${transaction_type}_tax"} } ) {
-            my $t_amt = $amount_multiplier * $tax->{amount};
-            $taxtotal += $t_amt;
 
-            push @taxaccno,       $tax->{accno} // '';
-            push @taxamount,      $form->format_amount( $c->slconfig, $t_amt );
-            push @taxrate,        defined $tax->{rate} ? $tax->{rate} : '';
-            push @taxdescription, '';    # Supply tax description if available
+    my $tax_bucket = $form->{acc_trans}{ "${transaction_type}_tax" };
+    my @tax_rows;
+    if ( $tax_bucket && ref($tax_bucket) eq 'ARRAY' ) {
+        @tax_rows = @$tax_bucket;
+    }
+    if ( !@tax_rows ) {
+        @tax_rows = @{
+            $dbs->query(
+                q{
+            SELECT c.accno, c.description, ac.amount, ac.memo
+            FROM acc_trans ac
+            JOIN chart c ON c.id = ac.chart_id
+            WHERE ac.trans_id = ?
+              AND ac.fx_transaction = '0'
+              AND EXISTS (SELECT 1 FROM tax t WHERE t.chart_id = ac.chart_id)
+            ORDER BY ac.id
+        },
+                $id
+            )->hashes
+        };
+    }
+
+    my $taxes_meta = $dbs->query(
+        q{
+            SELECT c.accno, c.description, t.taxnumber, t.rate, t.chart_id
+            FROM tax t
+            JOIN chart c ON c.id = t.chart_id
+            WHERE t.validto IS NULL
+               OR t.validto >= ?
+            ORDER BY t.chart_id, t.id DESC
+        },
+        $form->{transdate}
+    )->hashes;
+
+    my %taxmeta_by_accno;
+    if ( ref($taxes_meta) eq 'ARRAY' ) {
+        for my $row (@$taxes_meta) {
+            next if $taxmeta_by_accno{ $row->{accno} };
+            $taxmeta_by_accno{ $row->{accno} } = $row;
         }
+    }
+
+    my $prec = $form->{precision} // 2;
+    for my $tax (@tax_rows) {
+        my $t_amt = abs( $amount_multiplier * $tax->{amount} );
+        $taxtotal += $t_amt;
+
+        my $accno       = $tax->{accno}       // '';
+        my $meta        = $taxmeta_by_accno{$accno};
+        my $rate        = $meta->{rate} // 0;
+        my $desc        = $meta->{description} // $tax->{description} // '';
+        my $txnum       = $meta->{taxnumber} // '';
+        my $abs_tax     = $t_amt;
+        my $base_num    = 0;
+        my $incl_num    = $abs_tax;
+        if ( $rate > 0 ) {
+            $base_num = $form->round_amount( $abs_tax / $rate, $prec );
+            $incl_num = $form->round_amount( $base_num + $abs_tax, $prec );
+        }
+
+        my $rate_pct = $form->format_amount(
+            $c->slconfig, $rate * 100,
+            $prec, '0.00'
+        );
+        my $fmt_tax = $form->format_amount( $c->slconfig, $abs_tax );
+        my $desc_fmt = $form->string_replace( $desc, "%", "" );
+
+        push @taxaccno, $accno;
+        push @taxamount,      $fmt_tax;
+        push @tax,            $fmt_tax;
+        push @taxrate,        $rate_pct;
+        push @taxdescription, $desc_fmt;
+        push @taxnumber,      $txnum;
+        push @taxbase,
+          $form->format_amount( $c->slconfig, $base_num );
+        push @taxbaseinclusive,
+          $form->format_amount( $c->slconfig, $incl_num );
     }
 
     my $num2text;
@@ -13776,19 +13945,26 @@ sub build_transaction {
           || '',
         country => $vc_data->{country}
           || '',
+        typeofcontact => $vc_data->{typeofcontact}
+          || 'company',
+        firstname   => $vc_data->{firstname}   // '',
+        lastname    => $vc_data->{lastname}    // '',
+        salutation  => $vc_data->{salutation}  // '',
+        contacttitle => $vc_data->{contacttitle} // '',
         contact => $vc_data->{contact}
           || '',
         email => $vc_data->{email}
           || '',
         vendortaxnumber => $vc_data->{vendortaxnumber}
           || '',
+        customertaxnumber => $vc_data->{customertaxnumber}
+          || '',
         (
             $vc eq 'customer'
             ? (
-                customerphone => $vc_data->{customerphone}
-                  || '',
-                customerfax => $vc_data->{customerfax}
-                  || '',
+                customerphone   => $vc_data->{customerphone}   || '',
+                customerfax     => $vc_data->{customerfax}     || '',
+                customeremail   => $vc_data->{email}           // '',
               )
             : (
                 vendorphone => $vc_data->{vendorphone}
@@ -13804,6 +13980,15 @@ sub build_transaction {
         ponumber  => $form->{ponumber},
         ordnumber => $form->{ordnumber},
         employee  => $form->{employee} || '',
+        # NEO content_header title; same field as SQL-Ledger a.description (not line memos).
+        invdescription => $form->{description} // '',
+        notes          => $form->{notes}      // '',
+        intnotes       => $form->{intnotes}   // '',
+        terms          => (
+            defined $form->{terms} && $form->{terms} ne ''
+            ? $form->{terms}
+            : 0
+        ),
 
         ## Line Items as parallel arrays
         item_id       => \@lineitem_ids,
@@ -13819,6 +14004,7 @@ sub build_transaction {
         text_amount => $text_amount,
         decimal     => $decimal,
         currency    => $form->{currency},
+        paid        => $form->format_amount( $c->slconfig, $payment_total ),
 
         ## Payments as parallel arrays
         paid_1         => $paid_1,
@@ -13828,21 +14014,61 @@ sub build_transaction {
         paymentmemo    => \@paymentmemo,
         payment        => \@paymentamount,
 
-        ## Tax Information as parallel arrays
-        taxaccno       => \@taxaccno,
-        taxamount      => \@taxamount,
-        taxrate        => \@taxrate,
-        taxdescription => \@taxdescription,
+        ## Tax Information as parallel arrays (invoice-compatible names)
+        tax               => \@tax,
+        taxaccno          => \@taxaccno,
+        taxamount         => \@taxamount,
+        taxrate           => \@taxrate,
+        taxdescription    => \@taxdescription,
+        taxnumber         => \@taxnumber,
+        taxbase           => \@taxbase,
+        taxbaseinclusive  => \@taxbaseinclusive,
     );
 
     # Include tax inclusion flag if applicable.
     if (@taxaccno) {
-        $transaction{taxincluded} = $form->{taxincluded};
+        $transaction{taxincluded} = $form->{taxincluded} ? 1 : 0;
     }
 
     # Pass through vendor/customer identifiers.
     $transaction{$vc_field}    = $form->{$vc_field};
     $transaction{$vc_id_field} = $form->{$vc_id_field};
+
+    for my $fld (
+        qw(company address tel fax companyemail companywebsite companyaddress1
+           companyaddress2 companycity companyzip companycountry companystate
+           businessnumber iban bic)
+      )
+    {
+        $transaction{$fld} = $letterhead->{$fld} // '';
+    }
+
+    my $arap_tbl    = $transaction_type eq 'AR' ? 'ar' : 'ap';
+    my $ledger_bank = $dbs->query( "SELECT vc_bank_id, dcn FROM $arap_tbl WHERE id = ?",
+        $id )->hash // {};
+    my %bank_qr;
+    if ( $ledger_bank->{vc_bank_id} ) {
+        my $ba = $dbs->query(
+            q{SELECT iban, bic, qriban, dcn, rvc, membernumber, clearingnumber, strdbkginf, invdescriptionqr
+              FROM bank_account WHERE id = ?},
+            $ledger_bank->{vc_bank_id}
+        )->hash;
+        %bank_qr = %$ba if $ba;
+    }
+    if ( $ledger_bank->{dcn} && !( $bank_qr{dcn} && $bank_qr{dcn} ne '' ) ) {
+        $bank_qr{dcn} = $ledger_bank->{dcn};
+    }
+
+    for my $fld (qw(iban bic qriban membernumber clearingnumber)) {
+        if ( defined $bank_qr{$fld} && $bank_qr{$fld} ne '' ) {
+            $transaction{$fld} = $bank_qr{$fld};
+        }
+    }
+
+    transaction_append_swiss_qr_template_fields(
+        $form, $c->slconfig, \%transaction,
+        $invtotal, \%bank_qr
+    );
 
     return \%transaction;
 }
@@ -13868,12 +14094,15 @@ $api->get(
         my $transaction_data = build_transaction( $c, $client, $vc, $id );
         my $letterhead       = build_letterhead($c);
 
-        # Merge additional parameters into the transaction data
-        $transaction_data->{company}           = $letterhead->{company};
-        $transaction_data->{address}           = $letterhead->{address};
-        $transaction_data->{tel}               = $letterhead->{tel};
-        $transaction_data->{companyemail}      = $letterhead->{companyemail};
-        $transaction_data->{companywebsite}    = $letterhead->{companywebsite};
+        # Merge company defaults (do not map raw address1/city onto customer fields)
+        for my $fld (
+            qw(company address tel fax companyemail companywebsite companyaddress1
+               companyaddress2 companycity companyzip companycountry companystate
+               businessnumber iban bic)
+          )
+        {
+            $transaction_data->{$fld} = $letterhead->{$fld} // '';
+        }
         $transaction_data->{lastpage}          = 0;
         $transaction_data->{sumcarriedforward} = 0;
         $transaction_data->{templates}         = "templates/$client";
@@ -13888,7 +14117,6 @@ $api->get(
         for my $k ( keys %$transaction_data ) {
             $form->{$k} = $transaction_data->{$k};
         }
-        warn( Dumper $form );
         my $dvipdf    = "";
         my $xelatex   = "";
         my $userspath = "tmp";
