@@ -13899,7 +13899,7 @@ sub build_letterhead {
 
     my @defkeys = qw(
         company address tel fax companyemail companywebsite
-        address1 address2 city state zipcode country
+        address1 address2 city state zip zipcode country
         businessnumber iban bic
     );
     my $placeholders = join ',', ('?') x @defkeys;
@@ -13910,11 +13910,11 @@ sub build_letterhead {
 
     my %letterhead = map { $_->{fldname} => $_->{fldvalue} } @$results;
 
-    # NEO footer / QR creditor address (defaults use plain address* keys)
+    # NEO footer / QR creditor address (match IS.pm invoice_details: company zip is defaults "zip")
     $letterhead{companyaddress1} = $letterhead{address1}  // '';
     $letterhead{companyaddress2} = $letterhead{address2}  // '';
     $letterhead{companycity}     = $letterhead{city}      // '';
-    $letterhead{companyzip}      = $letterhead{zipcode}   // '';
+    $letterhead{companyzip}      = $letterhead{zip}       // $letterhead{zipcode} // '';
     $letterhead{companycountry}  = $letterhead{country}  // '';
     $letterhead{companystate}    = $letterhead{state}    // '';
 
@@ -14755,10 +14755,17 @@ $api->get(
         for my $fld (
             qw(company address tel fax companyemail companywebsite companyaddress1
                companyaddress2 companycity companyzip companycountry companystate
-               businessnumber iban bic)
+               businessnumber)
           )
         {
             $transaction_data->{$fld} = $letterhead->{$fld} // '';
+        }
+        # IBAN/BIC: invoices get these from AA->company_details (bank on AR/AP paid account);
+        # transactions get them from build_transaction (bank row). Do not wipe with empty defaults.
+        for my $fld (qw(iban bic)) {
+            my $lh = $letterhead->{$fld} // '';
+            my $tx = $transaction_data->{$fld} // '';
+            $transaction_data->{$fld} = ( defined $lh && $lh ne '' ) ? $lh : $tx;
         }
         $transaction_data->{lastpage}          = 0;
         $transaction_data->{sumcarriedforward} = 0;
