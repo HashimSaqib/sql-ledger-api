@@ -294,7 +294,7 @@ get '/logo/:client/' => sub {
 ###############################
 
 my $neoledger_perms =
-'["dashboard", "cash", "cash.recon", "gl", "gl.add", "gl.transactions", "items", "items.part", "items.service", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income", "system", "system.currencies", "system.projects", "system.departments", "system.defaults", "system.chart", "system.chart.list", "system.chart.add", "system.chart.gifi", "system.taxes",  "system.templates", "system.audit", "system.yearend", "system.batch", "import", "import.gl", "import.customer", "import.ar_invoice", "import.ar_transaction", "import.vendor", "import.ap_invoice", "import.ap_transaction", "reports.balance", "customer", "customer.transaction", "customer.invoice", "customer.transaction_return", "customer.invoice_return", "customer.add", "customer.batch", "customer.reminder", "customer.consolidate", "customer.transactions", "customer.search", "customer.history", "vendor", "vendor.transaction", "vendor.invoice", "vendor.transaction_return", "vendor.invoice_return", "vendor.add", "vendor.transactions", "vendor.search", "vendor.history", "reports.alltaxes", "vendor.taxreport", "customer.taxreport", "cash.payments", "cash.receipts", "cash.report.customer", "cash.report.vendor", "system.bank", "import.bank", "customer.order", "customer.orders", "customer.quotation", "customer.quotations", "vendor.order", "vendor.orders", "vendor.quotation", "vendor.quotations", "stations.manage", "stations.get", "ai.prompts", "bank.payments", "stations.bank_transactions", "customer.upload", "vendor.upload", "document.list","integrations.manage","customer.overview","vendor.overview", "system.notifications", "system.messages", "cockpit.inbox"]';
+'["dashboard", "cash", "cash.recon", "gl", "gl.add", "gl.transactions", "ledger.batchupdate", "items", "items.part", "items.service", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income", "system", "system.currencies", "system.projects", "system.departments", "system.defaults", "system.chart", "system.chart.list", "system.chart.add", "system.chart.gifi", "system.taxes",  "system.templates", "system.audit", "system.yearend", "system.batch", "import", "import.gl", "import.customer", "import.ar_invoice", "import.ar_transaction", "import.vendor", "import.ap_invoice", "import.ap_transaction", "reports.balance", "customer", "customer.transaction", "customer.invoice", "customer.transaction_return", "customer.invoice_return", "customer.add", "customer.batch", "customer.batchupdate", "customer.reminder", "customer.consolidate", "customer.transactions", "customer.search", "customer.history", "vendor", "vendor.transaction", "vendor.invoice", "vendor.transaction_return", "vendor.invoice_return", "vendor.add", "vendor.batchupdate", "vendor.transactions", "vendor.search", "vendor.history", "reports.alltaxes", "vendor.taxreport", "customer.taxreport", "cash.payments", "cash.receipts", "cash.report.customer", "cash.report.vendor", "system.bank", "import.bank", "customer.order", "customer.orders", "customer.quotation", "customer.quotations", "vendor.order", "vendor.orders", "vendor.quotation", "vendor.quotations", "stations.manage", "stations.get", "ai.prompts", "bank.payments", "stations.bank_transactions", "customer.upload", "vendor.upload", "document.list","integrations.manage","customer.overview","vendor.overview", "system.notifications", "system.messages", "cockpit.inbox"]';
 
 my $reports_only =
 '["dashboard", "gl", "gl.transactions", "items", "items.search.allitems", "items.search.parts", "items.search.services", "reports", "reports.trial", "reports.income",  "reports.balance", "customer", "customer.transactions", "customer.search", "customer.history", "vendor", "vendor.search", "vendor.history", "vendor.transactions", "reports.alltaxes", "vendor.taxreport", "customer.taxreport", "cash.report.customer", "cash.report.vendor", "customer.orders", "customer.quotations", "vendor.orders", "vendor.quotations","customer.overview","vendor.overview"]';
@@ -3862,6 +3862,373 @@ $api->get(
     }
 );
 
+$api->get(
+    '/batch/search' => sub {
+        my $c = shift;
+        my $client = $c->param('client');
+        my $dbs    = $c->dbs($client);
+
+        my $module      = $c->param('module')      || '';
+        my $granularity = $c->param('granularity') || '';
+
+        unless ( $module =~ /^(gl|ar|ap)$/ ) {
+            return $c->render(
+                status => 400,
+                json   => {
+                    error =>
+                      'Invalid module. Use gl, ar, or ap.',
+                }
+            );
+        }
+        unless ( $granularity =~ /^(transaction|line)$/ ) {
+            return $c->render(
+                status => 400,
+                json   => {
+                    error =>
+                      'Invalid granularity. Use transaction or line.',
+                }
+            );
+        }
+
+        if ( $module eq 'gl' ) {
+            return unless $c->check_perms("ledger.batchupdate");
+        }
+        elsif ( $module eq 'ar' ) {
+            return unless $c->check_perms("customer.batchupdate");
+        }
+        else {
+            return unless $c->check_perms("vendor.batchupdate");
+        }
+
+        my $cutoff = $c->batch_transdate_exclusive_min;
+
+        my $datefrom    = $c->param('datefrom');
+        my $dateto      = $c->param('dateto');
+        my $description = $c->param('description');
+        my $invnumber   = $c->param('invnumber');
+        my $reference   = $c->param('reference');
+        my $customer_id = $c->param('customer_id');
+        my $vendor_id   = $c->param('vendor_id');
+        my $accno       = $c->param('accno');
+        my $partnumber  = $c->param('partnumber');
+
+        if ($datefrom) { $c->validate_date($datefrom) or return; }
+        if ($dateto)   { $c->validate_date($dateto)   or return; }
+
+        my @rows;
+
+        if ( $module eq 'gl' && $granularity eq 'transaction' ) {
+            my $q = q{
+                SELECT g.id, g.reference, g.transdate, g.description, g.curr,
+                       g.approved, g.department_id, d.description AS department
+                FROM gl g
+                LEFT JOIN department d ON d.id = g.department_id
+            };
+            my @w;
+            my @b;
+            if ($cutoff) {
+                push @w,  'g.transdate > ?';
+                push @b,  $cutoff;
+            }
+            if ($datefrom) {
+                push @w,  'g.transdate >= ?';
+                push @b,  $datefrom;
+            }
+            if ($dateto) {
+                push @w,  'g.transdate <= ?';
+                push @b,  $dateto;
+            }
+            if ($description) {
+                push @w,  'g.description ILIKE ?';
+                push @b,  "%$description%";
+            }
+            if ($reference) {
+                push @w,  'g.reference ILIKE ?';
+                push @b,  "%$reference%";
+            }
+            if ($accno) {
+                push @w, q{
+                    EXISTS (
+                        SELECT 1 FROM acc_trans ac0
+                        JOIN chart ch0 ON ch0.id = ac0.chart_id
+                        WHERE ac0.trans_id = g.id AND ch0.accno = ?
+                    )
+                };
+                push @b, $accno;
+            }
+            if (@w) {
+                $q .= ' WHERE ' . join( ' AND ', @w );
+            }
+            $q .= ' ORDER BY g.transdate DESC, g.id DESC';
+            @rows = @{ $dbs->query( $q, @b )->hashes };
+        }
+        elsif ( $module eq 'gl' && $granularity eq 'line' ) {
+            my $q = q{
+                SELECT ac.trans_id, ac.id AS acc_trans_id, ac.transdate,
+                       ac.amount, ac.memo, ac.source,
+                       ch.accno, ch.description AS account_description,
+                       g.reference, g.transdate AS document_transdate,
+                       g.description AS document_description
+                FROM acc_trans ac
+                JOIN chart ch ON ch.id = ac.chart_id
+                JOIN gl g ON g.id = ac.trans_id
+            };
+            my @w;
+            my @b;
+            if ($cutoff) {
+                push @w,  'g.transdate > ?';
+                push @b,  $cutoff;
+            }
+            if ($datefrom) {
+                push @w,  'g.transdate >= ?';
+                push @b,  $datefrom;
+            }
+            if ($dateto) {
+                push @w,  'g.transdate <= ?';
+                push @b,  $dateto;
+            }
+            if ($description) {
+                push @w,  'g.description ILIKE ?';
+                push @b,  "%$description%";
+            }
+            if ($reference) {
+                push @w,  'g.reference ILIKE ?';
+                push @b,  "%$reference%";
+            }
+            if ($accno) {
+                push @w,  'ch.accno = ?';
+                push @b,  $accno;
+            }
+            if (@w) {
+                $q .= ' WHERE ' . join( ' AND ', @w );
+            }
+            $q .= ' ORDER BY g.transdate DESC, ac.trans_id, ac.id NULLS LAST';
+            @rows = @{ $dbs->query( $q, @b )->hashes };
+        }
+        elsif ( $module eq 'ar' && $granularity eq 'transaction' ) {
+            my $q = q{
+                SELECT a.id, a.invnumber, a.transdate, a.duedate, a.customer_id,
+                       c.name AS customer_name, a.amount, a.paid, a.description,
+                       a.invoice, a.approved, a.curr
+                FROM ar a
+                JOIN customer c ON c.id = a.customer_id
+            };
+            my @w;
+            my @b;
+            if ($cutoff) {
+                push @w,  'a.transdate > ?';
+                push @b,  $cutoff;
+            }
+            if ($datefrom) {
+                push @w,  'a.transdate >= ?';
+                push @b,  $datefrom;
+            }
+            if ($dateto) {
+                push @w,  'a.transdate <= ?';
+                push @b,  $dateto;
+            }
+            if ($description) {
+                push @w,  'a.description ILIKE ?';
+                push @b,  "%$description%";
+            }
+            if ($invnumber) {
+                push @w,  'a.invnumber ILIKE ?';
+                push @b,  "%$invnumber%";
+            }
+            if ($customer_id) {
+                push @w,  'a.customer_id = ?';
+                push @b,  $customer_id;
+            }
+            if (@w) {
+                $q .= ' WHERE ' . join( ' AND ', @w );
+            }
+            $q .= ' ORDER BY a.transdate DESC, a.id DESC';
+            @rows = @{ $dbs->query( $q, @b )->hashes };
+        }
+        elsif ( $module eq 'ar' && $granularity eq 'line' ) {
+            my $q = q{
+                SELECT i.id AS line_id, i.trans_id, i.description AS line_description,
+                       i.qty, i.sellprice, i.fxsellprice, i.discount,
+                       p.partnumber, p.id AS parts_id,
+                       a.invnumber, a.transdate AS document_transdate,
+                       a.customer_id, c.name AS customer_name,
+                       a.description AS document_description, a.curr
+                FROM invoice i
+                JOIN ar a ON a.id = i.trans_id
+                JOIN customer c ON c.id = a.customer_id
+                LEFT JOIN parts p ON p.id = i.parts_id
+            };
+            my @w = ('a.invoice IS TRUE', 'NOT COALESCE(i.assemblyitem, false)');
+            my @b;
+            if ($cutoff) {
+                push @w, 'a.transdate > ?';
+                push @b, $cutoff;
+            }
+            if ($datefrom) {
+                push @w, 'a.transdate >= ?';
+                push @b, $datefrom;
+            }
+            if ($dateto) {
+                push @w, 'a.transdate <= ?';
+                push @b, $dateto;
+            }
+            if ($description) {
+                push @w, 'a.description ILIKE ?';
+                push @b, "%$description%";
+            }
+            if ($invnumber) {
+                push @w, 'a.invnumber ILIKE ?';
+                push @b, "%$invnumber%";
+            }
+            if ($customer_id) {
+                push @w, 'a.customer_id = ?';
+                push @b, $customer_id;
+            }
+            if ($partnumber) {
+                push @w, 'p.partnumber ILIKE ?';
+                push @b, "%$partnumber%";
+            }
+            $q .= ' WHERE ' . join( ' AND ', @w );
+            $q .= ' ORDER BY a.transdate DESC, i.trans_id, i.id';
+            @rows = @{ $dbs->query( $q, @b )->hashes };
+        }
+        elsif ( $module eq 'ap' && $granularity eq 'transaction' ) {
+            my $q = q{
+                SELECT a.id, a.invnumber, a.transdate, a.duedate, a.vendor_id,
+                       v.name AS vendor_name, a.amount, a.paid, a.description,
+                       a.invoice, a.approved, a.curr
+                FROM ap a
+                JOIN vendor v ON v.id = a.vendor_id
+            };
+            my @w;
+            my @b;
+            if ($cutoff) {
+                push @w,  'a.transdate > ?';
+                push @b,  $cutoff;
+            }
+            if ($datefrom) {
+                push @w,  'a.transdate >= ?';
+                push @b,  $datefrom;
+            }
+            if ($dateto) {
+                push @w,  'a.transdate <= ?';
+                push @b,  $dateto;
+            }
+            if ($description) {
+                push @w,  'a.description ILIKE ?';
+                push @b,  "%$description%";
+            }
+            if ($invnumber) {
+                push @w,  'a.invnumber ILIKE ?';
+                push @b,  "%$invnumber%";
+            }
+            if ($vendor_id) {
+                push @w,  'a.vendor_id = ?';
+                push @b,  $vendor_id;
+            }
+            if (@w) {
+                $q .= ' WHERE ' . join( ' AND ', @w );
+            }
+            $q .= ' ORDER BY a.transdate DESC, a.id DESC';
+            @rows = @{ $dbs->query( $q, @b )->hashes };
+        }
+        elsif ( $module eq 'ap' && $granularity eq 'line' ) {
+            my $q = q{
+                SELECT ac.trans_id, ac.id AS acc_trans_id, ac.transdate,
+                       ac.amount, ac.memo, ac.source,
+                       ch.accno, ch.description AS account_description,
+                       ap.invnumber, ap.transdate AS document_transdate,
+                       ap.vendor_id, v.name AS vendor_name,
+                       ap.description AS document_description, ap.curr
+                FROM acc_trans ac
+                JOIN ap ON ap.id = ac.trans_id
+                JOIN chart ch ON ch.id = ac.chart_id
+                JOIN vendor v ON v.id = ap.vendor_id
+            };
+            my @w;
+            my @b;
+            if ($cutoff) {
+                push @w,  'ap.transdate > ?';
+                push @b,  $cutoff;
+            }
+            if ($datefrom) {
+                push @w,  'ap.transdate >= ?';
+                push @b,  $datefrom;
+            }
+            if ($dateto) {
+                push @w,  'ap.transdate <= ?';
+                push @b,  $dateto;
+            }
+            if ($description) {
+                push @w,  'ap.description ILIKE ?';
+                push @b,  "%$description%";
+            }
+            if ($invnumber) {
+                push @w,  'ap.invnumber ILIKE ?';
+                push @b,  "%$invnumber%";
+            }
+            if ($vendor_id) {
+                push @w,  'ap.vendor_id = ?';
+                push @b,  $vendor_id;
+            }
+            if ($accno) {
+                push @w,  'ch.accno = ?';
+                push @b,  $accno;
+            }
+            if (@w) {
+                $q .= ' WHERE ' . join( ' AND ', @w );
+            }
+            $q .=
+              ' ORDER BY ap.transdate DESC, ac.trans_id, ac.id NULLS LAST';
+            @rows = @{ $dbs->query( $q, @b )->hashes };
+        }
+
+        $c->render(
+            json => {
+                module                => $module,
+                granularity           => $granularity,
+                transdate_after       => $cutoff,
+                closed_period_applied => $cutoff ? \1 : \0,
+                rows                  => \@rows,
+            }
+        );
+    }
+);
+
+$api->get(
+    '/batch/create_links' => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+        my $module = $c->param('module') || '';
+
+        unless ( $module =~ /^(ar|ap|gl)$/ ) {
+            return $c->render(
+                status => 400,
+                json   => {
+                    error => 'Invalid module. Use ar, ap, or gl.',
+                }
+            );
+        }
+
+        if ( $module eq 'gl' ) {
+            return unless $c->check_perms("ledger.batchupdate");
+        }
+        elsif ( $module eq 'ar' ) {
+            return unless $c->check_perms("customer.batchupdate");
+        }
+        else {
+            return unless $c->check_perms("vendor.batchupdate");
+        }
+
+        my $sections = scalar $c->param('sections');
+        $sections = 'all' if !defined $sections || $sections eq '';
+
+        my $payload =
+          $c->batch_build_create_links( $client, $module, $sections );
+        $c->render( json => $payload // {} );
+    }
+);
+
 #Get An Individual GL transaction
 $api->get(
     '/gl/transactions/:id' => sub {
@@ -7111,6 +7478,262 @@ helper get_defaults => sub {
     return \%defaults_hash;
 };
 
+# Minimum document transdate for batch APIs: transdate > (closedto + 1 day).
+# Returns undef when closedto is unset or unparseable (no extra filter).
+helper batch_transdate_exclusive_min => sub {
+    my ($c) = @_;
+    my $defaults = $c->get_defaults;
+    my $raw      = $defaults->{closedto};
+    return undef unless defined $raw && $raw ne '';
+    my $ymd = format_date($raw);
+    return undef unless $ymd && $ymd =~ /^(\d{4})-(\d{2})-(\d{2})$/;
+    my $dt = eval {
+        DateTime->new(
+            year  => int($1),
+            month => int($2),
+            day   => int($3),
+        );
+    };
+    return undef unless $dt;
+    $dt->add( days => 1 );
+    return $dt->ymd;
+};
+
+# Reference data for batch UIs. $param: empty/0/false => undef; 1/all/true => full set;
+# or comma-separated keys (see valid keys per module in helper body).
+helper batch_build_create_links => sub {
+    my ( $c, $client, $module, $param ) = @_;
+    return undef
+      unless defined $param;
+    my $p = $param;
+    $p =~ s/^\s+|\s+$//g;
+    return undef
+      if $p eq ''
+      || $p eq '0'
+      || lc($p) eq 'false';
+
+    my $dbs = $c->dbs($client);
+    return undef unless $dbs;
+
+    my $link_has = sub {
+        my ( $link, $token ) = @_;
+        return 0 unless defined $link && $link ne '';
+        for my $t ( split /:/, $link ) {
+            return 1 if $t eq $token;
+        }
+        return 0;
+    };
+    my $link_has_all = sub {
+        my ( $link, @tokens ) = @_;
+        for my $tok (@tokens) {
+            return 0 unless $link_has->( $link, $tok );
+        }
+        return 1;
+    };
+    my $acc_label = sub {
+        my ($row) = @_;
+        return $row->{accno} . '--' . ( $row->{description} // '' );
+    };
+
+    my %valid_ar = map { $_ => 1 }
+      qw(customers ar_record_accounts ar_payment_accounts items departments projects);
+    my %valid_ap = map { $_ => 1 }
+      qw(vendors ap_record_accounts ap_payment_accounts expense_accounts expense_tax_accounts departments projects);
+    my %valid_gl = map { $_ => 1 }
+      qw(gl_accounts departments projects currencies);
+
+    my %syn = (
+        customer         => 'customers',
+        customers        => 'customers',
+        ar_record        => 'ar_record_accounts',
+        ar_record_account => 'ar_record_accounts',
+        ar_payment       => 'ar_payment_accounts',
+        ar_payment_account => 'ar_payment_accounts',
+        vendor           => 'vendors',
+        vendors          => 'vendors',
+        ap_record        => 'ap_record_accounts',
+        ap_record_account => 'ap_record_accounts',
+        ap_payment       => 'ap_payment_accounts',
+        ap_payment_account => 'ap_payment_accounts',
+        expense          => 'expense_accounts',
+        expense_account  => 'expense_accounts',
+        expense_tax      => 'expense_tax_accounts',
+        expense_tax_account => 'expense_tax_accounts',
+        tax              => 'expense_tax_accounts',
+        gl_account       => 'gl_accounts',
+        gl_accounts      => 'gl_accounts',
+        account          => 'gl_accounts',
+        currency         => 'currencies',
+        currencies       => 'currencies',
+        department       => 'departments',
+        departments      => 'departments',
+        project          => 'projects',
+        projects         => 'projects',
+        item             => 'items',
+        items            => 'items',
+    );
+
+    my @want_tokens =
+        ( $p eq '1' || lc($p) eq 'all' || lc($p) eq 'true' )
+      ? ('__ALL__')
+      : ( split /\s*,\s*/, lc $p );
+
+    my %want;
+    if ( $want_tokens[0] eq '__ALL__' ) {
+        if ( $module eq 'ar' ) {
+            %want = map { $_ => 1 } keys %valid_ar;
+        }
+        elsif ( $module eq 'ap' ) {
+            %want = map { $_ => 1 } keys %valid_ap;
+        }
+        else {
+            %want = map { $_ => 1 } keys %valid_gl;
+        }
+    }
+    else {
+        for my $t (@want_tokens) {
+            my $k = $syn{$t} // $t;
+            if ( $module eq 'ar' && $valid_ar{$k} ) {
+                $want{$k} = 1;
+            }
+            elsif ( $module eq 'ap' && $valid_ap{$k} ) {
+                $want{$k} = 1;
+            }
+            elsif ( $module eq 'gl' && $valid_gl{$k} ) {
+                $want{$k} = 1;
+            }
+        }
+    }
+
+    return undef unless %want;
+
+    my $out = {};
+
+    if ( $module eq 'ar' ) {
+        if ( $want{customers} ) {
+            $out->{customers} = $c->get_vc( 'customer', $client );
+        }
+        if ( $want{items} ) {
+            $out->{items} = $dbs->query(
+                q{SELECT id, partnumber, description, unit, sellprice, assembly, obsolete
+                  FROM parts ORDER BY partnumber}
+            )->hashes;
+        }
+        if ( $want{departments} ) {
+            $out->{departments} = $c->get_departments( 'P', $client );
+        }
+        if ( $want{projects} ) {
+            $out->{projects} = $c->get_projects($client);
+        }
+        if ( $want{ar_record_accounts} || $want{ar_payment_accounts} ) {
+            my $charts = $dbs->query(
+                q{SELECT id, accno, description, link, charttype
+                  FROM chart
+                  WHERE COALESCE(closed, false) = false}
+            )->hashes;
+            if ( $want{ar_record_accounts} ) {
+                my @acc = grep { $link_has->( $_->{link}, 'AR' ) } @$charts;
+                $_->{label} = $acc_label->($_) for @acc;
+                $out->{ar_record_accounts} = \@acc;
+            }
+            if ( $want{ar_payment_accounts} ) {
+                my @acc = grep { $link_has->( $_->{link}, 'AR_paid' ) } @$charts;
+                $_->{label} = $acc_label->($_) for @acc;
+                $out->{ar_payment_accounts} = \@acc;
+            }
+        }
+    }
+    elsif ( $module eq 'ap' ) {
+        if ( $want{vendors} ) {
+            $out->{vendors} = $c->get_vc( 'vendor', $client );
+        }
+        if ( $want{departments} ) {
+            $out->{departments} = $c->get_departments( undef, $client );
+        }
+        if ( $want{projects} ) {
+            $out->{projects} = $c->get_projects($client);
+        }
+        if (   $want{ap_record_accounts}
+            || $want{ap_payment_accounts}
+            || $want{expense_accounts}
+            || $want{expense_tax_accounts} )
+        {
+            my $charts = $dbs->query(
+                q{SELECT id, accno, description, link, charttype
+                  FROM chart
+                  WHERE COALESCE(closed, false) = false}
+            )->hashes;
+            if ( $want{ap_record_accounts} ) {
+                my @acc = grep { $link_has->( $_->{link}, 'AP' ) } @$charts;
+                $_->{label} = $acc_label->($_) for @acc;
+                $out->{ap_record_accounts} = \@acc;
+            }
+            if ( $want{ap_payment_accounts} ) {
+                my @acc = grep { $link_has->( $_->{link}, 'AP_paid' ) } @$charts;
+                $_->{label} = $acc_label->($_) for @acc;
+                $out->{ap_payment_accounts} = \@acc;
+            }
+            if ( $want{expense_accounts} ) {
+                my @acc =
+                  grep { $link_has_all->( $_->{link}, 'AP_amount', 'IC_expense' ) }
+                  @$charts;
+                $_->{label} = $acc_label->($_) for @acc;
+                $out->{expense_accounts} = \@acc;
+            }
+            if ( $want{expense_tax_accounts} ) {
+                my @from_link =
+                  grep { $link_has->( $_->{link}, 'AP_tax' ) } @$charts;
+                my $from_vt = eval {
+                    $dbs->query(
+                        q{SELECT DISTINCT c.id, c.accno, c.description, c.link, c.charttype
+                          FROM chart c
+                          JOIN vendortax vt ON vt.chart_id = c.id
+                          WHERE COALESCE(c.closed, false) = false}
+                    )->hashes;
+                };
+                $from_vt = [] if $@ || !$from_vt;
+                my %seen;
+                my @merged;
+                for my $row ( @from_link, @$from_vt ) {
+                    next if $seen{ $row->{id} }++;
+                    $row->{label} = $acc_label->($row);
+                    push @merged, $row;
+                }
+                @merged = sort { $a->{accno} cmp $b->{accno} } @merged;
+                $out->{expense_tax_accounts} = \@merged;
+            }
+        }
+    }
+    else {
+        if ( $want{gl_accounts} ) {
+            $out->{gl_accounts} = $dbs->query(
+                q{SELECT id, accno, description, link, charttype, category
+                  FROM chart
+                  WHERE charttype <> 'H'
+                    AND COALESCE(allow_gl, true) = true
+                    AND COALESCE(closed, false) = false
+                  ORDER BY accno}
+            )->hashes;
+            $_->{label} = $acc_label->($_) for @{ $out->{gl_accounts} };
+        }
+        if ( $want{departments} ) {
+            $out->{departments} = $c->get_departments( undef, $client );
+        }
+        if ( $want{projects} ) {
+            $out->{projects} = $c->get_projects($client);
+        }
+        if ( $want{currencies} ) {
+            my $cur;
+            eval {
+                $cur = $dbs->query("SELECT * FROM curr ORDER BY rn")->hashes;
+            };
+            $out->{currencies} = $cur // [];
+        }
+    }
+
+    return $out;
+};
+
 helper get_projects => sub {
     my $c        = shift;
     my $client   = shift // $c->param('client');
@@ -9184,6 +9807,13 @@ helper process_transaction => sub {
     my $default_curr_row    = $default_curr_result->hash;
     $form->{defaultcurrency} =
       $default_curr_row ? $default_curr_row->{curr} : $form->{currency};
+
+    # Swiss QR: ar.paymentmethod_id must be bank.id (see IS.pm invoice_details). With no
+    # payment rows, AA reads paymentmethod_0 — set it from the API so the column is stored.
+    if ( $data->{paymentmethod_id} && !$form->{paidaccounts} ) {
+        my $pm = $data->{paymentmethod_id} + 0;
+        $form->{paymentmethod_0} = "0--$pm" if $pm;
+    }
 
     # Post the transaction
     eval { AA->post_transaction( $c->slconfig, $form ); } or do {
@@ -14046,10 +14676,35 @@ sub build_transaction {
     }
 
     my $arap_tbl    = $transaction_type eq 'AR' ? 'ar' : 'ap';
-    my $ledger_bank = $dbs->query( "SELECT vc_bank_id, dcn FROM $arap_tbl WHERE id = ?",
-        $id )->hash // {};
+    # Swiss QR / creditor data: same source as IS.pm invoice_details — `bank` row id = ar.paymentmethod_id.
+    # (vc_bank_id / bank_account is unrelated to QR; do not load it before bank or it can mask paymentmethod_id.)
+    my $ledger_bank = $dbs->query(
+        "SELECT vc_bank_id, dcn, paymentmethod_id FROM $arap_tbl WHERE id = ?",
+        $id
+    )->hash // {};
+    my $bank_id = $ledger_bank->{paymentmethod_id};
+    $bank_id = defined $bank_id && $bank_id ne '' ? $bank_id + 0 : 0;
+    if ( !$bank_id ) {
+        my $pay_pm = $dbs->query(
+            q{SELECT paymentmethod_id FROM payment WHERE trans_id = ? ORDER BY id DESC LIMIT 1},
+            $id
+        )->hash;
+        if ( $pay_pm && defined $pay_pm->{paymentmethod_id} && $pay_pm->{paymentmethod_id} ne '' )
+        {
+            $bank_id = $pay_pm->{paymentmethod_id} + 0;
+        }
+    }
     my %bank_qr;
-    if ( $ledger_bank->{vc_bank_id} ) {
+    if ($bank_id) {
+        my $bk = $dbs->query(
+            q{SELECT iban, bic, qriban, dcn, rvc, membernumber, clearingnumber, strdbkginf, invdescriptionqr
+              FROM bank WHERE id = ?},
+            $bank_id
+        )->hash;
+        %bank_qr = %$bk if $bk;
+    }
+    my $have_qriban = defined $bank_qr{qriban} && $bank_qr{qriban} ne '';
+    if ( !$have_qriban && $ledger_bank->{vc_bank_id} ) {
         my $ba = $dbs->query(
             q{SELECT iban, bic, qriban, dcn, rvc, membernumber, clearingnumber, strdbkginf, invdescriptionqr
               FROM bank_account WHERE id = ?},
