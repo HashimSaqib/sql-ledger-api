@@ -13891,6 +13891,17 @@ $api->post(
 ####                       ####
 ###############################
 
+# Display dates for TeX templates (invoice, ar/ap transaction, etc.).
+# Form::format_date (SL/Form.pm) takes a pattern and yyyymmdd; DB values are usually yyyy-mm-dd.
+sub template_display_date {
+    my ( $form, $date ) = @_;
+    return '' unless defined $date && $date ne '';
+    my $yyyymmdd = $date;
+    $yyyymmdd =~ s/-//g;
+    return $date unless $yyyymmdd =~ /^\d{8}$/;
+    return $form->format_date( 'dd.mm.yyyy', $yyyymmdd );
+}
+
 sub build_letterhead {
     my ($c) = @_;
     my $client = $c->param('client');
@@ -14080,24 +14091,16 @@ sub build_invoice {
         IR->invoice_details( $c->slconfig, $form );
     }
 
-  # Format dates as dd-mm-yyyy for display (Form's format_date expects yyyymmdd)
-    my $fmt_dd_mm_yyyy = sub {
-        my ($d) = @_;
-        return '' unless $d;
-        my $yyyymmdd = $d;
-        $yyyymmdd =~ s/-//g;
-        return $d unless $yyyymmdd =~ /^\d{8}$/;
-        return $form->format_date( 'dd-mm-yyyy', $yyyymmdd );
-    };
+    # NEO / TeX: dd.mm.yyyy via Form::format_date (same rules as template_display_date)
     for my $field (qw(invdate transdate duedate)) {
         if ( $form->{$field} ) {
-            $form->{$field} = $fmt_dd_mm_yyyy->( $form->{$field} );
+            $form->{$field} = template_display_date( $form, $form->{$field} );
         }
     }
     for my $i ( 1 .. $form->{rowcount} - 1 ) {
         if ( $form->{"deliverydate_$i"} ) {
             $form->{"deliverydate_$i"} =
-              $fmt_dd_mm_yyyy->( $form->{"deliverydate_$i"} );
+              template_display_date( $form, $form->{"deliverydate_$i"} );
         }
     }
 
@@ -14437,7 +14440,8 @@ sub build_transaction {
             my $p_amt = $amount_multiplier * $pay->{amount};
             $payment_total += $p_amt;
 
-            push @paymentdate, $pay->{transdate} // '';
+            push @paymentdate,
+              template_display_date( $form, $pay->{transdate} // '' );
             push @paymentaccount,
               (
                 defined $pay->{accno} && defined $pay->{description}
@@ -14606,8 +14610,8 @@ sub build_transaction {
         ),
         ## Invoice Details
         invnumber => $form->{invnumber},
-        invdate   => $form->{transdate},
-        duedate   => $form->{duedate},
+        invdate   => template_display_date( $form, $form->{transdate} ),
+        duedate   => template_display_date( $form, $form->{duedate} ),
         ponumber  => $form->{ponumber},
         ordnumber => $form->{ordnumber},
         employee  => $form->{employee} || '',
