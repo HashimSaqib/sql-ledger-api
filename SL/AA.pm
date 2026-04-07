@@ -183,6 +183,9 @@ sub post_transaction {
   my $paymentmethod_id;
 
   my $paid = 0;
+  # Must be lexical: $paid{...} binds to %paid, not to $paid; without "my %paid"
+  # assignments would use package %AA::paid and leak between requests (Morbo, etc.).
+  my %paid;
 
   $diff = 0;
   # add payments

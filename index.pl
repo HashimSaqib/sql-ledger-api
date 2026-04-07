@@ -9813,8 +9813,8 @@ helper process_transaction => sub {
     if ( $data->{paymentmethod_id} && !$form->{paidaccounts} ) {
         my $pm = $data->{paymentmethod_id} + 0;
         $form->{paymentmethod_0} = "0--$pm" if $pm;
-    }
-
+    }   
+    
     # Post the transaction
     eval { AA->post_transaction( $c->slconfig, $form ); } or do {
 
