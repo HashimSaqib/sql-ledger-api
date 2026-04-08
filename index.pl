@@ -3912,20 +3912,44 @@ $api->get(
         my $accno       = $c->param('accno');
         my $partnumber  = $c->param('partnumber');
 
+        # AP batch search: optional filters (transaction + line granularity)
+        my $line_item_account     = $c->param('line_item_account');
+        my $line_item_tax_account = $c->param('line_item_tax_account');
+        my $duedatefrom           = $c->param('duedatefrom');
+        my $duedateto             = $c->param('duedateto');
+        my $morethanamount        = $c->param('morethanamount');
+        my $lessthanamount        = $c->param('lessthanamount');
+        my $equaltoamount         = $c->param('equaltoamount');
+        my $morethantaxamount     = $c->param('morethantaxamount');
+        my $lessthantaxamount     = $c->param('lessthantaxamount');
+        my $project_id_filter     = $c->param('project_id');     # AP line / GL line: acc_trans.project_id
+        my $department_id_filter  = $c->param('department_id'); # AP: ap.department_id; GL txn: gl.department_id; GL line: gl.department_id
+        my $source_search         = $c->param('source');           # GL line: acc_trans.source (ILIKE)
+        my $memo_search           = $c->param('memo');           # GL line: acc_trans.memo (ILIKE)
+
         if ($datefrom) { $c->validate_date($datefrom) or return; }
         if ($dateto)   { $c->validate_date($dateto)   or return; }
+        if ($duedatefrom) { $c->validate_date($duedatefrom) or return; }
+        if ($duedateto)   { $c->validate_date($duedateto)   or return; }
 
         my @rows;
 
         if ( $module eq 'gl' && $granularity eq 'transaction' ) {
             my $q = q{
                 SELECT g.id, g.reference, g.transdate, g.description, g.curr,
-                       g.approved, g.department_id, d.description AS department
+                       g.department_id, d.description AS department,
+                       COALESCE(line_totals.amount, 0) AS amount
                 FROM gl g
                 LEFT JOIN department d ON d.id = g.department_id
+                LEFT JOIN (
+                    SELECT trans_id,
+                           SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END) AS amount
+                      FROM acc_trans
+                  GROUP BY trans_id
+                ) line_totals ON line_totals.trans_id = g.id
             };
-            my @w;
-            my @b;
+            my @w = ('g.approved = ?');
+            my @b = ('1');
             if ($cutoff) {
                 push @w,  'g.transdate > ?';
                 push @b,  $cutoff;
@@ -3956,25 +3980,34 @@ $api->get(
                 };
                 push @b, $accno;
             }
-            if (@w) {
-                $q .= ' WHERE ' . join( ' AND ', @w );
+            if ( defined $department_id_filter && $department_id_filter ne '' ) {
+                push @w, 'g.department_id = ?';
+                push @b, $department_id_filter + 0;
             }
+            $q .= ' WHERE ' . join( ' AND ', @w );
             $q .= ' ORDER BY g.transdate DESC, g.id DESC';
             @rows = @{ $dbs->query( $q, @b )->hashes };
         }
         elsif ( $module eq 'gl' && $granularity eq 'line' ) {
             my $q = q{
-                SELECT ac.trans_id, ac.id AS acc_trans_id, ac.transdate,
+                SELECT ac.trans_id, ac.entry_id, ac.transdate,
                        ac.amount, ac.memo, ac.source,
                        ch.accno, ch.description AS account_description,
                        g.reference, g.transdate AS document_transdate,
-                       g.description AS document_description
+                       g.description AS document_description,
+                       g.department_id,
+                       d.description AS department,
+                       ac.project_id,
+                       pr.projectnumber AS projectnumber,
+                       pr.description AS project_description
                 FROM acc_trans ac
                 JOIN chart ch ON ch.id = ac.chart_id
                 JOIN gl g ON g.id = ac.trans_id
+                LEFT JOIN department d ON d.id = g.department_id
+                LEFT JOIN project pr ON pr.id = ac.project_id
             };
-            my @w;
-            my @b;
+            my @w = ( 'g.approved = ?', 'ac.approved = ?' );
+            my @b = ( '1', '1' );
             if ($cutoff) {
                 push @w,  'g.transdate > ?';
                 push @b,  $cutoff;
@@ -3999,22 +4032,46 @@ $api->get(
                 push @w,  'ch.accno = ?';
                 push @b,  $accno;
             }
-            if (@w) {
-                $q .= ' WHERE ' . join( ' AND ', @w );
+            if ( defined $department_id_filter && $department_id_filter ne '' ) {
+                push @w, 'g.department_id = ?';
+                push @b, $department_id_filter + 0;
             }
-            $q .= ' ORDER BY g.transdate DESC, ac.trans_id, ac.id NULLS LAST';
+            if ( defined $project_id_filter && $project_id_filter ne '' ) {
+                push @w, 'ac.project_id = ?';
+                push @b, $project_id_filter + 0;
+            }
+            if ( defined $source_search && $source_search ne '' ) {
+                push @w, 'ac.source ILIKE ?';
+                push @b, "%$source_search%";
+            }
+            if ( defined $memo_search && $memo_search ne '' ) {
+                push @w, 'ac.memo ILIKE ?';
+                push @b, "%$memo_search%";
+            }
+            $q .= ' WHERE ' . join( ' AND ', @w );
+            $q .= ' ORDER BY g.transdate DESC, ac.trans_id, ac.entry_id';
             @rows = @{ $dbs->query( $q, @b )->hashes };
+            for my $row (@rows) {
+                my $amt = $row->{amount};
+                my $credit =
+                  ( defined $amt && $amt > 0 ) ? $amt * 1 : 0;
+                my $debit =
+                  ( defined $amt && $amt < 0 ) ? ( -$amt ) * 1 : 0;
+                $row->{debit}  = $debit;
+                $row->{credit} = $credit;
+                delete $row->{amount};
+            }
         }
         elsif ( $module eq 'ar' && $granularity eq 'transaction' ) {
             my $q = q{
                 SELECT a.id, a.invnumber, a.transdate, a.duedate, a.customer_id,
                        c.name AS customer_name, a.amount, a.paid, a.description,
-                       a.invoice, a.approved, a.curr
+                       a.invoice, a.curr
                 FROM ar a
                 JOIN customer c ON c.id = a.customer_id
             };
-            my @w;
-            my @b;
+            my @w = ('a.approved = ?');
+            my @b = ('1');
             if ($cutoff) {
                 push @w,  'a.transdate > ?';
                 push @b,  $cutoff;
@@ -4039,9 +4096,7 @@ $api->get(
                 push @w,  'a.customer_id = ?';
                 push @b,  $customer_id;
             }
-            if (@w) {
-                $q .= ' WHERE ' . join( ' AND ', @w );
-            }
+            $q .= ' WHERE ' . join( ' AND ', @w );
             $q .= ' ORDER BY a.transdate DESC, a.id DESC';
             @rows = @{ $dbs->query( $q, @b )->hashes };
         }
@@ -4058,8 +4113,12 @@ $api->get(
                 JOIN customer c ON c.id = a.customer_id
                 LEFT JOIN parts p ON p.id = i.parts_id
             };
-            my @w = ('a.invoice IS TRUE', 'NOT COALESCE(i.assemblyitem, false)');
-            my @b;
+            my @w = (
+                'a.invoice IS TRUE',
+                'NOT COALESCE(i.assemblyitem, false)',
+                'a.approved = ?'
+            );
+            my @b = ('1');
             if ($cutoff) {
                 push @w, 'a.transdate > ?';
                 push @b, $cutoff;
@@ -4095,13 +4154,15 @@ $api->get(
         elsif ( $module eq 'ap' && $granularity eq 'transaction' ) {
             my $q = q{
                 SELECT a.id, a.invnumber, a.transdate, a.duedate, a.vendor_id,
+                       a.department_id, dep.description AS department,
                        v.name AS vendor_name, a.amount, a.paid, a.description,
-                       a.invoice, a.approved, a.curr
+                       a.invoice, a.curr
                 FROM ap a
                 JOIN vendor v ON v.id = a.vendor_id
+                LEFT JOIN department dep ON dep.id = a.department_id
             };
-            my @w;
-            my @b;
+            my @w = ('a.approved = ?');
+            my @b = ('1');
             if ($cutoff) {
                 push @w,  'a.transdate > ?';
                 push @b,  $cutoff;
@@ -4126,27 +4187,80 @@ $api->get(
                 push @w,  'a.vendor_id = ?';
                 push @b,  $vendor_id;
             }
-            if (@w) {
-                $q .= ' WHERE ' . join( ' AND ', @w );
+            if ($duedatefrom) {
+                push @w,  'a.duedate >= ?';
+                push @b,  $duedatefrom;
             }
+            if ($duedateto) {
+                push @w,  'a.duedate <= ?';
+                push @b,  $duedateto;
+            }
+            if ( defined $morethanamount && $morethanamount ne '' ) {
+                push @w,  'a.amount > ?';
+                push @b,  $morethanamount + 0;
+            }
+            if ( defined $lessthanamount && $lessthanamount ne '' ) {
+                push @w,  'a.amount < ?';
+                push @b,  $lessthanamount + 0;
+            }
+            if ( defined $equaltoamount && $equaltoamount ne '' ) {
+                push @w,  'a.amount = ?';
+                push @b,  $equaltoamount + 0;
+            }
+            if ( defined $department_id_filter && $department_id_filter ne '' ) {
+                push @w,  'a.department_id = ?';
+                push @b,  $department_id_filter + 0;
+            }
+            $q .= ' WHERE ' . join( ' AND ', @w );
             $q .= ' ORDER BY a.transdate DESC, a.id DESC';
             @rows = @{ $dbs->query( $q, @b )->hashes };
         }
         elsif ( $module eq 'ap' && $granularity eq 'line' ) {
             my $q = q{
-                SELECT ac.trans_id, ac.id AS acc_trans_id, ac.transdate,
-                       ac.amount, ac.memo, ac.source,
-                       ch.accno, ch.description AS account_description,
-                       ap.invnumber, ap.transdate AS document_transdate,
-                       ap.vendor_id, v.name AS vendor_name,
-                       ap.description AS document_description, ap.curr
+                SELECT ap.id AS trans_id,
+                       ap.vendor_id,
+                       ap.invnumber,
+                       v.name AS vendor_name,
+                       ap.transdate AS invoicedate,
+                       ap.duedate,
+                       ap.executiondate,
+                       rec.accno AS record_accno,
+                       ap.department_id,
+                       d.description AS department,
+                       ac.memo AS item_description,
+                       ch.accno AS expense_accno,
+                       ac.amount AS _amount_raw,
+                       ac.linetaxamount AS _linetax_raw,
+                       tax.accno AS tax_account,
+                       ac.project_id,
+                       ac.entry_id
                 FROM acc_trans ac
-                JOIN ap ON ap.id = ac.trans_id
                 JOIN chart ch ON ch.id = ac.chart_id
+                JOIN ap ON ap.id = ac.trans_id
                 JOIN vendor v ON v.id = ap.vendor_id
+                LEFT JOIN department d ON d.id = ap.department_id
+                LEFT JOIN chart tax ON tax.id = ac.tax_chart_id
+                LEFT JOIN LATERAL (
+                    SELECT c2.accno
+                      FROM acc_trans ac2
+                      JOIN chart c2 ON c2.id = ac2.chart_id
+                     WHERE ac2.trans_id = ap.id
+                       AND ac2.fx_transaction = '0'
+                       AND (':' || COALESCE(c2.link, '') || ':') LIKE '%:AP:%'
+                       AND c2.link NOT LIKE '%AP_amount%'
+                       AND c2.link NOT LIKE '%AP_paid%'
+                       AND c2.link NOT LIKE '%AP_discount%'
+                  ORDER BY ac2.entry_id
+                     LIMIT 1
+                ) rec ON TRUE
             };
-            my @w;
-            my @b;
+            my @w = (
+                'ap.approved = ?',
+                'ac.approved = ?',
+                'ac.fx_transaction = ?',
+                q{ch.link LIKE '%AP_amount%'}
+            );
+            my @b = ( '1', '1', '0' );
             if ($cutoff) {
                 push @w,  'ap.transdate > ?';
                 push @b,  $cutoff;
@@ -4171,16 +4285,104 @@ $api->get(
                 push @w,  'ap.vendor_id = ?';
                 push @b,  $vendor_id;
             }
-            if ($accno) {
+            my $ap_line_expense_accno = $line_item_account || $accno;
+            if ($ap_line_expense_accno) {
                 push @w,  'ch.accno = ?';
-                push @b,  $accno;
+                push @b,  $ap_line_expense_accno;
             }
-            if (@w) {
-                $q .= ' WHERE ' . join( ' AND ', @w );
+            if ($line_item_tax_account) {
+                push @w,  'tax.accno = ?';
+                push @b,  $line_item_tax_account;
             }
+            if ($duedatefrom) {
+                push @w,  'ap.duedate >= ?';
+                push @b,  $duedatefrom;
+            }
+            if ($duedateto) {
+                push @w,  'ap.duedate <= ?';
+                push @b,  $duedateto;
+            }
+            if ( defined $department_id_filter && $department_id_filter ne '' ) {
+                push @w,  'ap.department_id = ?';
+                push @b,  $department_id_filter + 0;
+            }
+            if ( defined $project_id_filter && $project_id_filter ne '' ) {
+                push @w,  'ac.project_id = ?';
+                push @b,  $project_id_filter + 0;
+            }
+            $q .= ' WHERE ' . join( ' AND ', @w );
             $q .=
-              ' ORDER BY ap.transdate DESC, ac.trans_id, ac.id NULLS LAST';
+              ' ORDER BY ap.transdate DESC, ac.trans_id, ac.entry_id';
             @rows = @{ $dbs->query( $q, @b )->hashes };
+
+            my %trans_total;
+            for my $row (@rows) {
+                $trans_total{ $row->{trans_id} } += $row->{_amount_raw} // 0;
+            }
+            for my $row (@rows) {
+                my $total = $trans_total{ $row->{trans_id} } // 0;
+                my $is_neg = $total < 0;
+                my $mult   = $is_neg ? 1 : -1;    # same as GET /arap/transaction/vendor/:id (AP)
+                my $raw    = $row->{_amount_raw}  // 0;
+                my $linetax = $row->{_linetax_raw};
+                $row->{amount}     = $mult * ( -$raw );
+                $row->{tax_amount} = defined $linetax ? $linetax * 1 : undef;
+                delete $row->{_amount_raw};
+                delete $row->{_linetax_raw};
+                $row->{ap_id} = delete $row->{trans_id};
+            }
+
+            if (   ( defined $morethanamount    && $morethanamount ne '' )
+                || ( defined $lessthanamount    && $lessthanamount ne '' )
+                || ( defined $equaltoamount     && $equaltoamount ne '' )
+                || ( defined $morethantaxamount && $morethantaxamount ne '' )
+                || ( defined $lessthantaxamount && $lessthantaxamount ne '' ) )
+            {
+                my $mta =
+                  ( defined $morethanamount && $morethanamount ne '' )
+                  ? $morethanamount + 0
+                  : undef;
+                my $lta =
+                  ( defined $lessthanamount && $lessthanamount ne '' )
+                  ? $lessthanamount + 0
+                  : undef;
+                my $eqa =
+                  ( defined $equaltoamount && $equaltoamount ne '' )
+                  ? $equaltoamount + 0
+                  : undef;
+                my $mtt =
+                  ( defined $morethantaxamount && $morethantaxamount ne '' )
+                  ? $morethantaxamount + 0
+                  : undef;
+                my $ltt =
+                  ( defined $lessthantaxamount && $lessthantaxamount ne '' )
+                  ? $lessthantaxamount + 0
+                  : undef;
+                @rows = grep {
+                    my $r   = $_;
+                    my $amt = $r->{amount};
+                    my $tax = $r->{tax_amount};
+                    my $ok  = 1;
+                    if ( defined $mta ) {
+                        $ok = 0 unless defined $amt && $amt > $mta;
+                    }
+                    if ( $ok && defined $lta ) {
+                        $ok = 0 unless defined $amt && $amt < $lta;
+                    }
+                    if ( $ok && defined $eqa ) {
+                        $ok = 0
+                          unless defined $amt
+                          && abs( $amt - $eqa ) < 1e-8;
+                    }
+                    if ( $ok && defined $mtt ) {
+                        $ok = 0 unless defined $tax && $tax > $mtt;
+                    }
+                    if ( $ok && defined $ltt ) {
+                        $ok = 0 unless defined $tax && $tax < $ltt;
+                    }
+                    $ok;
+                } @rows;
+            }
         }
 
         $c->render(
@@ -4226,6 +4428,859 @@ $api->get(
         my $payload =
           $c->batch_build_create_links( $client, $module, $sections );
         $c->render( json => $payload // {} );
+    }
+);
+
+$api->post(
+    '/batch/update' => sub {
+        my $c    = shift;
+        my $body = $c->req->json;
+        unless ( ref($body) eq 'HASH' ) {
+            return $c->render(
+                status => 400,
+                json   => { error => 'JSON object body required.' }
+            );
+        }
+        my $module = $body->{module} // '';
+        unless ( $module =~ /^(ap|gl)$/ ) {
+            return $c->render(
+                status => 400,
+                json   => { error => 'Invalid module. Use ap or gl.' }
+            );
+        }
+        my $granularity = $body->{granularity} // '';
+        unless ( $granularity eq 'transaction' || $granularity eq 'line' ) {
+            return $c->render(
+                status => 400,
+                json   => {
+                    error => 'Invalid granularity. Use transaction or line.',
+                }
+            );
+        }
+        if ( $module eq 'gl' ) {
+            return unless $c->check_perms("ledger.batchupdate");
+        }
+        else {
+            return unless $c->check_perms("vendor.batchupdate");
+        }
+
+        my $items = $body->{items};
+        unless ( ref($items) eq 'ARRAY' && @$items ) {
+            return $c->render(
+                status => 400,
+                json   => { error => 'items must be a non-empty array.' }
+            );
+        }
+
+        my $client = $c->param('client');
+        my $dbs    = $c->dbs($client);
+        my @results;
+
+        ITEM: for my $it (@$items) {
+            unless ( ref($it) eq 'HASH' ) {
+                push @results,
+                  { id => undef, ok => 0, error => 'Each item must be an object.' };
+                next;
+            }
+
+            if ( $module eq 'ap' ) {
+
+            # ----------------------------------------------------------------
+            # Resolve $id and $item_entry_id based on granularity
+            # ----------------------------------------------------------------
+            my ( $id, $item_entry_id );
+
+            if ( $granularity eq 'line' ) {
+                my $eid_raw = $it->{entry_id};
+                unless ( defined $eid_raw && $eid_raw =~ /^\d+$/ ) {
+                    push @results,
+                      { id => undef, entry_id => undef, ok => 0,
+                        error => 'entry_id is required for each item when granularity is line.' };
+                    next ITEM;
+                }
+                $item_entry_id = $eid_raw + 0;
+
+                my $ah = $dbs->query(
+                    q{SELECT trans_id FROM acc_trans WHERE entry_id = ?},
+                    $item_entry_id
+                )->hash;
+                unless ($ah) {
+                    push @results,
+                      { id => undef, entry_id => $item_entry_id, ok => 0,
+                        error => 'acc_trans row not found for entry_id.' };
+                    next ITEM;
+                }
+                $id = $ah->{trans_id} + 0;
+
+                for my $k (qw(id ap_id)) {
+                    my $v = $it->{$k};
+                    next unless defined $v && $v =~ /^\d+$/;
+                    if ( $v + 0 != $id ) {
+                        push @results,
+                          { id => $v + 0, entry_id => $item_entry_id, ok => 0,
+                            error => 'id / ap_id does not match the AP transaction for this entry_id.' };
+                        next ITEM;
+                    }
+                    last;
+                }
+            }
+            else {
+                my $raw_id = $it->{id} // $it->{ap_id};
+                unless ( defined $raw_id && $raw_id =~ /^\d+$/ && $raw_id > 0 ) {
+                    push @results,
+                      { id => undef, ok => 0, error => 'id or ap_id is required for transaction granularity.' };
+                    next ITEM;
+                }
+                $id = $raw_id + 0;
+            }
+
+            my $batch_add_result = sub {
+                my (%h) = @_;
+                $h{entry_id} = $item_entry_id if defined $item_entry_id;
+                push @results, \%h;
+            };
+
+            # ----------------------------------------------------------------
+            # Shared AP document validation
+            # ----------------------------------------------------------------
+            my $row = $dbs->query(
+                q{SELECT id, transdate, duedate, vendor_id, department_id, approved
+                    FROM ap WHERE id = ?},
+                $id
+            )->hash;
+            unless ($row) {
+                $batch_add_result->( id => $id, ok => 0, error => 'AP transaction not found.' );
+                next;
+            }
+            if ( ( $row->{approved} // '' ) ne '1' ) {
+                $batch_add_result->( id => $id, ok => 0, error => 'Only approved transactions can be updated.' );
+                next;
+            }
+
+            my $cutoff = $c->batch_transdate_exclusive_min;
+            if ($cutoff) {
+                my $old_td = $row->{transdate};
+                $old_td =~ s/\s.*//s if defined $old_td;
+                $old_td = format_date($old_td) if defined $old_td;
+                unless ( defined $old_td
+                    && $old_td =~ /^\d{4}-\d{2}-\d{2}$/
+                    && $old_td gt $cutoff )
+                {
+                    $batch_add_result->(
+                        id => $id, ok => 0,
+                        error => 'Transaction is in the closed period and cannot be modified.' );
+                    next;
+                }
+            }
+
+            # ----------------------------------------------------------------
+            # Line granularity: direct processing
+            # ----------------------------------------------------------------
+            if ( $granularity eq 'line' ) {
+                my %ap_set;
+                my $need_acc_trans;
+                my $dept_changed;
+
+                if ( exists $it->{transdate} ) {
+                    my $nd = $it->{transdate};
+                    unless ( defined $nd && $nd =~ /^\d{4}-\d{2}-\d{2}$/ ) {
+                        $batch_add_result->( id => $id, ok => 0, error => 'Invalid transdate format.' );
+                        next;
+                    }
+                    if ( my $err = $c->batch_date_must_be_after_closed_period($nd) ) {
+                        $batch_add_result->( id => $id, ok => 0, error => $err );
+                        next;
+                    }
+                    $ap_set{transdate} = $nd;
+                    $need_acc_trans = 1;
+                }
+
+                if ( exists $it->{duedate} ) {
+                    my $nd = $it->{duedate};
+                    unless ( defined $nd && $nd =~ /^\d{4}-\d{2}-\d{2}$/ ) {
+                        $batch_add_result->( id => $id, ok => 0, error => 'Invalid duedate format.' );
+                        next;
+                    }
+                    if ( my $err = $c->batch_date_must_be_after_closed_period($nd) ) {
+                        $batch_add_result->( id => $id, ok => 0, error => $err );
+                        next;
+                    }
+                    $ap_set{duedate} = $nd;
+                }
+
+                if ( exists $it->{vendor_id} ) {
+                    my $vid = $it->{vendor_id};
+                    unless ( defined $vid && $vid =~ /^\d+$/ && $vid > 0 ) {
+                        $batch_add_result->( id => $id, ok => 0, error => 'Invalid vendor_id.' );
+                        next;
+                    }
+                    $vid += 0;
+                    unless ( $dbs->query( 'SELECT id FROM vendor WHERE id = ?', $vid )->hash ) {
+                        $batch_add_result->( id => $id, ok => 0, error => 'Vendor not found.' );
+                        next;
+                    }
+                    $ap_set{vendor_id} = $vid;
+                }
+
+                if ( exists $it->{department_id} ) {
+                    my $did = $it->{department_id};
+                    if ( defined $did && $did ne '' ) {
+                        unless ( $did =~ /^\d+$/ && $did > 0 ) {
+                            $batch_add_result->( id => $id, ok => 0, error => 'Invalid department_id.' );
+                            next;
+                        }
+                        $did += 0;
+                        unless ( $dbs->query( 'SELECT id FROM department WHERE id = ?', $did )->hash ) {
+                            $batch_add_result->( id => $id, ok => 0, error => 'Department not found.' );
+                            next;
+                        }
+                        $ap_set{department_id} = $did;
+                    }
+                    else {
+                        $ap_set{department_id} = undef;
+                    }
+                    $dept_changed = 1;
+                }
+
+                my $has_exp  = exists $it->{expense_chart_id} || exists $it->{expense_accno};
+                my $has_rec  = exists $it->{record_chart_id}  || exists $it->{record_accno};
+                my $has_proj = exists $it->{project_id};
+
+                my ( $expense_cid, $record_new_cid, $pay_cid_old );
+                my ( $proj_val, $proj_changed );
+                my $ac_row;
+
+                if ( $has_exp || $has_proj ) {
+                    $ac_row = $dbs->query(
+                        q{SELECT id, chart_id FROM acc_trans
+                           WHERE entry_id = ? AND trans_id = ?},
+                        $item_entry_id, $id
+                    )->hash;
+                    unless ($ac_row) {
+                        $batch_add_result->( id => $id, ok => 0,
+                            error => 'entry_id not found on this AP transaction.' );
+                        next ITEM;
+                    }
+                }
+
+                if ( $has_exp || $has_rec ) {
+                    my ( $rec_allowed, $exp_allowed ) = $c->batch_ap_allowed_chart_maps($dbs);
+
+                    if ($has_exp) {
+                        unless ( $exp_allowed->{ $ac_row->{chart_id} } ) {
+                            $batch_add_result->( id => $id, ok => 0,
+                                error => 'acc_trans line is not an AP expense account line.' );
+                            next ITEM;
+                        }
+                        my ( $ecid, $eerr ) = $c->batch_ap_resolve_update_chart(
+                            $dbs, $it->{expense_chart_id}, $it->{expense_accno},
+                            $exp_allowed, 'expense'
+                        );
+                        if ($eerr) {
+                            $batch_add_result->( id => $id, ok => 0, error => $eerr );
+                            next ITEM;
+                        }
+                        $expense_cid = $ecid;
+                    }
+
+                    if ($has_rec) {
+                        my ( $rcid, $rerr ) = $c->batch_ap_resolve_update_chart(
+                            $dbs, $it->{record_chart_id}, $it->{record_accno},
+                            $rec_allowed, 'record'
+                        );
+                        if ($rerr) {
+                            $batch_add_result->( id => $id, ok => 0, error => $rerr );
+                            next ITEM;
+                        }
+                        ( $pay_cid_old, my $perr ) = $c->batch_ap_payable_chart_id( $dbs, $id );
+                        if ($perr) {
+                            $batch_add_result->( id => $id, ok => 0, error => $perr );
+                            next ITEM;
+                        }
+                        $record_new_cid = $rcid unless $pay_cid_old + 0 == $rcid + 0;
+                    }
+                }
+
+                if ($has_proj) {
+                    my $p_in = $it->{project_id};
+                    if ( defined $p_in && $p_in ne '' ) {
+                        unless ( $p_in =~ /^\d+$/ && $p_in > 0 ) {
+                            $batch_add_result->( id => $id, ok => 0, error => 'Invalid project_id.' );
+                            next ITEM;
+                        }
+                        unless ( $dbs->query( 'SELECT id FROM project WHERE id = ?', $p_in + 0 )->hash ) {
+                            $batch_add_result->( id => $id, ok => 0, error => 'Project not found.' );
+                            next ITEM;
+                        }
+                        $proj_val = $p_in + 0;
+                    }
+                    $proj_changed = 1;
+                }
+
+                unless (
+                        keys %ap_set
+                    || $dept_changed
+                    || defined $expense_cid
+                    || defined $record_new_cid
+                    || $proj_changed
+                  )
+                {
+                    $batch_add_result->( id => $id, ok => 0, error => 'No updatable fields provided.' );
+                    next ITEM;
+                }
+
+                my $ok_run = eval {
+                    $dbs->begin;
+                    if ( keys %ap_set ) {
+                        my @cols = keys %ap_set;
+                        my $set  = join ', ', map { "$_ = ?" } @cols;
+                        $dbs->query( "UPDATE ap SET $set WHERE id = ?", ( @ap_set{@cols} ), $id );
+                    }
+                    if ($need_acc_trans) {
+                        $dbs->query(
+                            'UPDATE acc_trans SET transdate = ? WHERE trans_id = ?',
+                            $ap_set{transdate}, $id );
+                    }
+                    if ($dept_changed) {
+                        $dbs->query( 'DELETE FROM dpt_trans WHERE trans_id = ?', $id );
+                        if ( defined $ap_set{department_id} ) {
+                            $dbs->query(
+                                q{INSERT INTO dpt_trans (trans_id, department_id) VALUES (?, ?)},
+                                $id, $ap_set{department_id} );
+                        }
+                    }
+                    if ( defined $expense_cid ) {
+                        $dbs->query(
+                            q{UPDATE acc_trans SET chart_id = ?
+                               WHERE entry_id = ? AND trans_id = ?},
+                            $expense_cid, $item_entry_id, $id );
+                    }
+                    if ( defined $record_new_cid ) {
+                        $dbs->query(
+                            q{UPDATE acc_trans SET chart_id = ?
+                               WHERE trans_id = ? AND chart_id = ?},
+                            $record_new_cid, $id, $pay_cid_old );
+                    }
+                    if ($proj_changed) {
+                        $dbs->query(
+                            q{UPDATE acc_trans SET project_id = ?
+                               WHERE entry_id = ? AND trans_id = ?},
+                            $proj_val, $item_entry_id, $id );
+                        if ( defined $ac_row->{id} ) {
+                            $dbs->query(
+                                q{UPDATE invoice SET project_id = ?
+                                   WHERE id = ? AND trans_id = ?},
+                                $proj_val, $ac_row->{id}, $id );
+                        }
+                    }
+                    $dbs->commit;
+                    1;
+                };
+                if ( !$ok_run ) {
+                    my $e = $@ || 'Unknown error';
+                    $c->app->log->error("batch/update ap line entry_id=$item_entry_id: $e");
+                    eval { $dbs->rollback };
+                    $batch_add_result->( id => $id, ok => 0, error => 'Update failed.' );
+                    next;
+                }
+                $batch_add_result->( id => $id, ok => 1, error => undef );
+                next ITEM;
+            }
+
+            # ----------------------------------------------------------------
+            # Transaction granularity
+            # ----------------------------------------------------------------
+            my %ap_set;
+            my $need_acc_trans;
+            my $dept_changed;
+            my $project_changed;
+            my $project_set_val;
+
+            if ( exists $it->{transdate} ) {
+                my $nd = $it->{transdate};
+                unless ( defined $nd && $nd =~ /^\d{4}-\d{2}-\d{2}$/ ) {
+                    $batch_add_result->( id => $id, ok => 0, error => 'Invalid transdate format.' );
+                    next;
+                }
+                if ( my $err = $c->batch_date_must_be_after_closed_period($nd) ) {
+                    $batch_add_result->( id => $id, ok => 0, error => $err );
+                    next;
+                }
+                $ap_set{transdate} = $nd;
+                $need_acc_trans = 1;
+            }
+
+            if ( exists $it->{duedate} ) {
+                my $nd = $it->{duedate};
+                unless ( defined $nd && $nd =~ /^\d{4}-\d{2}-\d{2}$/ ) {
+                    $batch_add_result->( id => $id, ok => 0, error => 'Invalid duedate format.' );
+                    next;
+                }
+                if ( my $err = $c->batch_date_must_be_after_closed_period($nd) ) {
+                    $batch_add_result->( id => $id, ok => 0, error => $err );
+                    next;
+                }
+                $ap_set{duedate} = $nd;
+            }
+
+            if ( exists $it->{vendor_id} ) {
+                my $vid = $it->{vendor_id};
+                unless ( defined $vid && $vid =~ /^\d+$/ && $vid > 0 ) {
+                    $batch_add_result->( id => $id, ok => 0, error => 'Invalid vendor_id.' );
+                    next;
+                }
+                $vid += 0;
+                unless ( $dbs->query( 'SELECT id FROM vendor WHERE id = ?', $vid )->hash ) {
+                    $batch_add_result->( id => $id, ok => 0, error => 'Vendor not found.' );
+                    next;
+                }
+                $ap_set{vendor_id} = $vid;
+            }
+
+            if ( exists $it->{department_id} ) {
+                my $did = $it->{department_id};
+                if ( defined $did && $did ne '' ) {
+                    unless ( $did =~ /^\d+$/ && $did > 0 ) {
+                        $batch_add_result->( id => $id, ok => 0, error => 'Invalid department_id.' );
+                        next;
+                    }
+                    $did += 0;
+                    unless ( $dbs->query( 'SELECT id FROM department WHERE id = ?', $did )->hash ) {
+                        $batch_add_result->( id => $id, ok => 0, error => 'Department not found.' );
+                        next;
+                    }
+                    $ap_set{department_id} = $did;
+                }
+                else {
+                    $ap_set{department_id} = undef;
+                }
+                $dept_changed = 1;
+            }
+
+            if ( exists $it->{project_id} ) {
+                my $pid = $it->{project_id};
+                if ( defined $pid && $pid ne '' ) {
+                    unless ( $pid =~ /^\d+$/ && $pid > 0 ) {
+                        $batch_add_result->( id => $id, ok => 0, error => 'Invalid project_id.' );
+                        next;
+                    }
+                    $pid += 0;
+                    unless ( $dbs->query( 'SELECT id FROM project WHERE id = ?', $pid )->hash ) {
+                        $batch_add_result->( id => $id, ok => 0, error => 'Project not found.' );
+                        next;
+                    }
+                    $project_set_val = $pid;
+                }
+                else {
+                    $project_set_val = undef;
+                }
+                $project_changed = 1;
+            }
+
+            my $record_new_cid;
+            my $pay_cid_old;
+
+            if ( exists $it->{record_chart_id} || exists $it->{record_accno} ) {
+                my ( $rec_allowed, undef ) = $c->batch_ap_allowed_chart_maps($dbs);
+                my ( $rcid, $rerr ) = $c->batch_ap_resolve_update_chart(
+                    $dbs, $it->{record_chart_id}, $it->{record_accno},
+                    $rec_allowed, 'record'
+                );
+                if ($rerr) {
+                    $batch_add_result->( id => $id, ok => 0, error => $rerr );
+                    next ITEM;
+                }
+                ( $pay_cid_old, my $perr ) = $c->batch_ap_payable_chart_id( $dbs, $id );
+                if ($perr) {
+                    $batch_add_result->( id => $id, ok => 0, error => $perr );
+                    next ITEM;
+                }
+                $record_new_cid = $rcid unless $pay_cid_old + 0 == $rcid + 0;
+            }
+
+            unless ( keys %ap_set || $project_changed || defined $record_new_cid ) {
+                $batch_add_result->( id => $id, ok => 0, error => 'No updatable fields provided.' );
+                next ITEM;
+            }
+
+            my $ok_run = eval {
+                $dbs->begin;
+                if ( keys %ap_set ) {
+                    my @cols = keys %ap_set;
+                    my $set  = join ', ', map { "$_ = ?" } @cols;
+                    $dbs->query( "UPDATE ap SET $set WHERE id = ?", ( @ap_set{@cols} ), $id );
+                }
+                if ($need_acc_trans) {
+                    $dbs->query(
+                        'UPDATE acc_trans SET transdate = ? WHERE trans_id = ?',
+                        $ap_set{transdate}, $id );
+                }
+                if ($dept_changed) {
+                    $dbs->query( 'DELETE FROM dpt_trans WHERE trans_id = ?', $id );
+                    if ( defined $ap_set{department_id} ) {
+                        $dbs->query(
+                            q{INSERT INTO dpt_trans (trans_id, department_id) VALUES (?, ?)},
+                            $id, $ap_set{department_id} );
+                    }
+                }
+                if ($project_changed) {
+                    $dbs->query(
+                        'UPDATE acc_trans SET project_id = ? WHERE trans_id = ?',
+                        $project_set_val, $id );
+                    $dbs->query(
+                        'UPDATE invoice SET project_id = ? WHERE trans_id = ?',
+                        $project_set_val, $id );
+                }
+                if ( defined $record_new_cid ) {
+                    $dbs->query(
+                        q{UPDATE acc_trans SET chart_id = ?
+                           WHERE trans_id = ? AND chart_id = ?},
+                        $record_new_cid, $id, $pay_cid_old );
+                }
+                $dbs->commit;
+                1;
+            };
+            if ( !$ok_run ) {
+                my $e = $@ || 'Unknown error';
+                $c->app->log->error("batch/update ap id=$id: $e");
+                eval { $dbs->rollback };
+                $batch_add_result->( id => $id, ok => 0, error => 'Update failed.' );
+                next;
+            }
+            $batch_add_result->( id => $id, ok => 1, error => undef );
+            }
+            elsif ( $module eq 'gl' ) {
+                my ( $id, $item_entry_id );
+
+                if ( $granularity eq 'line' ) {
+                    my $eid_raw = $it->{entry_id};
+                    unless ( defined $eid_raw && $eid_raw =~ /^\d+$/ ) {
+                        push @results,
+                          { id => undef, entry_id => undef, ok => 0,
+                            error => 'entry_id is required for each item when granularity is line.' };
+                        next ITEM;
+                    }
+                    $item_entry_id = $eid_raw + 0;
+                    my $ah = $dbs->query(
+                        q{SELECT trans_id FROM acc_trans WHERE entry_id = ?},
+                        $item_entry_id
+                    )->hash;
+                    unless ($ah) {
+                        push @results,
+                          { id => undef, entry_id => $item_entry_id, ok => 0,
+                            error => 'acc_trans row not found for entry_id.' };
+                        next ITEM;
+                    }
+                    $id = $ah->{trans_id} + 0;
+                    for my $k (qw(id gl_id)) {
+                        my $v = $it->{$k};
+                        next unless defined $v && $v =~ /^\d+$/;
+                        if ( $v + 0 != $id ) {
+                            push @results,
+                              { id => $v + 0, entry_id => $item_entry_id, ok => 0,
+                                error => 'id / gl_id does not match the GL transaction for this entry_id.' };
+                            next ITEM;
+                        }
+                        last;
+                    }
+                }
+                else {
+                    my $raw_id = $it->{id} // $it->{gl_id};
+                    unless ( defined $raw_id && $raw_id =~ /^\d+$/ && $raw_id > 0 ) {
+                        push @results,
+                          { id => undef, ok => 0,
+                            error => 'id or gl_id is required for transaction granularity.' };
+                        next ITEM;
+                    }
+                    $id = $raw_id + 0;
+                }
+
+                my $batch_add_result = sub {
+                    my (%h) = @_;
+                    $h{entry_id} = $item_entry_id if defined $item_entry_id;
+                    push @results, \%h;
+                };
+
+                my $grow = $dbs->query(
+                    q{SELECT id, transdate, department_id FROM gl WHERE id = ? AND approved IS TRUE},
+                    $id
+                )->hash;
+                unless ($grow) {
+                    my $exists = $dbs->query( q{SELECT 1 FROM gl WHERE id = ?}, $id )->hash;
+                    $batch_add_result->(
+                        id => $id, ok => 0,
+                        error => $exists
+                        ? 'Only approved transactions can be updated.'
+                        : 'GL transaction not found.'
+                    );
+                    next ITEM;
+                }
+
+                my $cutoff = $c->batch_transdate_exclusive_min;
+                if ($cutoff) {
+                    my $old_td = $grow->{transdate};
+                    $old_td =~ s/\s.*//s if defined $old_td;
+                    $old_td = format_date($old_td) if defined $old_td;
+                    unless ( defined $old_td
+                        && $old_td =~ /^\d{4}-\d{2}-\d{2}$/
+                        && $old_td gt $cutoff )
+                    {
+                        $batch_add_result->(
+                            id => $id, ok => 0,
+                            error => 'Transaction is in the closed period and cannot be modified.' );
+                        next ITEM;
+                    }
+                }
+
+                if ( $granularity eq 'line' ) {
+                    my %gl_set;
+                    my $need_acc_trans_td;
+                    my $dept_changed;
+                    my $proj_changed;
+                    my $proj_val;
+                    my $chart_new_cid;
+
+                    if ( exists $it->{transdate} ) {
+                        my $nd = $it->{transdate};
+                        unless ( defined $nd && $nd =~ /^\d{4}-\d{2}-\d{2}$/ ) {
+                            $batch_add_result->( id => $id, ok => 0, error => 'Invalid transdate format.' );
+                            next ITEM;
+                        }
+                        if ( my $err = $c->batch_date_must_be_after_closed_period($nd) ) {
+                            $batch_add_result->( id => $id, ok => 0, error => $err );
+                            next ITEM;
+                        }
+                        $gl_set{transdate} = $nd;
+                        $need_acc_trans_td = 1;
+                    }
+
+                    if ( exists $it->{department_id} ) {
+                        my $did = $it->{department_id};
+                        if ( defined $did && $did ne '' ) {
+                            unless ( $did =~ /^\d+$/ && $did > 0 ) {
+                                $batch_add_result->( id => $id, ok => 0, error => 'Invalid department_id.' );
+                                next ITEM;
+                            }
+                            $did += 0;
+                            unless ( $dbs->query( 'SELECT id FROM department WHERE id = ?', $did )->hash ) {
+                                $batch_add_result->( id => $id, ok => 0, error => 'Department not found.' );
+                                next ITEM;
+                            }
+                            $gl_set{department_id} = $did;
+                        }
+                        else {
+                            $gl_set{department_id} = 0;
+                        }
+                        $dept_changed = 1;
+                    }
+
+                    if ( exists $it->{project_id} ) {
+                        my $p_in = $it->{project_id};
+                        if ( defined $p_in && $p_in ne '' ) {
+                            unless ( $p_in =~ /^\d+$/ && $p_in > 0 ) {
+                                $batch_add_result->( id => $id, ok => 0, error => 'Invalid project_id.' );
+                                next ITEM;
+                            }
+                            unless (
+                                $dbs->query( 'SELECT id FROM project WHERE id = ?', $p_in + 0 )->hash )
+                            {
+                                $batch_add_result->( id => $id, ok => 0, error => 'Project not found.' );
+                                next ITEM;
+                            }
+                            $proj_val = $p_in + 0;
+                        }
+                        else {
+                            $proj_val = undef;
+                        }
+                        $proj_changed = 1;
+                    }
+
+                    my $ac_line = $dbs->query(
+                        q{SELECT chart_id FROM acc_trans WHERE entry_id = ? AND trans_id = ?},
+                        $item_entry_id, $id
+                    )->hash;
+                    unless ($ac_line) {
+                        $batch_add_result->( id => $id, ok => 0,
+                            error => 'entry_id not found on this GL transaction.' );
+                        next ITEM;
+                    }
+
+                    my $allowed_gl = $c->batch_gl_chart_allowed_ids($dbs);
+                    if ( exists $it->{chart_id} || exists $it->{accno} ) {
+                        my ( $cid, $cerr ) = $c->batch_gl_resolve_update_chart(
+                            $dbs, $it->{chart_id}, $it->{accno}, $allowed_gl );
+                        if ($cerr) {
+                            $batch_add_result->( id => $id, ok => 0, error => $cerr );
+                            next ITEM;
+                        }
+                        $chart_new_cid = $cid;
+                        if ( defined $chart_new_cid && $chart_new_cid + 0 == $ac_line->{chart_id} + 0 ) {
+                            $chart_new_cid = undef;
+                        }
+                    }
+
+                    unless (
+                           keys %gl_set
+                        || $dept_changed
+                        || $proj_changed
+                        || defined $chart_new_cid
+                      )
+                    {
+                        $batch_add_result->( id => $id, ok => 0, error => 'No updatable fields provided.' );
+                        next ITEM;
+                    }
+
+                    my $ok_run = eval {
+                        $dbs->begin;
+                        if ( keys %gl_set ) {
+                            my @cols = keys %gl_set;
+                            my $set  = join ', ', map { "$_ = ?" } @cols;
+                            $dbs->query( "UPDATE gl SET $set WHERE id = ?", ( @gl_set{@cols} ), $id );
+                        }
+                        if ($need_acc_trans_td) {
+                            $dbs->query(
+                                'UPDATE acc_trans SET transdate = ? WHERE trans_id = ?',
+                                $gl_set{transdate}, $id );
+                        }
+                        if ($dept_changed) {
+                            $dbs->query( 'DELETE FROM dpt_trans WHERE trans_id = ?', $id );
+                            if ( ( $gl_set{department_id} // 0 ) > 0 ) {
+                                $dbs->query(
+                                    q{INSERT INTO dpt_trans (trans_id, department_id) VALUES (?, ?)},
+                                    $id, $gl_set{department_id} );
+                            }
+                        }
+                        if ($proj_changed) {
+                            $dbs->query(
+                                q{UPDATE acc_trans SET project_id = ?
+                                   WHERE entry_id = ? AND trans_id = ?},
+                                $proj_val, $item_entry_id, $id );
+                        }
+                        if ( defined $chart_new_cid ) {
+                            $dbs->query(
+                                q{UPDATE acc_trans SET chart_id = ?
+                                   WHERE entry_id = ? AND trans_id = ?},
+                                $chart_new_cid, $item_entry_id, $id );
+                        }
+                        $dbs->commit;
+                        1;
+                    };
+                    if ( !$ok_run ) {
+                        my $e = $@ || 'Unknown error';
+                        $c->app->log->error("batch/update gl line entry_id=$item_entry_id: $e");
+                        eval { $dbs->rollback };
+                        $batch_add_result->( id => $id, ok => 0, error => 'Update failed.' );
+                        next ITEM;
+                    }
+                    $batch_add_result->( id => $id, ok => 1, error => undef );
+                    next ITEM;
+                }
+
+                my %gl_set;
+                my $need_acc_trans_td;
+                my $dept_changed;
+                my $project_changed;
+                my $project_set_val;
+
+                if ( exists $it->{transdate} ) {
+                    my $nd = $it->{transdate};
+                    unless ( defined $nd && $nd =~ /^\d{4}-\d{2}-\d{2}$/ ) {
+                        $batch_add_result->( id => $id, ok => 0, error => 'Invalid transdate format.' );
+                        next ITEM;
+                    }
+                    if ( my $err = $c->batch_date_must_be_after_closed_period($nd) ) {
+                        $batch_add_result->( id => $id, ok => 0, error => $err );
+                        next ITEM;
+                    }
+                    $gl_set{transdate} = $nd;
+                    $need_acc_trans_td = 1;
+                }
+
+                if ( exists $it->{department_id} ) {
+                    my $did = $it->{department_id};
+                    if ( defined $did && $did ne '' ) {
+                        unless ( $did =~ /^\d+$/ && $did > 0 ) {
+                            $batch_add_result->( id => $id, ok => 0, error => 'Invalid department_id.' );
+                            next ITEM;
+                        }
+                        $did += 0;
+                        unless ( $dbs->query( 'SELECT id FROM department WHERE id = ?', $did )->hash ) {
+                            $batch_add_result->( id => $id, ok => 0, error => 'Department not found.' );
+                            next ITEM;
+                        }
+                        $gl_set{department_id} = $did;
+                    }
+                    else {
+                        $gl_set{department_id} = 0;
+                    }
+                    $dept_changed = 1;
+                }
+
+                if ( exists $it->{project_id} ) {
+                    my $pid = $it->{project_id};
+                    if ( defined $pid && $pid ne '' ) {
+                        unless ( $pid =~ /^\d+$/ && $pid > 0 ) {
+                            $batch_add_result->( id => $id, ok => 0, error => 'Invalid project_id.' );
+                            next ITEM;
+                        }
+                        $pid += 0;
+                        unless ( $dbs->query( 'SELECT id FROM project WHERE id = ?', $pid )->hash ) {
+                            $batch_add_result->( id => $id, ok => 0, error => 'Project not found.' );
+                            next ITEM;
+                        }
+                        $project_set_val = $pid;
+                    }
+                    else {
+                        $project_set_val = undef;
+                    }
+                    $project_changed = 1;
+                }
+
+                unless ( keys %gl_set || $project_changed ) {
+                    $batch_add_result->( id => $id, ok => 0, error => 'No updatable fields provided.' );
+                    next ITEM;
+                }
+
+                my $ok_run = eval {
+                    $dbs->begin;
+                    if ( keys %gl_set ) {
+                        my @cols = keys %gl_set;
+                        my $set  = join ', ', map { "$_ = ?" } @cols;
+                        $dbs->query( "UPDATE gl SET $set WHERE id = ?", ( @gl_set{@cols} ), $id );
+                    }
+                    if ($need_acc_trans_td) {
+                        $dbs->query(
+                            'UPDATE acc_trans SET transdate = ? WHERE trans_id = ?',
+                            $gl_set{transdate}, $id );
+                    }
+                    if ($dept_changed) {
+                        $dbs->query( 'DELETE FROM dpt_trans WHERE trans_id = ?', $id );
+                        if ( ( $gl_set{department_id} // 0 ) > 0 ) {
+                            $dbs->query(
+                                q{INSERT INTO dpt_trans (trans_id, department_id) VALUES (?, ?)},
+                                $id, $gl_set{department_id} );
+                        }
+                    }
+                    if ($project_changed) {
+                        $dbs->query(
+                            'UPDATE acc_trans SET project_id = ? WHERE trans_id = ?',
+                            $project_set_val, $id );
+                    }
+                    $dbs->commit;
+                    1;
+                };
+                if ( !$ok_run ) {
+                    my $e = $@ || 'Unknown error';
+                    $c->app->log->error("batch/update gl id=$id: $e");
+                    eval { $dbs->rollback };
+                    $batch_add_result->( id => $id, ok => 0, error => 'Update failed.' );
+                    next ITEM;
+                }
+                $batch_add_result->( id => $id, ok => 1, error => undef );
+            }
+        }
+
+        $c->render( json => { results => \@results } );
     }
 );
 
@@ -7499,6 +8554,153 @@ helper batch_transdate_exclusive_min => sub {
     return $dt->ymd;
 };
 
+# Reject YYYY-MM-DD on/before the same cutoff as batch search (closedto + 1 day).
+# Returns undef if allowed or if no cutoff; otherwise an error message.
+helper batch_date_must_be_after_closed_period => sub {
+    my ( $c, $ymd ) = @_;
+    return 'Invalid date format.'
+      unless defined $ymd && $ymd =~ /^\d{4}-\d{2}-\d{2}$/;
+    my $cutoff = $c->batch_transdate_exclusive_min;
+    return undef unless $cutoff;
+    return 'Date is in or before the closed period.' if $ymd le $cutoff;
+    return undef;
+};
+
+# Same link-token rules as batch_build_create_links for ap_record / expense_accounts.
+helper batch_ap_allowed_chart_maps => sub {
+    my ( $c, $dbs ) = @_;
+    my $charts = $dbs->query(
+        q{SELECT id, accno, link FROM chart WHERE COALESCE(closed, false) = false}
+    )->hashes;
+    my $link_has = sub {
+        my ( $link, $token ) = @_;
+        return 0 unless defined $link && $link ne '';
+        for my $t ( split /:/, $link ) {
+            return 1 if $t eq $token;
+        }
+        return 0;
+    };
+    my ( %record, %expense );
+    for my $row (@$charts) {
+        $record{ $row->{id} } = 1 if $link_has->( $row->{link}, 'AP' );
+        $expense{ $row->{id} } = 1
+          if $link_has->( $row->{link}, 'AP_amount' );
+    }
+    return ( \%record, \%expense );
+};
+
+# One payable-side chart for the AP document (same filter idea as GET /batch/search AP lines).
+helper batch_ap_payable_chart_id => sub {
+    my ( $c, $dbs, $trans_id ) = @_;
+    my $rows = $dbs->query(
+        q{SELECT DISTINCT ac.chart_id
+            FROM acc_trans ac
+            JOIN chart c ON c.id = ac.chart_id
+           WHERE ac.trans_id = ?
+             AND ac.fx_transaction = '0'
+             AND (':' || COALESCE(c.link, '') || ':') LIKE '%:AP:%'
+             AND c.link NOT LIKE '%AP_amount%'
+             AND c.link NOT LIKE '%AP_paid%'
+             AND c.link NOT LIKE '%AP_discount%'},
+        $trans_id
+    )->arrays;
+    return ( undef, 'No AP record (payable) account line found on this transaction.' )
+      unless $rows && @$rows;
+    return ( undef,
+        'Multiple distinct AP record accounts on this transaction.' )
+      if @$rows > 1;
+    return ( $rows->[0][0], undef );
+};
+
+# Resolve chart id from JSON chart_id and/or accno against an allowed-id set ($kind = record|expense).
+helper batch_ap_resolve_update_chart => sub {
+    my ( $c, $dbs, $chart_id_raw, $accno_raw, $allowed_ids, $kind ) = @_;
+    my $has_cid =
+      defined $chart_id_raw && $chart_id_raw ne '';
+    my $has_acc = defined $accno_raw && $accno_raw ne '';
+    if ( $has_cid && $has_acc ) {
+        my $row = $dbs->query(
+            q{SELECT id, accno FROM chart
+               WHERE id = ? AND COALESCE(closed, false) = false},
+            $chart_id_raw + 0
+        )->hash;
+        return ( undef, "Invalid $kind chart_id." ) unless $row;
+        return ( undef, "${kind}_accno does not match ${kind}_chart_id." )
+          if $row->{accno} ne $accno_raw;
+        return ( undef, "Not an allowed AP $kind account." )
+          unless $allowed_ids->{ $row->{id} };
+        return ( $row->{id} + 0, undef );
+    }
+    if ($has_cid) {
+        my $cid = $chart_id_raw + 0;
+        return ( undef, "Invalid $kind chart_id." )
+          unless $allowed_ids->{$cid};
+        return ( $cid, undef );
+    }
+    if ($has_acc) {
+        my $row = $dbs->query(
+            q{SELECT id FROM chart
+               WHERE accno = ? AND COALESCE(closed, false) = false},
+            $accno_raw
+        )->hash;
+        return ( undef, "Unknown $kind account accno." ) unless $row;
+        return ( undef, "Not an allowed AP $kind account." )
+          unless $allowed_ids->{ $row->{id} };
+        return ( $row->{id} + 0, undef );
+    }
+    return ( undef, "Missing ${kind} chart_id or accno." );
+};
+
+# Chart ids allowed for GL acc_trans lines (same rules as batch gl_accounts picklist).
+helper batch_gl_chart_allowed_ids => sub {
+    my ( $c, $dbs ) = @_;
+    my $rows = $dbs->query(
+        q{SELECT id FROM chart
+           WHERE charttype <> 'H'
+             AND COALESCE(allow_gl, true) = true
+             AND COALESCE(closed, false) = false}
+    )->hashes;
+    my %h = map { $_->{id} => 1 } @$rows;
+    return \%h;
+};
+
+helper batch_gl_resolve_update_chart => sub {
+    my ( $c, $dbs, $chart_id_raw, $accno_raw, $allowed_ids ) = @_;
+    my $has_cid =
+      defined $chart_id_raw && $chart_id_raw ne '';
+    my $has_acc = defined $accno_raw && $accno_raw ne '';
+    if ( $has_cid && $has_acc ) {
+        my $row = $dbs->query(
+            q{SELECT id, accno FROM chart
+               WHERE id = ? AND COALESCE(closed, false) = false},
+            $chart_id_raw + 0
+        )->hash;
+        return ( undef, 'Invalid chart_id.' ) unless $row;
+        return ( undef, 'accno does not match chart_id.' )
+          if $row->{accno} ne $accno_raw;
+        return ( undef, 'Not an allowed GL account.' )
+          unless $allowed_ids->{ $row->{id} };
+        return ( $row->{id} + 0, undef );
+    }
+    if ($has_cid) {
+        my $cid = $chart_id_raw + 0;
+        return ( undef, 'Invalid chart_id.' ) unless $allowed_ids->{$cid};
+        return ( $cid, undef );
+    }
+    if ($has_acc) {
+        my $row = $dbs->query(
+            q{SELECT id FROM chart
+               WHERE accno = ? AND COALESCE(closed, false) = false},
+            $accno_raw
+        )->hash;
+        return ( undef, 'Unknown account accno.' ) unless $row;
+        return ( undef, 'Not an allowed GL account.' )
+          unless $allowed_ids->{ $row->{id} };
+        return ( $row->{id} + 0, undef );
+    }
+    return ( undef, 'Missing chart_id or accno.' );
+};
+
 # Reference data for batch UIs. $param: empty/0/false => undef; 1/all/true => full set;
 # or comma-separated keys (see valid keys per module in helper body).
 helper batch_build_create_links => sub {
@@ -7522,13 +8724,6 @@ helper batch_build_create_links => sub {
             return 1 if $t eq $token;
         }
         return 0;
-    };
-    my $link_has_all = sub {
-        my ( $link, @tokens ) = @_;
-        for my $tok (@tokens) {
-            return 0 unless $link_has->( $link, $tok );
-        }
-        return 1;
     };
     my $acc_label = sub {
         my ($row) = @_;
@@ -7675,7 +8870,7 @@ helper batch_build_create_links => sub {
             }
             if ( $want{expense_accounts} ) {
                 my @acc =
-                  grep { $link_has_all->( $_->{link}, 'AP_amount', 'IC_expense' ) }
+                  grep { $link_has->( $_->{link}, 'AP_amount' ) }
                   @$charts;
                 $_->{label} = $acc_label->($_) for @acc;
                 $out->{expense_accounts} = \@acc;
@@ -7703,6 +8898,27 @@ helper batch_build_create_links => sub {
                 $out->{expense_tax_accounts} = \@merged;
             }
         }
+        # Vendor batch UIs always need the expense account picklist (same set as
+        # sections=expense_accounts), even when /batch/create_links sections omit it.
+        if ( !$out->{expense_accounts} ) {
+            my $charts = $dbs->query(
+                q{SELECT id, accno, description, link, charttype
+                  FROM chart
+                  WHERE COALESCE(closed, false) = false}
+            )->hashes;
+            my @acc =
+              grep { $link_has->( $_->{link}, 'AP_amount' ) }
+              @$charts;
+            $_->{label} = $acc_label->($_) for @acc;
+            $out->{expense_accounts} = \@acc;
+        }
+        # Vendor batch UIs always need department and project picklists.
+        if ( !$out->{departments} ) {
+            $out->{departments} = $c->get_departments( undef, $client );
+        }
+        if ( !$out->{projects} ) {
+            $out->{projects} = $c->get_projects($client);
+        }
     }
     else {
         if ( $want{gl_accounts} ) {
@@ -7728,6 +8944,13 @@ helper batch_build_create_links => sub {
                 $cur = $dbs->query("SELECT * FROM curr ORDER BY rn")->hashes;
             };
             $out->{currencies} = $cur // [];
+        }
+        # GL batch UIs need department and project picklists even when sections omits them.
+        if ( !$out->{departments} ) {
+            $out->{departments} = $c->get_departments( undef, $client );
+        }
+        if ( !$out->{projects} ) {
+            $out->{projects} = $c->get_projects($client);
         }
     }
 
@@ -8466,8 +9689,7 @@ $api->get(
         my $c      = shift;
         my $client = $c->param('client');
         my $vc     = $c->param('vc');
-        my $type   = $c->param('type');
-        return unless my $form = $c->check_perms("$vc.batch");
+        return unless $c->check_perms("$vc.batch");
 
         my $dbs = $c->dbs($client);
 
@@ -8508,6 +9730,7 @@ $api->get(
             LEFT JOIN status s ON s.trans_id = a.id AND s.formname = 'invoice'
             WHERE a.invoice = '1'
             AND a.amount > 0
+            AND a.approved = '1'
         };
 
         # Add filters based on parameters
@@ -14994,108 +16217,6 @@ $api->delete(
                 json   => { error => $result->{error} }
             );
         }
-    }
-);
-$api->get(
-    '/arap/batch/:vc/:type' => sub {
-        my $c      = shift;
-        my $client = $c->param('client');
-        my $vc     = $c->param('vc');
-        my $type   = $c->param('type');
-        return unless my $form = $c->check_perms("$vc.batch");
-
-        my $dbs = $c->dbs($client);
-
-        # Get query parameters
-        my $params     = $c->req->params->to_hash;
-        my $open       = $params->{open}       // 1;  # Default to open invoices
-        my $closed     = $params->{closed}     // 0;
-        my $onhold     = $params->{onhold}     // 0;
-        my $emailed    = $params->{emailed}    // 0;
-        my $notemailed = $params->{notemailed} // 1;  # Default to not emailed
-        my $transdatefrom = $params->{transdatefrom};
-        my $transdateto   = $params->{transdateto};
-        my $invnumber     = $params->{invnumber};
-        my $description   = $params->{description};
-        my $customer_id   = $params->{customer_id};
-
-        my $query = q{
-            SELECT 
-                a.id, vc.name,
-                vc.customernumber AS vcnumber,
-                a.invnumber, a.transdate,
-                a.ordnumber, a.quonumber, a.invoice,
-                'ar' AS tablename, '' AS spoolfile, a.description, a.amount,
-                'customer' AS vc,
-                ad.city, vc.email, 'customer' AS db,
-                vc.id AS vc_id,
-                a.shippingpoint, a.shipvia, a.waybill, a.terms,
-                a.duedate, a.notes, a.intnotes,
-                a.amount AS netamount, a.paid,
-                c.id as contact_id, c.firstname, c.lastname, c.salutation,
-                c.contacttitle, c.occupation, c.phone as contactphone,
-                c.fax as contactfax, c.email as contactemail,
-                s.emailed
-            FROM ar a
-            JOIN customer vc ON (a.customer_id = vc.id)
-            JOIN address ad ON (ad.trans_id = vc.id)
-            LEFT JOIN contact c ON vc.id = c.trans_id
-            LEFT JOIN status s ON s.trans_id = a.id AND s.formname = 'invoice'
-            WHERE a.invoice = '1'
-            AND a.amount > 0
-        };
-
-        # Add filters based on parameters
-        if ($onhold) {
-            $query .= " AND a.onhold = '1'";
-        }
-        else {
-            if ( $open && !$closed ) {
-                $query .= " AND a.amount != a.paid";
-            }
-            elsif ( $closed && !$open ) {
-                $query .= " AND a.amount = a.paid";
-            }
-        }
-
-        # Email status filters
-        if ( $emailed && !$notemailed ) {
-            $query .= " AND s.emailed = '1'";
-        }
-        elsif ( $notemailed && !$emailed ) {
-            $query .= " AND (s.emailed IS NULL OR s.emailed = '0')";
-        }
-
-        # Date range filters
-        if ($transdatefrom) {
-            $query .= " AND a.transdate >= '$transdatefrom'";
-        }
-        if ($transdateto) {
-            $query .= " AND a.transdate <= '$transdateto'";
-        }
-
-        # Invoice number filter
-        if ($invnumber) {
-            $invnumber = $dbs->quote("%$invnumber%");
-            $query .= " AND a.invnumber ILIKE $invnumber";
-        }
-
-        # Description filter
-        if ($description) {
-            $description = $dbs->quote("%$description%");
-            $query .= " AND a.description ILIKE $description";
-        }
-
-        # Customer ID filter
-        if ($customer_id) {
-            $query .= " AND a.customer_id = $customer_id";
-        }
-
-        $query .= " ORDER BY a.transdate DESC";
-
-        my $results = $dbs->query($query)->hashes;
-
-        $c->render( json => $results );
     }
 );
 $api->post(
