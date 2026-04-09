@@ -3820,7 +3820,7 @@ $api->get(
                 && !$transaction_ids_for_accno{ $transaction->{id} } );
 
             my $entries_results = $dbs->query(
-'SELECT chart.accno, chart.description, acc_trans.amount, acc_trans.source, acc_trans.memo, acc_trans.tax_chart_id, acc_trans.linetaxamount, acc_trans.fx_transaction, acc_trans.cleared FROM acc_trans JOIN chart ON acc_trans.chart_id = chart.id WHERE acc_trans.trans_id = ?',
+'SELECT chart.accno, chart.description, acc_trans.amount, acc_trans.source, acc_trans.memo, acc_trans.tax_chart_id, acc_trans.linetaxamount, acc_trans.fx_transaction, acc_trans.cleared FROM acc_trans JOIN chart ON acc_trans.chart_id = chart.id WHERE acc_trans.trans_id = ? AND acc_trans.amount <> 0',
                 $transaction->{id}
             );
             my @lines;
@@ -3932,6 +3932,36 @@ $api->get(
         if ($duedatefrom) { $c->validate_date($duedatefrom) or return; }
         if ($duedateto)   { $c->validate_date($duedateto)   or return; }
 
+        my $createdfrom = $c->param('createdfrom');
+        my $createdto   = $c->param('createdto');
+        my $updatedfrom = $c->param('updatedfrom');
+        my $updatedto   = $c->param('updatedto');
+        if ($createdfrom) { $c->validate_date($createdfrom) or return; }
+        if ($createdto)   { $c->validate_date($createdto)   or return; }
+        if ($updatedfrom) { $c->validate_date($updatedfrom) or return; }
+        if ($updatedto)   { $c->validate_date($updatedto)   or return; }
+
+        # Transaction-level audit timestamps (ap/ar/gl.created|updated); same bounds for line granularity via join alias.
+        my $batch_search_tx_timestamp_clauses = sub {
+            my ( $w, $b, $alias ) = @_;
+            if ($createdfrom) {
+                push @$w, "$alias.created >= ?::date";
+                push @$b, $createdfrom;
+            }
+            if ($createdto) {
+                push @$w, "$alias.created < (?::date + interval '1 day')";
+                push @$b, $createdto;
+            }
+            if ($updatedfrom) {
+                push @$w, "$alias.updated >= ?::date";
+                push @$b, $updatedfrom;
+            }
+            if ($updatedto) {
+                push @$w, "$alias.updated < (?::date + interval '1 day')";
+                push @$b, $updatedto;
+            }
+        };
+
         my @rows;
 
         if ( $module eq 'gl' && $granularity eq 'transaction' ) {
@@ -3984,6 +4014,7 @@ $api->get(
                 push @w, 'g.department_id = ?';
                 push @b, $department_id_filter + 0;
             }
+            $batch_search_tx_timestamp_clauses->( \@w, \@b, 'g' );
             $q .= ' WHERE ' . join( ' AND ', @w );
             $q .= ' ORDER BY g.transdate DESC, g.id DESC';
             @rows = @{ $dbs->query( $q, @b )->hashes };
@@ -4048,6 +4079,7 @@ $api->get(
                 push @w, 'ac.memo ILIKE ?';
                 push @b, "%$memo_search%";
             }
+            $batch_search_tx_timestamp_clauses->( \@w, \@b, 'g' );
             $q .= ' WHERE ' . join( ' AND ', @w );
             $q .= ' ORDER BY g.transdate DESC, ac.trans_id, ac.entry_id';
             @rows = @{ $dbs->query( $q, @b )->hashes };
@@ -4096,6 +4128,7 @@ $api->get(
                 push @w,  'a.customer_id = ?';
                 push @b,  $customer_id;
             }
+            $batch_search_tx_timestamp_clauses->( \@w, \@b, 'a' );
             $q .= ' WHERE ' . join( ' AND ', @w );
             $q .= ' ORDER BY a.transdate DESC, a.id DESC';
             @rows = @{ $dbs->query( $q, @b )->hashes };
@@ -4147,6 +4180,7 @@ $api->get(
                 push @w, 'p.partnumber ILIKE ?';
                 push @b, "%$partnumber%";
             }
+            $batch_search_tx_timestamp_clauses->( \@w, \@b, 'a' );
             $q .= ' WHERE ' . join( ' AND ', @w );
             $q .= ' ORDER BY a.transdate DESC, i.trans_id, i.id';
             @rows = @{ $dbs->query( $q, @b )->hashes };
@@ -4211,6 +4245,7 @@ $api->get(
                 push @w,  'a.department_id = ?';
                 push @b,  $department_id_filter + 0;
             }
+            $batch_search_tx_timestamp_clauses->( \@w, \@b, 'a' );
             $q .= ' WHERE ' . join( ' AND ', @w );
             $q .= ' ORDER BY a.transdate DESC, a.id DESC';
             @rows = @{ $dbs->query( $q, @b )->hashes };
@@ -4310,6 +4345,7 @@ $api->get(
                 push @w,  'ac.project_id = ?';
                 push @b,  $project_id_filter + 0;
             }
+            $batch_search_tx_timestamp_clauses->( \@w, \@b, 'ap' );
             $q .= ' WHERE ' . join( ' AND ', @w );
             $q .=
               ' ORDER BY ap.transdate DESC, ac.trans_id, ac.entry_id';
@@ -5278,6 +5314,183 @@ $api->post(
                 }
                 $batch_add_result->( id => $id, ok => 1, error => undef );
             }
+        }
+
+        $c->render( json => { results => \@results } );
+    }
+);
+
+$api->post(
+    '/batch/delete' => sub {
+        my $c    = shift;
+        my $body = $c->req->json;
+        unless ( ref($body) eq 'HASH' ) {
+            return $c->render(
+                status => 400,
+                json   => { error => 'JSON object body required.' }
+            );
+        }
+        my $module = $body->{module} // '';
+        unless ( $module =~ /^(ap|gl)$/ ) {
+            return $c->render(
+                status => 400,
+                json   => { error => 'Invalid module. Use ap or gl.' }
+            );
+        }
+        my $granularity = $body->{granularity} // '';
+        unless ( $granularity eq 'transaction' ) {
+            return $c->render(
+                status => 400,
+                json   => {
+                    error =>
+                      'Invalid granularity. Only transaction is supported for batch delete.',
+                }
+            );
+        }
+        my $form;
+        if ( $module eq 'gl' ) {
+            return unless $form = $c->check_perms("ledger.batchupdate");
+        }
+        else {
+            return unless $form = $c->check_perms("vendor.batchupdate");
+        }
+
+        my $ids_in = $body->{ids};
+        unless ( ref($ids_in) eq 'ARRAY' && @$ids_in ) {
+            return $c->render(
+                status => 400,
+                json   => { error => 'ids must be a non-empty array.' }
+            );
+        }
+
+        my $client = $c->param('client');
+        my $dbs    = $c->dbs($client);
+        my @results;
+        my %seen_id;
+
+        for my $raw_id (@$ids_in) {
+            unless ( defined $raw_id && $raw_id =~ /^\d+$/ && $raw_id > 0 ) {
+                push @results,
+                  {
+                    id    => undef,
+                    ok    => 0,
+                    error => 'Each id must be a positive integer.',
+                  };
+                next;
+            }
+            my $id = $raw_id + 0;
+            if ( $seen_id{$id}++ ) {
+                push @results,
+                  {
+                    id    => $id,
+                    ok    => 0,
+                    error => 'Duplicate id in request.',
+                  };
+                next;
+            }
+
+            if ( $module eq 'ap' ) {
+                my $row = $dbs->query(
+                    q{SELECT id, transdate FROM ap WHERE id = ?},
+                    $id
+                )->hash;
+                unless ($row) {
+                    push @results,
+                      {
+                        id    => $id,
+                        ok    => 0,
+                        error => 'AP transaction not found.',
+                      };
+                    next;
+                }
+
+                my $cutoff = $c->batch_transdate_exclusive_min;
+                if ($cutoff) {
+                    my $old_td = $row->{transdate};
+                    $old_td =~ s/\s.*//s if defined $old_td;
+                    $old_td = format_date($old_td) if defined $old_td;
+                    unless ( defined $old_td
+                        && $old_td =~ /^\d{4}-\d{2}-\d{2}$/
+                        && $old_td gt $cutoff )
+                    {
+                        push @results,
+                          {
+                            id    => $id,
+                            ok    => 0,
+                            error =>
+                              'Transaction is in the closed period and cannot be modified.',
+                          };
+                        next;
+                    }
+                }
+
+                $form->{id} = $id;
+                $form->{vc} = 'vendor';
+                my $ok_del = eval { AA->delete_transaction( $c->slconfig, $form ); 1 };
+                delete $form->{glid};
+                if ( !$ok_del ) {
+                    my $e = $@ || 'Unknown error';
+                    $c->app->log->error("batch/delete ap id=$id: $e");
+                    push @results,
+                      { id => $id, ok => 0, error => 'Delete failed.' };
+                    next;
+                }
+                push @results, { id => $id, ok => 1, error => undef };
+                next;
+            }
+
+            # GL — same steps as DELETE /gl/transactions/:id
+            my $grow = $dbs->query( q{SELECT id, transdate FROM gl WHERE id = ?}, $id )
+              ->hash;
+            unless ($grow) {
+                push @results,
+                  {
+                    id    => $id,
+                    ok    => 0,
+                    error => 'GL transaction not found.',
+                  };
+                next;
+            }
+
+            my $cutoff_gl = $c->batch_transdate_exclusive_min;
+            if ($cutoff_gl) {
+                my $old_td = $grow->{transdate};
+                $old_td =~ s/\s.*//s if defined $old_td;
+                $old_td = format_date($old_td) if defined $old_td;
+                unless ( defined $old_td
+                    && $old_td =~ /^\d{4}-\d{2}-\d{2}$/
+                    && $old_td gt $cutoff_gl )
+                {
+                    push @results,
+                      {
+                        id    => $id,
+                        ok    => 0,
+                        error =>
+                          'Transaction is in the closed period and cannot be modified.',
+                      };
+                    next;
+                }
+            }
+
+            $form->{id} = $id;
+            my $ok_gl = eval {
+                GL->delete_transaction( $c->slconfig, $form );
+                FM->delete_files( $dbs, $c, $form );
+                $dbs->query( "DELETE FROM gl WHERE id = ?", $id );
+                $dbs->query(
+q{UPDATE bank_transactions SET reference_id = null, rule_id = null, module = null WHERE reference_id = ?},
+                    $id
+                );
+                1;
+            };
+            delete $form->{apid};
+            if ( !$ok_gl ) {
+                my $e = $@ || 'Unknown error';
+                $c->app->log->error("batch/delete gl id=$id: $e");
+                push @results, { id => $id, ok => 0, error => 'Delete failed.' };
+                next;
+            }
+            push @results, { id => $id, ok => 1, error => undef };
         }
 
         $c->render( json => { results => \@results } );

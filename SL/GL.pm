@@ -587,6 +587,10 @@ sub transactions {
     delete $form->{l_contra};
   }
 
+  $glwhere .= " AND ac.amount <> 0";
+  $arwhere .= " AND ac.amount <> 0";
+  $apwhere .= " AND ac.amount <> 0";
+
   if ($form->{accno} || $form->{gifi_accno}) {
     
     # get category for account

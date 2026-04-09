@@ -2173,6 +2173,13 @@ sub alltaxes {
         JOIN vendor vc ON (vc.id = aa.vendor_id)
         WHERE aa.netamount = aa.amount
         AND NOT invoice
+        AND NOT EXISTS (
+          SELECT 1
+          FROM acc_trans ac_tax
+          JOIN chart c_tax ON (c_tax.id = ac_tax.chart_id)
+          WHERE ac_tax.trans_id = aa.id
+            AND c_tax.link LIKE '%tax%'
+        )
         $aawhere
         $cashwhere
         GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12,13,aa.taxincluded
