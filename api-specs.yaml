@@ -216,12 +216,9 @@ components:
         credit:
           type: number
           description: Credit amount
-        linetax_accno:
+        linetax_account:
           type: string
-          description: Tax account number
-        linetax_description:
-          type: string
-          description: Tax account description
+          description: Tax account in accno--description format (multiple comma-separated)
         linetaxamount:
           type: number
           description: Tax amount
@@ -711,8 +708,7 @@ paths:
                   project_description: "Q4 Financials"
                   debit: 5000000
                   credit: 0
-                  linetax_accno: "2120"
-                  linetax_description: "VAT Payable"
+                  linetax_account: "2120--VAT Payable"
                   linetaxamount: 374653.09
                   source: "Bank Statement"
                   memo: "Capital from investors"

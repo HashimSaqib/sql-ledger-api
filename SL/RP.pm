@@ -2117,16 +2117,40 @@ sub alltaxes {
         aa.id, aa.invnumber, aa.transdate,
         aa.description, vc.name, vc.vendornumber number, 'ap.pl' script, vc.id as vc_id,
         '' f,
-        CASE WHEN aa.taxincluded THEN SUM(ac.amount * COALESCE(aa.exchangerate, 1)) - SIGN(aa.netamount) * SUM(ac.linetaxamount * COALESCE(aa.exchangerate, 1)) ELSE SUM(ac.amount * COALESCE(aa.exchangerate, 1)) END amount, -SIGN(aa.netamount) * SUM(ac.linetaxamount * COALESCE(aa.exchangerate, 1)) AS tax, aa.taxincluded
+        CASE
+            WHEN SUM(ac.amount * COALESCE(aa.exchangerate, 1)) = 0 AND aprt.rt_amount IS NOT NULL THEN
+                -SIGN(aa.netamount) * SIGN(SUM(ac.linetaxamount * COALESCE(aa.exchangerate, 1))) * ABS(aprt.rt_amount)
+            WHEN aprt.rt_amount IS NOT NULL THEN
+                -SIGN(aa.netamount) * SIGN(SUM(ac.linetaxamount * COALESCE(aa.exchangerate, 1))) * ABS(SUM(ac.amount * COALESCE(aa.exchangerate, 1)))
+            WHEN aa.taxincluded THEN SUM(ac.amount * COALESCE(aa.exchangerate, 1)) - SIGN(aa.netamount) * SUM(ac.linetaxamount * COALESCE(aa.exchangerate, 1))
+            ELSE SUM(ac.amount * COALESCE(aa.exchangerate, 1))
+        END amount, -SIGN(aa.netamount) * SUM(ac.linetaxamount * COALESCE(aa.exchangerate, 1)) AS tax, aa.taxincluded
         FROM acc_trans ac
         JOIN chart c ON (c.id = ac.tax_chart_id)
         JOIN ap aa ON (aa.id = ac.trans_id)
         JOIN vendor vc ON (vc.id = aa.vendor_id)
+        LEFT JOIN (
+            SELECT ac_rt.trans_id,
+                   SUM(ac_rt.amount * COALESCE(aa_rt.exchangerate, 1)) AS rt_amount
+            FROM acc_trans ac_rt
+            JOIN ap aa_rt ON aa_rt.id = ac_rt.trans_id
+            JOIN chart tc_rt ON tc_rt.id = ac_rt.tax_chart_id AND tc_rt.accno IN ('11761', '22041')
+            WHERE ac_rt.amount <> 0
+            AND ac_rt.trans_id IN (
+                SELECT at2.trans_id
+                FROM acc_trans at2
+                JOIN chart c2 ON at2.chart_id = c2.id
+                WHERE c2.accno IN ('11761', '22041')
+                GROUP BY at2.trans_id
+                HAVING COUNT(DISTINCT c2.accno) = 2
+            )
+            GROUP BY ac_rt.trans_id
+        ) aprt ON aprt.trans_id = aa.id
         WHERE c.link LIKE '%tax%'
         $aawhere
         $cashwhere
         AND NOT invoice
-        GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12,aa.taxincluded,aa.netamount
+        GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12,aa.taxincluded,aa.netamount,aprt.rt_amount
 
         UNION ALL
 

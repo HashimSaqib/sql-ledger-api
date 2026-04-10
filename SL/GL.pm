@@ -696,7 +696,7 @@ sub transactions {
 		 $gdescription AS lineitem, '' AS name, '' AS vcnumber,
 		 '' AS address1, '' AS address2, '' AS city,
 		 '' AS zipcode, '' AS country,
-                 tc.accno AS linetax_accno, tc.description AS linetax_description, ac.linetaxamount,
+                 CASE WHEN tc.accno IS NOT NULL THEN CONCAT(tc.accno, '--', tc.description) END AS linetax_account, ac.linetaxamount,
                  ac.project_id, COALESCE(tp.description, p.description) AS project_description
                  FROM gl g
 		 JOIN acc_trans ac ON (g.id = ac.trans_id)
@@ -721,20 +721,12 @@ sub transactions {
 		 ad.zipcode, ad.country,
                  CASE 
                      WHEN a.invoice AND ac.id IS NOT NULL AND i.id IS NOT NULL THEN 
-                         (SELECT STRING_AGG(DISTINCT tc2.accno, ', ' ORDER BY tc2.accno) 
+                         (SELECT STRING_AGG(DISTINCT CONCAT(tc2.accno, '--', tc2.description), ', ' ORDER BY CONCAT(tc2.accno, '--', tc2.description)) 
                           FROM invoicetax it 
                           JOIN chart tc2 ON it.chart_id = tc2.id 
                           WHERE it.trans_id = a.id AND it.invoice_id = i.id)
-                     ELSE tc.accno 
-                 END AS linetax_accno,
-                 CASE 
-                     WHEN a.invoice AND ac.id IS NOT NULL AND i.id IS NOT NULL THEN 
-                         (SELECT STRING_AGG(DISTINCT tc2.description, ', ' ORDER BY tc2.description) 
-                          FROM invoicetax it 
-                          JOIN chart tc2 ON it.chart_id = tc2.id 
-                          WHERE it.trans_id = a.id AND it.invoice_id = i.id)
-                     ELSE tc.description 
-                 END AS linetax_description,
+                     ELSE CASE WHEN tc.accno IS NOT NULL THEN CONCAT(tc.accno, '--', tc.description) END
+                 END AS linetax_account,
                  CASE 
                      WHEN a.invoice AND ac.id IS NOT NULL AND i.id IS NOT NULL THEN 
                          (SELECT SUM(it.taxamount) 
@@ -769,22 +761,13 @@ sub transactions {
 		 ad.zipcode, ad.country,
                  CASE 
                      WHEN a.invoice AND ac.id IS NOT NULL AND i.id IS NOT NULL THEN 
-                         (SELECT STRING_AGG(DISTINCT tc2.accno, ', ' ORDER BY tc2.accno) 
+                         (SELECT STRING_AGG(DISTINCT CONCAT(tc2.accno, '--', tc2.description), ', ' ORDER BY CONCAT(tc2.accno, '--', tc2.description)) 
                           FROM invoicetax it 
                           JOIN chart tc2 ON it.chart_id = tc2.id 
                           WHERE it.trans_id = a.id AND it.invoice_id = i.id)
-                     WHEN NOT a.invoice AND c.link = 'AP_amount' AND aprt.trans_id IS NOT NULL THEN aprt.rt_accno
-                     ELSE tc.accno 
-                 END AS linetax_accno,
-                 CASE 
-                     WHEN a.invoice AND ac.id IS NOT NULL AND i.id IS NOT NULL THEN 
-                         (SELECT STRING_AGG(DISTINCT tc2.description, ', ' ORDER BY tc2.description) 
-                          FROM invoicetax it 
-                          JOIN chart tc2 ON it.chart_id = tc2.id 
-                          WHERE it.trans_id = a.id AND it.invoice_id = i.id)
-                     WHEN NOT a.invoice AND c.link = 'AP_amount' AND aprt.trans_id IS NOT NULL THEN aprt.rt_description
-                     ELSE tc.description 
-                 END AS linetax_description,
+                     WHEN NOT a.invoice AND c.link = 'AP_amount' AND aprt.trans_id IS NOT NULL THEN aprt.rt_account
+                     ELSE CASE WHEN tc.accno IS NOT NULL THEN CONCAT(tc.accno, '--', tc.description) END
+                 END AS linetax_account,
                  CASE 
                      WHEN a.invoice AND ac.id IS NOT NULL AND i.id IS NOT NULL THEN 
                          (SELECT SUM(it.taxamount) 
@@ -802,8 +785,7 @@ sub transactions {
                  LEFT JOIN chart tc ON (ac.tax_chart_id = tc.id)
                  LEFT JOIN (
                      SELECT at2.trans_id,
-                            STRING_AGG(DISTINCT c2.accno, ', ' ORDER BY c2.accno) AS rt_accno,
-                            STRING_AGG(DISTINCT c2.description, ', ' ORDER BY c2.description) AS rt_description
+                            STRING_AGG(DISTINCT CONCAT(c2.accno, '--', c2.description), ', ' ORDER BY CONCAT(c2.accno, '--', c2.description)) AS rt_account
                      FROM acc_trans at2
                      JOIN chart c2 ON at2.chart_id = c2.id
                      WHERE c2.accno IN ('11761', '22041')
