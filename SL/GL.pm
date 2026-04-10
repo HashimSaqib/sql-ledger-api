@@ -773,6 +773,7 @@ sub transactions {
                           FROM invoicetax it 
                           JOIN chart tc2 ON it.chart_id = tc2.id 
                           WHERE it.trans_id = a.id AND it.invoice_id = i.id)
+                     WHEN NOT a.invoice AND c.link = 'AP_amount' AND aprt.trans_id IS NOT NULL THEN aprt.rt_accno
                      ELSE tc.accno 
                  END AS linetax_accno,
                  CASE 
@@ -781,6 +782,7 @@ sub transactions {
                           FROM invoicetax it 
                           JOIN chart tc2 ON it.chart_id = tc2.id 
                           WHERE it.trans_id = a.id AND it.invoice_id = i.id)
+                     WHEN NOT a.invoice AND c.link = 'AP_amount' AND aprt.trans_id IS NOT NULL THEN aprt.rt_description
                      ELSE tc.description 
                  END AS linetax_description,
                  CASE 
@@ -798,6 +800,16 @@ sub transactions {
 		 JOIN vendor ct ON (a.vendor_id = ct.id)
 		 JOIN address ad ON (ad.trans_id = ct.id)
                  LEFT JOIN chart tc ON (ac.tax_chart_id = tc.id)
+                 LEFT JOIN (
+                     SELECT at2.trans_id,
+                            STRING_AGG(DISTINCT c2.accno, ', ' ORDER BY c2.accno) AS rt_accno,
+                            STRING_AGG(DISTINCT c2.description, ', ' ORDER BY c2.description) AS rt_description
+                     FROM acc_trans at2
+                     JOIN chart c2 ON at2.chart_id = c2.id
+                     WHERE c2.accno IN ('11761', '22041')
+                     GROUP BY at2.trans_id
+                     HAVING COUNT(DISTINCT c2.accno) = 2
+                 ) aprt ON (aprt.trans_id = a.id)
 		 LEFT JOIN department d ON (d.id = a.department_id)
 		 LEFT JOIN translation l ON (l.trans_id = c.id AND l.language_code = '$myconfig->{countrycode}')
                  LEFT JOIN project p ON (ac.project_id = p.id)
