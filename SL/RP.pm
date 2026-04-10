@@ -1980,7 +1980,7 @@ sub alltaxes {
         aa.id, aa.invnumber, aa.transdate,
         aa.description, vc.name, vc.customernumber number, 'ar.pl' script, vc.id as vc_id,
         '' f,
-        SUM(ac.amount), SUM(ac.linetaxamount) AS tax, aa.taxincluded
+        CASE WHEN aa.taxincluded THEN SUM(ac.amount * COALESCE(aa.exchangerate, 1)) + SUM(ac.linetaxamount * COALESCE(aa.exchangerate, 1)) ELSE SUM(ac.amount * COALESCE(aa.exchangerate, 1)) END amount, SUM(ac.linetaxamount * COALESCE(aa.exchangerate, 1)) AS tax, aa.taxincluded
         FROM acc_trans ac
         JOIN chart c ON (c.id = ac.tax_chart_id)
         JOIN ar aa ON (aa.id = ac.trans_id)
@@ -1993,7 +1993,7 @@ sub alltaxes {
 
         UNION ALL
 
-        -- 2b. AR Transactions with line tax
+        -- 2b. AR Transactions with line tax (genuinely non-taxable lines only)
         SELECT 1 AS ordr, 'AR' module, 'Non-taxable' account,
         aa.id, aa.invnumber, aa.transdate,
         aa.description, vc.name, vc.customernumber number, 'ar.pl' script, vc.id as vc_id,
@@ -2009,7 +2009,14 @@ sub alltaxes {
         AND NOT invoice
         AND aa.linetax
         AND ac.linetaxamount = 0
+        AND ac.amount <> 0
         AND (c.link like '%AR_amount%' OR c.link like '%IC_sale%' OR c.link like '%IC_income%')
+        AND NOT EXISTS (
+          SELECT 1 FROM acc_trans ac2
+          WHERE ac2.trans_id = ac.trans_id
+          AND ac2.id = ac.id
+          AND (ac2.linetaxamount <> 0 OR (ac2.tax_chart_id IS NOT NULL AND ac2.tax_chart_id <> 0))
+        )
         GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12,aa.taxincluded
 
         UNION ALL
@@ -2019,7 +2026,7 @@ sub alltaxes {
         aa.id, aa.invnumber, aa.transdate,
         aa.description, vc.name, vc.customernumber number, 'ar.pl' script, vc.id as vc_id,
         '*' f,
-        aa.netamount amount, SUM(ac.amount) AS tax, aa.taxincluded
+        CASE WHEN aa.taxincluded THEN aa.amount ELSE aa.netamount END amount, SUM(ac.amount) AS tax, aa.taxincluded
         FROM acc_trans ac
         JOIN chart c ON (c.id = ac.chart_id)
         JOIN ar aa ON (aa.id = ac.trans_id)
@@ -2110,7 +2117,7 @@ sub alltaxes {
         aa.id, aa.invnumber, aa.transdate,
         aa.description, vc.name, vc.vendornumber number, 'ap.pl' script, vc.id as vc_id,
         '' f,
-        SUM(ac.amount), SUM(ac.linetaxamount) AS tax, aa.taxincluded
+        CASE WHEN aa.taxincluded THEN SUM(ac.amount * COALESCE(aa.exchangerate, 1)) - SUM(ac.linetaxamount * COALESCE(aa.exchangerate, 1)) ELSE SUM(ac.amount * COALESCE(aa.exchangerate, 1)) END amount, -SUM(ac.linetaxamount * COALESCE(aa.exchangerate, 1)) AS tax, aa.taxincluded
         FROM acc_trans ac
         JOIN chart c ON (c.id = ac.tax_chart_id)
         JOIN ap aa ON (aa.id = ac.trans_id)
@@ -2123,12 +2130,12 @@ sub alltaxes {
 
         UNION ALL
 
-        -- 6b. AP Transactions with line tax
+        -- 6b. AP Transactions with line tax (genuinely non-taxable lines only)
         SELECT 2 AS ordr, 'AP' module, 'Non-taxable' account,
         aa.id, aa.invnumber, aa.transdate,
         aa.description, vc.name, vc.vendornumber number, 'ap.pl' script, vc.id as vc_id,
         '' f,
-        SUM(ac.amount), SUM(ac.linetaxamount) AS tax, aa.taxincluded
+        SUM(ac.amount), -SUM(ac.linetaxamount) AS tax, aa.taxincluded
         FROM acc_trans ac
         JOIN ap aa ON (aa.id = ac.trans_id)
         JOIN chart c ON (c.id = ac.chart_id)
@@ -2139,7 +2146,14 @@ sub alltaxes {
         AND NOT invoice
         AND aa.linetax
         AND ac.linetaxamount = 0
+        AND ac.amount <> 0
         AND (c.link like '%AP_amount%' OR c.link like '%IC_cogs%' OR c.link like '%IC_expense%')
+        AND NOT EXISTS (
+          SELECT 1 FROM acc_trans ac2
+          WHERE ac2.trans_id = ac.trans_id
+          AND ac2.id = ac.id
+          AND (ac2.linetaxamount <> 0 OR (ac2.tax_chart_id IS NOT NULL AND ac2.tax_chart_id <> 0))
+        )
         GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12,aa.taxincluded
 
         UNION ALL
@@ -2148,7 +2162,7 @@ sub alltaxes {
         aa.id, aa.invnumber, aa.transdate,
         aa.description, vc.name, vc.vendornumber number, 'ap.pl' script, vc.id as vc_id,
         '*' f,
-        0-aa.netamount amount, SUM(ac.amount) AS tax, aa.taxincluded
+        CASE WHEN aa.taxincluded THEN 0-aa.amount ELSE 0-aa.netamount END amount, SUM(ac.amount) AS tax, aa.taxincluded
         FROM acc_trans ac
         JOIN chart c ON (c.id = ac.chart_id)
         JOIN ap aa ON (aa.id = ac.trans_id)
@@ -2191,15 +2205,16 @@ sub alltaxes {
         aa.id, aa.reference, aa.transdate,
         aa.description, '', '', 'gl.pl' script, 0 as vc_id,
         '' f,
-        -SUM(ac.amount) AS amount,  -- Flip sign: negative to positive
-        SUM(ac.linetaxamount) AS tax, 
-        true as taxincluded
+        CASE WHEN aa.taxincluded THEN -SUM(ac.amount * COALESCE(aa.exchangerate, 1)) + SUM(ac.linetaxamount * COALESCE(aa.exchangerate, 1)) ELSE -SUM(ac.amount * COALESCE(aa.exchangerate, 1)) END AS amount,
+        SUM(ac.linetaxamount * COALESCE(aa.exchangerate, 1)) AS tax, 
+        aa.taxincluded
         FROM acc_trans ac
         JOIN chart c ON (c.id = ac.tax_chart_id)
         JOIN gl aa ON (aa.id = ac.trans_id)
+        WHERE 1 = 1
         $aawhere
         AND ac.amount < 0  -- Only negative amounts (Debits)
-        GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12
+        GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12,aa.taxincluded
 
         UNION ALL
 
@@ -2208,15 +2223,16 @@ sub alltaxes {
         aa.id, aa.reference, aa.transdate,
         aa.description, '', '', 'gl.pl' script, 0 as vc_id,
         '' f,
-        SUM(ac.amount) AS amount, 
-        SUM(ac.linetaxamount) AS tax, 
-        true as taxincluded
+        CASE WHEN aa.taxincluded THEN SUM(ac.amount * COALESCE(aa.exchangerate, 1)) + SUM(ac.linetaxamount * COALESCE(aa.exchangerate, 1)) ELSE SUM(ac.amount * COALESCE(aa.exchangerate, 1)) END AS amount,
+        SUM(ac.linetaxamount * COALESCE(aa.exchangerate, 1)) AS tax, 
+        aa.taxincluded
         FROM acc_trans ac
         JOIN chart c ON (c.id = ac.tax_chart_id)
         JOIN gl aa ON (aa.id = ac.trans_id)
+        WHERE 1 = 1
         $aawhere
         AND ac.amount > 0  -- Only positive amounts (Credits)
-        GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12
+        GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12,aa.taxincluded
 
         ORDER BY 1, 2, 3, 6
       ~;
