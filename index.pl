@@ -2028,6 +2028,21 @@ $central->post(
             $dataset_id, $role_id
         );
 
+        if (@super_users) {
+            my $placeholders = join ', ', map { '?' } @super_users;
+            my $super_profiles = $central_dbs->query(
+                "SELECT id, email FROM profile WHERE email IN ($placeholders)",
+                @super_users
+            );
+            while ( my $row = $super_profiles->hash ) {
+                next if $row->{id} == $profile->{profile_id};
+                $central_dbs->query(
+"INSERT INTO dataset_access(profile_id, dataset_id, access_level, role_id) VALUES (?, ?, 'admin', ?)",
+                    $row->{id}, $dataset_id, $role_id
+                );
+            }
+        }
+
         my $reports_only_role = $central_dbs->query(
             "INSERT INTO role (dataset_id, name, acs) VALUES (?, ?, ?)",
             $dataset_id, 'Reports Only', $reports_only );
