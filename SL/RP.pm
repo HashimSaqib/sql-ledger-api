@@ -1980,7 +1980,7 @@ sub alltaxes {
         aa.id, aa.invnumber, aa.transdate,
         aa.description, vc.name, vc.customernumber number, 'ar.pl' script, vc.id as vc_id,
         '' f,
-        CASE WHEN aa.taxincluded THEN SUM(ac.amount * COALESCE(aa.exchangerate, 1)) + SUM(ac.linetaxamount * COALESCE(aa.exchangerate, 1)) ELSE SUM(ac.amount * COALESCE(aa.exchangerate, 1)) END amount, SUM(ac.linetaxamount * COALESCE(aa.exchangerate, 1)) AS tax, aa.taxincluded
+        CASE WHEN aa.taxincluded THEN SUM(ac.amount * COALESCE(aa.exchangerate, 1)) + SIGN(aa.netamount) * SUM(ac.linetaxamount * COALESCE(aa.exchangerate, 1)) ELSE SUM(ac.amount * COALESCE(aa.exchangerate, 1)) END amount, SIGN(aa.netamount) * SUM(ac.linetaxamount * COALESCE(aa.exchangerate, 1)) AS tax, aa.taxincluded
         FROM acc_trans ac
         JOIN chart c ON (c.id = ac.tax_chart_id)
         JOIN ar aa ON (aa.id = ac.trans_id)
@@ -1989,7 +1989,7 @@ sub alltaxes {
         $aawhere
         $cashwhere
         AND NOT invoice
-        GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12,aa.taxincluded
+        GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12,aa.taxincluded,aa.netamount
 
         UNION ALL
 
@@ -2117,7 +2117,7 @@ sub alltaxes {
         aa.id, aa.invnumber, aa.transdate,
         aa.description, vc.name, vc.vendornumber number, 'ap.pl' script, vc.id as vc_id,
         '' f,
-        CASE WHEN aa.taxincluded THEN SUM(ac.amount * COALESCE(aa.exchangerate, 1)) - SUM(ac.linetaxamount * COALESCE(aa.exchangerate, 1)) ELSE SUM(ac.amount * COALESCE(aa.exchangerate, 1)) END amount, -SUM(ac.linetaxamount * COALESCE(aa.exchangerate, 1)) AS tax, aa.taxincluded
+        CASE WHEN aa.taxincluded THEN SUM(ac.amount * COALESCE(aa.exchangerate, 1)) - SIGN(aa.netamount) * SUM(ac.linetaxamount * COALESCE(aa.exchangerate, 1)) ELSE SUM(ac.amount * COALESCE(aa.exchangerate, 1)) END amount, -SIGN(aa.netamount) * SUM(ac.linetaxamount * COALESCE(aa.exchangerate, 1)) AS tax, aa.taxincluded
         FROM acc_trans ac
         JOIN chart c ON (c.id = ac.tax_chart_id)
         JOIN ap aa ON (aa.id = ac.trans_id)
@@ -2126,7 +2126,7 @@ sub alltaxes {
         $aawhere
         $cashwhere
         AND NOT invoice
-        GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12,aa.taxincluded
+        GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12,aa.taxincluded,aa.netamount
 
         UNION ALL
 
