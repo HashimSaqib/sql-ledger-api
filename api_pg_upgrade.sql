@@ -225,6 +225,7 @@ CREATE TABLE bank_transactions (
     remittance_unstructured TEXT,
     remittance_structured VARCHAR(100),
     additional_info JSONB,
+    provider_metadata JSONB,
     bank_transaction_code_domain CHAR(4),
     bank_transaction_code_family CHAR(4),
     category_subfamily CHAR(4),
@@ -233,7 +234,7 @@ CREATE TABLE bank_transactions (
     reference_id INTEGER,
     source VARCHAR(50),
     source_id VARCHAR(255),
-    bank_transaction_code VARCHAR(10),
+    bank_transaction_code VARCHAR(128),
     rule_id INTEGER,
     pending BOOLEAN DEFAULT TRUE
 );
