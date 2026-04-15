@@ -8761,6 +8761,45 @@ helper get_defaults => sub {
     return \%defaults_hash;
 };
 
+# Map JSON email "type" (e.g. invoice, reminder1) to messages.message_type.
+helper email_send_type_to_message_type => sub {
+    my ( $c, $type ) = @_;
+    return undef if !defined $type || $type eq '';
+    return "reminder_$1" if $type =~ /^reminder([1-3])$/;
+    return 'invoice_send';
+};
+
+# Resolve body text: non-empty override wins, else VC row, else default rows (language, then any).
+helper resolve_email_message_template => sub {
+    my ( $c, $dbs, $vc_trans_id, $language_code, $message_type, $override ) = @_;
+    if ( defined $override && $override =~ /\S/ ) {
+        return $override;
+    }
+    return '' if !$message_type;
+    my $template = $dbs->query(
+        "SELECT content FROM messages WHERE trans_id = ? AND message_type = ?",
+        $vc_trans_id, $message_type
+    )->hash;
+    if ( $template && defined $template->{content} && $template->{content} =~ /\S/ ) {
+        return $template->{content};
+    }
+    if ( $language_code && $language_code =~ /\S/ ) {
+        $template = $dbs->query(
+"SELECT content FROM messages WHERE trans_id IS NULL AND message_type = ? AND language_code = ? ORDER BY id LIMIT 1",
+            $message_type, $language_code
+        )->hash;
+    }
+    else {
+        $template = $dbs->query(
+"SELECT content FROM messages WHERE trans_id IS NULL AND message_type = ? ORDER BY id LIMIT 1",
+            $message_type
+        )->hash;
+    }
+    return ( $template && defined $template->{content} )
+      ? ( $template->{content} // '' )
+      : '';
+};
+
 # Minimum document transdate for batch APIs: transdate > (closedto + 1 day).
 # Returns undef when closedto is unset or unparseable (no extra filter).
 helper batch_transdate_exclusive_min => sub {
@@ -10413,27 +10452,13 @@ $api->get(
           ->hashes;
         $form->{bank_accounts} = $bank_accounts;
 
-        # Appropriate invoice_send message: VC-specific, then general by VC language, then first general
-        my $template = $dbs->query(
-          "SELECT content FROM messages WHERE trans_id = ? AND message_type = 'invoice_send'",
-          $id
-        )->hash;
-        if ( $template && defined $template->{content} && $template->{content} ne '' ) {
-            $form->{email_message} = $template->{content};
-        }
-        else {
-            if ( $form->{language_code} && $form->{language_code} =~ /\S/ ) {
-                $template = $dbs->query(
-                  "SELECT content FROM messages WHERE trans_id IS NULL AND message_type = 'invoice_send' AND language_code = ? ORDER BY id LIMIT 1",
-                  $form->{language_code}
-                )->hash;
-            }
-            else {
-                $template = $dbs->query(
-                  "SELECT content FROM messages WHERE trans_id IS NULL AND message_type = 'invoice_send' ORDER BY id LIMIT 1"
-                )->hash;
-            }
-            $form->{email_message} = ( $template && defined $template->{content} ) ? ( $template->{content} // '' ) : '';
+        my $lc = $form->{language_code} // '';
+        $form->{email_message} = $c->resolve_email_message_template(
+            $dbs, $id, $lc, 'invoice_send', undef );
+        for my $lvl ( 1 .. 3 ) {
+            $form->{"reminder_${lvl}_email_message"} =
+              $c->resolve_email_message_template( $dbs, $id, $lc,
+                "reminder_$lvl", undef );
         }
 
         # Render the form object as JSON
@@ -10708,12 +10733,14 @@ $api->get(
 
         $form->{discount} *= 100;
 
-        # Include invoice_send message for this VC
-        my $msg_row = $dbs->query(
-          "SELECT content FROM messages WHERE trans_id = ? AND message_type = ?",
-          $id, 'invoice_send'
-        )->hash;
-        $form->{message} = ( $msg_row && defined $msg_row->{content} ) ? $msg_row->{content} : '';
+        my $lc = $form->{language_code} // '';
+        $form->{message} = $c->resolve_email_message_template(
+            $dbs, $id, $lc, 'invoice_send', undef );
+        for my $lvl ( 1 .. 3 ) {
+            $form->{"reminder_${lvl}_message"} =
+              $c->resolve_email_message_template( $dbs, $id, $lc,
+                "reminder_$lvl", undef );
+        }
 
         # Render the filtered JSON response
         $c->render( json => {%$form} );
@@ -10732,6 +10759,9 @@ $api->post(
         $form->{db} = lc($vc);
         for ( keys %$params ) { $form->{$_} = $params->{$_} if $params->{$_} }
         $form->{message} = $params->{message} if exists $params->{message};
+        for my $k (qw(reminder_1_message reminder_2_message reminder_3_message)) {
+            $form->{$k} = $params->{$k} if exists $params->{$k};
+        }
         $form->{ $vc =~ /^vendor$/i ? 'vendornumber' : 'customernumber' } =
           $params->{vcnumber};
         CT->save( $c->slconfig, $form );
@@ -16488,8 +16518,9 @@ $api->post(
         my $inline     = $json->{inline}     || 0;     # 0 or 1
         my $email      = $json->{email}      || die "Missing email parameter";
         my $cc         = $json->{cc}         || '';
-        my $bcc        = $json->{bcc}        || '';
-        my $message    = $json->{message}    || '';
+        my $bcc = $json->{bcc} || '';
+        my $message_override =
+          exists $json->{message} ? $json->{message} : undef;
 
         my $dbs = $c->dbs($client);
 
@@ -16500,6 +16531,12 @@ $api->post(
 
         # Build invoice data (needed for intnotes and status updates)
         build_invoice( $c, $client, $form, $dbs );
+
+        my $msg_type = $c->email_send_type_to_message_type($type);
+        my $vc_tid   = $form->{"${vc}_id"};
+        my $message  = $c->resolve_email_message_template(
+            $dbs, $vc_tid, $form->{language_code} // '', $msg_type,
+            $message_override );
 
         # Replace any {variable} placeholders in message with form values
         my %seen;
@@ -16908,10 +16945,10 @@ app->minion->add_task(
 
         my $emails     = $args->{emails};
         my $vc         = $args->{vc};
-        my $attachment = $args->{attachment} || '';
-        my $inline     = $args->{inline}     || 0;
-        my $message    = $args->{message}    || '';
-        my $jobtype    = $args->{jobtype}    || 'bulk_email';
+        my $attachment    = $args->{attachment} || '';
+        my $inline        = $args->{inline}     || 0;
+        my $batch_message = exists $args->{message} ? $args->{message} : undef;
+        my $jobtype       = $args->{jobtype}    || 'bulk_email';
         my $adminemail = $args->{adminemail};
         my $form       = $args->{form};
         my $config     = $args->{config};
@@ -16952,6 +16989,31 @@ app->minion->add_task(
 
                 # Build invoice data (needed for intnotes and status updates)
                 build_invoice( $c, $client, $form, $dbs );
+
+                my $item_override =
+                  exists $item->{message} ? $item->{message} : undef;
+                my $override =
+                    ( defined $item_override && $item_override =~ /\S/ )
+                  ? $item_override
+                  : ( defined $batch_message && $batch_message =~ /\S/ )
+                  ? $batch_message
+                  : undef;
+                my $msg_type = $c->email_send_type_to_message_type($type);
+                my $message  = $c->resolve_email_message_template(
+                    $dbs, $form->{"${vc}_id"}, $form->{language_code} // '',
+                    $msg_type, $override );
+
+                my %seen_ph;
+                for my $key (
+                    grep { !$seen_ph{$_}++ } ( $message =~ /\{(\w+)\}/g ) )
+                {
+                    my $val = ( defined $form->{$key} && !ref $form->{$key} )
+                      ? $form->{$key}
+                      : '';
+                    $val =~ s/\\/\\\\/g;
+                    $val =~ s/\$/\\\$/g;
+                    $message =~ s/\Q{$key}\E/$val/g;
+                }
 
                 # Set up email content and attachments
                 my @attachments = ();

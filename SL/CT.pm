@@ -550,21 +550,31 @@ sub save {
 
   $form->save_reference($dbh, $form->{db});
 
-  # save invoice_send message for this customer/vendor if message was passed
-  if ( exists $form->{message} ) {
-    my $msg_content = defined $form->{message} ? $form->{message} : '';
-    my $trans_id   = $form->{id};
-    my $existing   = $dbh->selectrow_array(
-      qq|SELECT id FROM messages WHERE trans_id = ? AND message_type = 'invoice_send'|,
-      undef, $trans_id
+  # save VC-specific email templates when corresponding form keys exist
+  for my $spec (
+    [ qw(message invoice_send) ],
+    [ qw(reminder_1_message reminder_1) ],
+    [ qw(reminder_2_message reminder_2) ],
+    [ qw(reminder_3_message reminder_3) ],
+  ) {
+    my ( $field, $mtype ) = @$spec;
+    next unless exists $form->{$field};
+    my $msg_content   = defined $form->{$field} ? $form->{$field} : '';
+    my $trans_id      = $form->{id};
+    my $existing      = $dbh->selectrow_array(
+      qq|SELECT id FROM messages WHERE trans_id = ? AND message_type = ?|,
+      undef, $trans_id, $mtype
     );
     my $language_code = $form->{language_code} // 'en';
     if ($existing) {
-      $query = qq|UPDATE messages SET content = ?, language_code = ? WHERE trans_id = ? AND message_type = 'invoice_send'|;
-      $dbh->do( $query, undef, $msg_content, $language_code, $trans_id ) || $form->dberror($query);
-    } else {
-      $query = qq|INSERT INTO messages (message_type, language_code, content, trans_id) VALUES ('invoice_send', ?, ?, ?)|;
-      $dbh->do( $query, undef, $language_code, $msg_content, $trans_id ) || $form->dberror($query);
+      $query = qq|UPDATE messages SET content = ?, language_code = ? WHERE trans_id = ? AND message_type = ?|;
+      $dbh->do( $query, undef, $msg_content, $language_code, $trans_id, $mtype )
+        || $form->dberror($query);
+    }
+    else {
+      $query = qq|INSERT INTO messages (message_type, language_code, content, trans_id) VALUES (?, ?, ?, ?)|;
+      $dbh->do( $query, undef, $mtype, $language_code, $msg_content, $trans_id )
+        || $form->dberror($query);
     }
   }
 
