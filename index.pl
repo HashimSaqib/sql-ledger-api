@@ -16430,6 +16430,47 @@ $api->post(
 );
 
 $api->get(
+    "/files/unsynced" => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+        my $dbs    = $c->dbs($client);
+
+        my $result = FM->get_unsynced_files( $dbs, $c, { client => $client } );
+
+        if ( $result->{success} ) {
+            return $c->render( json => $result );
+        }
+        else {
+            return $c->render(
+                status => 500,
+                json   => { error => $result->{error} || 'Unknown error' }
+            );
+        }
+    }
+);
+
+$api->post(
+    "/files/sync-to-drive" => sub {
+        my $c      = shift;
+        my $client = $c->param('client');
+        my $dbs    = $c->dbs($client);
+
+        my $result =
+          FM->sync_files_to_drive( $dbs, $c, { client => $client } );
+
+        if ( $result->{success} ) {
+            return $c->render( json => $result );
+        }
+        else {
+            return $c->render(
+                status => 500,
+                json   => { error => $result->{error} || 'Sync failed' }
+            );
+        }
+    }
+);
+
+$api->get(
     "/files/:id" => sub {
         my $c        = shift;
         my $module   = $c->param('module');
@@ -16477,6 +16518,7 @@ $api->delete(
         }
     }
 );
+
 $api->post(
     '/invoice_status' => sub {
         my $c = shift;

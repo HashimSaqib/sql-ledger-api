@@ -2,6 +2,7 @@ package FM;
 use strict;
 use warnings;
 use Mojo::UserAgent;
+use Mojo::File;
 use Mojo::JSON qw(encode_json decode_json);
 use Mojo::Util qw(url_escape);
 use Data::Dumper;
@@ -15,7 +16,8 @@ use File::Basename qw(basename);
 # Constants
 use constant {
     TOKEN_REFRESH_ATTEMPTS => 2,
-    MAX_UPLOAD_ATTEMPTS    => 2,
+    MAX_UPLOAD_ATTEMPTS    => 3,
+    UPLOAD_RETRY_BASE_WAIT => 2,
 };
 
 #----------------------------------------------------------------
@@ -75,7 +77,36 @@ sub upload_files {
     }
 
     $data->{files_info} = \@files_info;
-    return $processor->( $dbs, $c, $data, $module, $connection_info );
+
+    my $result = $processor->( $dbs, $c, $data, $module, $connection_info );
+
+    if ( $processor != \&process_local
+        && ( !ref($result) || ref($result) ne 'HASH' || !$result->{success} ) )
+    {
+        my $cloud_error =
+          ref($result) eq 'HASH' ? $result->{error} : 'Unknown cloud error';
+        $c->app->log->warn(
+            "Cloud upload failed ($cloud_error). Falling back to local storage."
+        );
+
+        foreach my $fi (@files_info) {
+            if ( $fi->{file} && ref( $fi->{file} ) && $fi->{file}->can('slurp') ) {
+                next;
+            }
+            my $local_path = $fi->{local_path};
+            if ( -f $local_path ) {
+                $fi->{file} = Mojo::File->new($local_path);
+            }
+        }
+
+        $result = process_local( $dbs, $c, $data, $module, undef );
+        if ( ref($result) eq 'HASH' && $result->{success} ) {
+            $result->{fallback}       = 1;
+            $result->{cloud_error}    = $cloud_error;
+        }
+    }
+
+    return $result;
 }
 
 sub process_dropbox {
@@ -230,6 +261,7 @@ sub process_google_drive {
     my $client_secret    = $ENV{GOOGLE_SECRET}    || '';
     my $storage_location = 'google_drive';
     my $ua               = Mojo::UserAgent->new;
+    $ua->connect_timeout(30)->request_timeout(120);
     my $upload_url =
       'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart';
 
@@ -336,12 +368,27 @@ sub process_google_drive {
                 } => $body
             );
 
-            my $res = $tx->result;
+            my $res;
+            my $tx_error = $tx->error;
+            if ($tx_error && !$tx_error->{code}) {
+                $c->app->log->error(
+                    "Google Drive upload connection error: $tx_error->{message} "
+                    . "(attempt $attempt/" . MAX_UPLOAD_ATTEMPTS . ")"
+                );
+                if ( $attempt < MAX_UPLOAD_ATTEMPTS ) {
+                    sleep( UPLOAD_RETRY_BASE_WAIT * $attempt );
+                    $attempt++;
+                    next;
+                }
+                $attempt++;
+                next;
+            }
+
+            $res = $tx->result;
             if ( $res->is_success ) {
                 $upload_success = 1;
                 my $file_data = eval { decode_json( $res->body ) };
 
-                # Make the file publicly accessible and get a link
                 my $file_id = $file_data->{id};
                 my $link = _create_google_drive_public_link( $ua, $access_token,
                     $file_id, $connection );
@@ -359,37 +406,45 @@ sub process_google_drive {
                 last;
             }
             else {
-                my $status_code   = $res->code;
+                my $status_code   = $res->code || 0;
                 my $error_message = $res->message || "Unknown Error";
+                my $body_snippet  = eval { substr( $res->body, 0, 500 ) } || '';
 
-                if ( $status_code == 401 ) {
-                    $c->app->log->error(
-"Google Drive upload returned 401. Retrying after token refresh."
-                    );
+                $c->app->log->error(
+                    "Google Drive upload failed: Status $status_code - "
+                    . "$error_message (attempt $attempt/" . MAX_UPLOAD_ATTEMPTS
+                    . ") Body: $body_snippet"
+                );
+
+                my $is_retryable = (
+                    $status_code == 401
+                    || $status_code == 429
+                    || $status_code == 500
+                    || $status_code == 502
+                    || $status_code == 503
+                    || $status_code == 504
+                );
+
+                if ( $is_retryable && $attempt < MAX_UPLOAD_ATTEMPTS ) {
+                    sleep( UPLOAD_RETRY_BASE_WAIT * $attempt );
                     $attempt++;
                     next;
                 }
-                else {
-                    $c->app->log->error(
-"Google Drive upload failed: Status $status_code - $error_message (Connection type: $connection->{type})"
-                    );
-                    _update_connection_status( $dbs, $connection->{id},
-                        'error', $error_message );
-                    return {
-                        success => 0,
-                        error   => "Google Drive upload failed: $error_message"
-                    };
-                }
+
+                _update_connection_status( $dbs, $connection->{id},
+                    'error', $error_message )
+                    unless $status_code == 401 || $status_code == 429;
             }
             $attempt++;
         }
 
         unless ($upload_success) {
+            my $last_err = "Google Drive upload failed after "
+              . MAX_UPLOAD_ATTEMPTS . " attempts";
+            $c->app->log->error("$last_err for file: $filename");
             return {
                 success => 0,
-                error   => "Google Drive upload failed after "
-                  . MAX_UPLOAD_ATTEMPTS
-                  . " attempts"
+                error   => $last_err
             };
         }
 
@@ -931,6 +986,274 @@ sub delete_file {
         };
     }
     return { success => 0, error => "File deletion was not successful." };
+}
+
+sub get_unsynced_files {
+    my ( $self, $dbs, $c, $data ) = @_;
+
+    my $client = $data->{client} || 'default';
+
+    my @files = $dbs->query(
+        "SELECT f.*, "
+          . "CASE WHEN f.path LIKE '%/customer/%' THEN 'customer' "
+          . "     WHEN f.path LIKE '%/vendor/%'   THEN 'vendor' "
+          . "     ELSE 'other' END AS vc_type "
+          . "FROM files f "
+          . "WHERE f.location = 'local' "
+          . "AND (f.path LIKE ? OR f.path LIKE ?) "
+          . "ORDER BY f.upload_timestamp DESC",
+        "files/$client/customer/%",
+        "files/$client/vendor/%"
+    )->hashes;
+
+    my @result;
+    foreach my $file (@files) {
+        my $exists_on_disk = -f $file->{path} ? 1 : 0;
+        push @result,
+          {
+            id               => $file->{id},
+            name             => $file->{name},
+            extension        => $file->{extension},
+            module           => $file->{module},
+            path             => $file->{path},
+            reference_id     => $file->{reference_id},
+            vc_type          => $file->{vc_type},
+            upload_timestamp => $file->{upload_timestamp},
+            exists_on_disk   => $exists_on_disk,
+          };
+    }
+
+    return {
+        success => 1,
+        count   => scalar @result,
+        files   => \@result,
+    };
+}
+
+sub sync_files_to_drive {
+    my ( $self, $dbs, $c, $data ) = @_;
+
+    my $client = $data->{client} || 'default';
+
+    my $connection = $dbs->query(
+        "SELECT * FROM connections WHERE status = 'active' "
+          . "AND type = 'google_drive' LIMIT 1"
+    )->hash;
+
+    unless ( $connection && $connection->{access_token} ) {
+        return {
+            success => 0,
+            error   => "No active Google Drive connection found."
+        };
+    }
+
+    my $client_id     = $ENV{GOOGLE_CLIENT_ID} || '';
+    my $client_secret = $ENV{GOOGLE_SECRET}    || '';
+    my $ua            = Mojo::UserAgent->new;
+    $ua->connect_timeout(30)->request_timeout(120);
+
+    my $upload_url =
+      'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart';
+    if ( $connection->{drive_id} && $connection->{drive_id} ne 'root' ) {
+        $upload_url .=
+          "&supportsAllDrives=true&includeItemsFromAllDrives=true&driveId="
+          . $connection->{drive_id};
+    }
+
+    my @local_files = $dbs->query(
+        "SELECT * FROM files "
+          . "WHERE location = 'local' "
+          . "AND (path LIKE ? OR path LIKE ?) "
+          . "ORDER BY upload_timestamp ASC",
+        "files/$client/customer/%",
+        "files/$client/vendor/%"
+    )->hashes;
+
+    unless (@local_files) {
+        return {
+            success => 1,
+            message => "All files are already synced to Google Drive.",
+            synced  => 0,
+            failed  => 0,
+            files   => [],
+        };
+    }
+
+    my $access_token =
+      _check_and_refresh_token( $dbs, $c, $connection, $client_id,
+        $client_secret, 'google_drive' );
+
+    my @synced;
+    my @failed;
+    my %folder_cache;
+
+    foreach my $file (@local_files) {
+        unless ( -f $file->{path} ) {
+            push @failed,
+              {
+                id    => $file->{id},
+                name  => $file->{name},
+                error => "Local file not found on disk: $file->{path}",
+              };
+            next;
+        }
+
+        my $file_contents = eval { Mojo::File->new( $file->{path} )->slurp };
+        if ($@) {
+            push @failed,
+              { id => $file->{id}, name => $file->{name}, error => "Read error: $@" };
+            next;
+        }
+
+        my $folder_path;
+        if ( $file->{path} =~ m{^files/\Q$client\E/((?:customer|vendor)/.+)/[^/]+$} ) {
+            $folder_path = "/$client/$1";
+        }
+        else {
+            $folder_path = "/$client";
+        }
+
+        my $parent_id = $folder_cache{$folder_path};
+        unless ($parent_id) {
+            $access_token =
+              _check_and_refresh_token( $dbs, $c, $connection, $client_id,
+                $client_secret, 'google_drive' );
+            $parent_id =
+              _ensure_google_drive_folders( $ua, $access_token,
+                $connection->{refresh_token},
+                $client_id, $client_secret, $dbs, $c, $connection,
+                $folder_path );
+            unless ($parent_id) {
+                push @failed,
+                  {
+                    id    => $file->{id},
+                    name  => $file->{name},
+                    error => "Failed to create Drive folder: $folder_path",
+                  };
+                next;
+            }
+            $folder_cache{$folder_path} = $parent_id;
+        }
+
+        my $filename  = $file->{name};
+        my $mime_type = _get_mime_type($filename);
+        my $attempt   = 1;
+        my $upload_ok = 0;
+        my $drive_file_id;
+        my $drive_link;
+
+        while ( $attempt <= MAX_UPLOAD_ATTEMPTS && !$upload_ok ) {
+            $access_token =
+              _check_and_refresh_token( $dbs, $c, $connection, $client_id,
+                $client_secret, 'google_drive' );
+
+            my $metadata = { name => $filename, parents => [$parent_id] };
+            if ( $connection->{drive_id} && $connection->{drive_id} ne 'root' ) {
+                $metadata->{driveId} = $connection->{drive_id};
+            }
+
+            my $boundary = "-------" . time() . $$ . "boundary";
+            my $body     = '';
+            $body .= "--$boundary\r\n";
+            $body .= "Content-Type: application/json; charset=UTF-8\r\n\r\n";
+            $body .= encode_json($metadata) . "\r\n";
+            $body .= "--$boundary\r\n";
+            $body .= "Content-Type: $mime_type\r\n\r\n";
+            $body .= $file_contents . "\r\n";
+            $body .= "--$boundary--";
+
+            my $tx = $ua->post(
+                $upload_url => {
+                    'Authorization' => "Bearer $access_token",
+                    'Content-Type'  => "multipart/related; boundary=$boundary"
+                } => $body
+            );
+
+            my $tx_error = $tx->error;
+            if ( $tx_error && !$tx_error->{code} ) {
+                $c->app->log->error(
+                    "Sync upload connection error for $filename: "
+                    . "$tx_error->{message} (attempt $attempt)"
+                );
+                sleep( UPLOAD_RETRY_BASE_WAIT * $attempt )
+                  if $attempt < MAX_UPLOAD_ATTEMPTS;
+                $attempt++;
+                next;
+            }
+
+            my $res = $tx->result;
+            if ( $res->is_success ) {
+                $upload_ok = 1;
+                my $resp_data = eval { decode_json( $res->body ) };
+                $drive_file_id = $resp_data->{id};
+                $drive_link = _create_google_drive_public_link(
+                    $ua, $access_token, $drive_file_id, $connection );
+            }
+            else {
+                my $sc  = $res->code || 0;
+                my $msg = $res->message || "Unknown";
+                $c->app->log->error(
+                    "Sync upload failed for $filename: $sc - $msg "
+                    . "(attempt $attempt/" . MAX_UPLOAD_ATTEMPTS . ")"
+                );
+                if ( ( $sc == 401 || $sc == 429 || $sc >= 500 )
+                    && $attempt < MAX_UPLOAD_ATTEMPTS )
+                {
+                    sleep( UPLOAD_RETRY_BASE_WAIT * $attempt );
+                    $attempt++;
+                    next;
+                }
+            }
+            $attempt++;
+        }
+
+        if ($upload_ok) {
+            my $remote_path = $folder_path . "/$filename";
+            eval {
+                $dbs->query(
+                    "UPDATE files SET location = 'google_drive', "
+                      . "path = ?, link = ? WHERE id = ?",
+                    $remote_path, $drive_link, $file->{id}
+                );
+            };
+            if ($@) {
+                $c->app->log->error(
+                    "Sync: DB update failed for $filename after Drive upload: $@"
+                );
+            }
+
+            unlink $file->{path};
+
+            push @synced,
+              {
+                id       => $file->{id},
+                name     => $filename,
+                link     => $drive_link,
+                file_id  => $drive_file_id,
+              };
+        }
+        else {
+            push @failed,
+              {
+                id    => $file->{id},
+                name  => $filename,
+                error => "Upload failed after " . MAX_UPLOAD_ATTEMPTS . " attempts",
+              };
+        }
+    }
+
+    _update_connection_status( $dbs, $connection->{id}, 'active' )
+      if @synced;
+
+    return {
+        success => 1,
+        synced  => scalar @synced,
+        failed  => scalar @failed,
+        files   => {
+            synced => \@synced,
+            failed => \@failed,
+        },
+    };
 }
 
 sub get_drives {
