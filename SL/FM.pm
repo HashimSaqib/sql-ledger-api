@@ -78,21 +78,52 @@ sub upload_files {
 
     $data->{files_info} = \@files_info;
 
+    my $using_cloud = $processor != \&process_local;
+
+    if ($using_cloud) {
+        my $local_dir;
+        if (@files_info) {
+            ( $local_dir = $files_info[0]{local_path} ) =~ s/\/[^\/]+$//;
+        }
+        else {
+            my ( $year, $month ) = _get_date_parts( $data->{transdate} );
+            $local_dir = "files/$client/$module/$year/$month";
+        }
+        eval { make_path($local_dir) };
+
+        foreach my $fi (@files_info) {
+            my $file = $fi->{file};
+            next unless ref($file) && $file->can('slurp');
+            my $target = $fi->{local_path};
+            unless ( -f $target ) {
+                eval {
+                    my $contents = $file->slurp;
+                    Mojo::File->new($target)->spew($contents);
+                };
+                if ($@) {
+                    $c->app->log->warn(
+                        "Could not pre-save local copy of $fi->{unique_filename}: $@"
+                    );
+                }
+            }
+        }
+    }
+
     my $result = $processor->( $dbs, $c, $data, $module, $connection_info );
 
-    if ( $processor != \&process_local
+    if ( $using_cloud
         && ( !ref($result) || ref($result) ne 'HASH' || !$result->{success} ) )
     {
         my $cloud_error =
           ref($result) eq 'HASH' ? $result->{error} : 'Unknown cloud error';
+        my $drive_response =
+          ref($result) eq 'HASH' ? $result->{drive_response} : undef;
+
         $c->app->log->warn(
             "Cloud upload failed ($cloud_error). Falling back to local storage."
         );
 
         foreach my $fi (@files_info) {
-            if ( $fi->{file} && ref( $fi->{file} ) && $fi->{file}->can('slurp') ) {
-                next;
-            }
             my $local_path = $fi->{local_path};
             if ( -f $local_path ) {
                 $fi->{file} = Mojo::File->new($local_path);
@@ -103,6 +134,12 @@ sub upload_files {
         if ( ref($result) eq 'HASH' && $result->{success} ) {
             $result->{fallback}       = 1;
             $result->{cloud_error}    = $cloud_error;
+            $result->{drive_response} = $drive_response;
+        }
+    }
+    elsif ( $using_cloud && ref($result) eq 'HASH' && $result->{success} ) {
+        foreach my $fi (@files_info) {
+            unlink $fi->{local_path} if -f $fi->{local_path};
         }
     }
 
@@ -257,6 +294,21 @@ qq/{"path": "$dbx_path", "mode": "add", "autorename": true, "mute": false}/,
 
 sub process_google_drive {
     my ( $dbs, $c, $data, $module, $connection ) = @_;
+
+    if ( $ENV{FORCE_DRIVE_FAIL} ) {
+        $c->app->log->warn("FORCE_DRIVE_FAIL is set - simulating Google Drive failure");
+        return {
+            success        => 0,
+            error          => "Google Drive upload failed (FORCE_DRIVE_FAIL test)",
+            drive_response => {
+                status  => 0,
+                message => "Simulated failure via FORCE_DRIVE_FAIL env var",
+                body    => '',
+                attempt => 0,
+            },
+        };
+    }
+
     my $client_id        = $ENV{GOOGLE_CLIENT_ID} || '';
     my $client_secret    = $ENV{GOOGLE_SECRET}    || '';
     my $storage_location = 'google_drive';
@@ -306,10 +358,10 @@ sub process_google_drive {
         my $mime_type      = _get_mime_type($filename);
         my $attempt        = 1;
         my $upload_success = 0;
+        my $last_drive_response;
 
         while ( $attempt <= MAX_UPLOAD_ATTEMPTS && !$upload_success ) {
 
-# Re-check token before every attempt and update parent folder if token refresh occurred.
             my $new_access_token =
               _check_and_refresh_token( $dbs, $c, $connection, $client_id,
                 $client_secret, 'google_drive' );
@@ -332,21 +384,17 @@ sub process_google_drive {
                 }
             }
 
-            # Create metadata for the file
             my $metadata = {
                 name    => $filename,
                 parents => [$parent_id]
             };
 
-            # Build multipart request body
             my $boundary = "-------" . time() . "boundary";
             my $body     = '';
 
-            # Add metadata part
             $body .= "--$boundary\r\n";
             $body .= "Content-Type: application/json; charset=UTF-8\r\n\r\n";
 
-            # If using a shared drive, add driveId to the metadata
             if ( $connection->{drive_id} && $connection->{drive_id} ne 'root' )
             {
                 $metadata->{driveId} = $connection->{drive_id};
@@ -354,13 +402,11 @@ sub process_google_drive {
 
             $body .= encode_json($metadata) . "\r\n";
 
-            # Add file content part
             $body .= "--$boundary\r\n";
             $body .= "Content-Type: $mime_type\r\n\r\n";
             $body .= $file_contents . "\r\n";
             $body .= "--$boundary--";
 
-            # Upload the file
             my $tx = $ua->post(
                 $upload_url => {
                     'Authorization' => "Bearer $access_token",
@@ -368,23 +414,26 @@ sub process_google_drive {
                 } => $body
             );
 
-            my $res;
             my $tx_error = $tx->error;
-            if ($tx_error && !$tx_error->{code}) {
+            if ( $tx_error && !$tx_error->{code} ) {
+                $last_drive_response = {
+                    status  => 0,
+                    message => "Connection error: $tx_error->{message}",
+                    body    => '',
+                    attempt => $attempt,
+                };
                 $c->app->log->error(
                     "Google Drive upload connection error: $tx_error->{message} "
                     . "(attempt $attempt/" . MAX_UPLOAD_ATTEMPTS . ")"
                 );
                 if ( $attempt < MAX_UPLOAD_ATTEMPTS ) {
                     sleep( UPLOAD_RETRY_BASE_WAIT * $attempt );
-                    $attempt++;
-                    next;
                 }
                 $attempt++;
                 next;
             }
 
-            $res = $tx->result;
+            my $res = $tx->result;
             if ( $res->is_success ) {
                 $upload_success = 1;
                 my $file_data = eval { decode_json( $res->body ) };
@@ -408,12 +457,19 @@ sub process_google_drive {
             else {
                 my $status_code   = $res->code || 0;
                 my $error_message = $res->message || "Unknown Error";
-                my $body_snippet  = eval { substr( $res->body, 0, 500 ) } || '';
+                my $response_body = eval { $res->body } || '';
+
+                $last_drive_response = {
+                    status  => $status_code,
+                    message => $error_message,
+                    body    => substr( $response_body, 0, 2000 ),
+                    attempt => $attempt,
+                };
 
                 $c->app->log->error(
                     "Google Drive upload failed: Status $status_code - "
                     . "$error_message (attempt $attempt/" . MAX_UPLOAD_ATTEMPTS
-                    . ") Body: $body_snippet"
+                    . ") Body: " . substr( $response_body, 0, 500 )
                 );
 
                 my $is_retryable = (
@@ -443,8 +499,9 @@ sub process_google_drive {
               . MAX_UPLOAD_ATTEMPTS . " attempts";
             $c->app->log->error("$last_err for file: $filename");
             return {
-                success => 0,
-                error   => $last_err
+                success        => 0,
+                error          => $last_err,
+                drive_response => $last_drive_response,
             };
         }
 
@@ -514,18 +571,28 @@ sub process_local {
 
     my @processed_files;
     foreach my $file_info ( @{ $data->{files_info} } ) {
-        my $file = $file_info->{file};
-        next unless ref($file) && $file->can('filename') && $file->can('size');
-
+        my $file        = $file_info->{file};
         my $target_path = $file_info->{local_path};
+
         eval {
-            $file->move_to($target_path);
+            if ( -f $target_path ) {
+                # Already on disk (e.g. from cloud fallback pre-save)
+            }
+            elsif ( ref($file) && $file->can('move_to') ) {
+                $file->move_to($target_path);
+            }
+            elsif ( ref($file) && $file->can('slurp') ) {
+                Mojo::File->new($target_path)->spew( $file->slurp );
+            }
+            else {
+                die "No usable file object or local file for $file_info->{unique_filename}";
+            }
+
+            my $file_size = -s $target_path || 0;
             $c->app->log->info( "Locally saved file: "
                   . $file_info->{original_filename} . " as "
                   . $file_info->{unique_filename}
-                  . " (Size: "
-                  . $file->size
-                  . ")" );
+                  . " (Size: $file_size)" );
 
             insert_file_record(
                 $dbs,

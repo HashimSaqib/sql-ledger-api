@@ -11315,9 +11315,21 @@ helper process_transaction => sub {
               ref($upload_result) eq 'HASH' && $upload_result->{error}
               ? $upload_result->{error}
               : 'Unknown upload failure';
+            my $drive_resp =
+              ref($upload_result) eq 'HASH'
+              ? $upload_result->{drive_response}
+              : undef;
             return {
-                error   => 'file_upload_failed',
-                message => "Failed to upload attachment: $upload_error"
+                error          => 'file_upload_failed',
+                message        => "Failed to upload attachment: $upload_error",
+                drive_response => $drive_resp,
+            };
+        }
+        if ( $upload_result->{fallback} ) {
+            $form->{_cloud_upload_error} = {
+                error          => $upload_result->{cloud_error},
+                drive_response => $upload_result->{drive_response},
+                fallback_to    => 'local',
             };
         }
     }
@@ -11787,6 +11799,13 @@ helper process_invoice => sub {
               ? $upload_result->{error}
               : 'Unknown upload failure';
             die "file_upload_failed: $upload_error";
+        }
+        if ( ref($upload_result) eq 'HASH' && $upload_result->{fallback} ) {
+            $form->{_cloud_upload_error} = {
+                error          => $upload_result->{cloud_error},
+                drive_response => $upload_result->{drive_response},
+                fallback_to    => 'local',
+            };
         }
     }
 
