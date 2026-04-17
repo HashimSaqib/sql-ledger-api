@@ -397,6 +397,8 @@ sub transactions {
   my $query;
   my $sth;
   my $var;
+  my %balance;
+  my $balance;
   
   my %defaults = $form->get_defaults($dbh, \@{['precision', 'company']});
   for (keys %defaults) { $form->{$_} = $defaults{$_} }
@@ -821,7 +823,7 @@ sub transactions {
     if ($form->{l_splitledger}) {
       $ref->{balance} = 0;
       if ($form->{datefrom}) {
-        if ($balance{$ref->{accno}}) {
+        if (exists $balance{$ref->{accno}}) {
           $ref->{balance} = $balance{$ref->{accno}};
         } else {
           $bgl->execute($ref->{accno}) || $form->dberror;
