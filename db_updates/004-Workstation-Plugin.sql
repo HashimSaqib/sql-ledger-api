@@ -4,6 +4,7 @@ CREATE TABLE stations (
     name VARCHAR(100) NOT NULL,
     description TEXT,
     is_default BOOLEAN DEFAULT false, 
+    station_type VARCHAR(50),
     workflow_order INTEGER, 
     is_active BOOLEAN DEFAULT true,
     created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP

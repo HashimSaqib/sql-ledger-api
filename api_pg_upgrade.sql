@@ -156,10 +156,21 @@ CREATE TABLE stations (
     name VARCHAR(100) NOT NULL,
     description TEXT,
     is_default BOOLEAN DEFAULT false, 
+    station_type VARCHAR(50),
     workflow_order INTEGER, 
     is_active BOOLEAN DEFAULT true,
     created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE UNIQUE INDEX idx_stations_unique_type
+    ON stations(station_type) WHERE station_type IS NOT NULL AND is_active = true;
+
+INSERT INTO stations (name, description, station_type, is_default, workflow_order, is_active)
+VALUES ('Default', 'Default station', 'default', true, 1, true);
+
+INSERT INTO stations (name, description, station_type, is_default, workflow_order, is_active)
+VALUES ('Receipt', 'Receipt station', 'receipt', false, 2, true);
+
 CREATE TABLE station_users (
     id SERIAL PRIMARY KEY,
     station_id INTEGER NOT NULL,
