@@ -1496,6 +1496,16 @@ $central->get(
               ? $name_q->{fldvalue}
               : $dataset->{db_name};
             my $db_name   = $dataset->{db_name};
+
+            # Expose unmatched bank transactions to any user that has the
+            # `stations.bank_transactions` permission on this dataset so the
+            # frontend can render a cross-dataset payment-matching dashboard.
+            if ($ai_plugin) {
+                $dataset->{bank_transactions} =
+                  $c->get_unmatched_bank_transactions( $db_name,
+                    $profile->{profile_id} );
+            }
+
             my $logo_path = "templates/$db_name/logo.png";
 
             if ( -e $logo_path ) {
