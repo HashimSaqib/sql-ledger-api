@@ -767,7 +767,10 @@ sub transactions {
                           FROM invoicetax it 
                           JOIN chart tc2 ON it.chart_id = tc2.id 
                           WHERE it.trans_id = a.id AND it.invoice_id = i.id)
-                     WHEN NOT a.invoice AND c.link = 'AP_amount' AND aprt.trans_id IS NOT NULL THEN aprt.rt_account
+                    WHEN NOT a.invoice
+                         AND aprt.trans_id IS NOT NULL
+                         AND (c.link = 'AP_amount' OR COALESCE(ac.fx_transaction, FALSE))
+                    THEN aprt.rt_account
                      ELSE CASE WHEN tc.accno IS NOT NULL THEN CONCAT(tc.accno, '--', tc.description) END
                  END AS linetax_account,
                  CASE 
