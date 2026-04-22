@@ -761,16 +761,20 @@ sub transactions {
 		 $lineitem AS lineitem, ct.name, ct.vendornumber,
 		 ad.address1, ad.address2, ad.city,
 		 ad.zipcode, ad.country,
-                 CASE 
-                     WHEN a.invoice AND ac.id IS NOT NULL AND i.id IS NOT NULL THEN 
-                         (SELECT STRING_AGG(DISTINCT CONCAT(tc2.accno, '--', tc2.description), ', ' ORDER BY CONCAT(tc2.accno, '--', tc2.description)) 
-                          FROM invoicetax it 
-                          JOIN chart tc2 ON it.chart_id = tc2.id 
-                          WHERE it.trans_id = a.id AND it.invoice_id = i.id)
-                    WHEN NOT a.invoice
-                         AND aprt.trans_id IS NOT NULL
-                         AND (c.link = 'AP_amount' OR COALESCE(ac.fx_transaction, FALSE))
-                    THEN aprt.rt_account
+                CASE 
+                    WHEN a.invoice AND ac.id IS NOT NULL AND i.id IS NOT NULL THEN 
+                        (SELECT STRING_AGG(DISTINCT CONCAT(tc2.accno, '--', tc2.description), ', ' ORDER BY CONCAT(tc2.accno, '--', tc2.description)) 
+                         FROM invoicetax it 
+                         JOIN chart tc2 ON it.chart_id = tc2.id 
+                         WHERE it.trans_id = a.id AND it.invoice_id = i.id)
+                   WHEN NOT a.invoice
+                        AND aprt.trans_id IS NOT NULL
+                        AND (c.link = 'AP_amount' OR COALESCE(ac.fx_transaction, FALSE))
+                   THEN aprt.rt_account
+                   WHEN NOT a.invoice
+                        AND COALESCE(ac.fx_transaction, FALSE)
+                        AND tc_fx_pair.accno IS NOT NULL
+                   THEN CONCAT(tc_fx_pair.accno, '--', tc_fx_pair.description)
                      ELSE CASE WHEN tc.accno IS NOT NULL THEN CONCAT(tc.accno, '--', tc.description) END
                  END AS linetax_account,
                  CASE 
@@ -788,6 +792,13 @@ sub transactions {
 		 JOIN vendor ct ON (a.vendor_id = ct.id)
 		 JOIN address ad ON (ad.trans_id = ct.id)
                  LEFT JOIN chart tc ON (ac.tax_chart_id = tc.id)
+                 LEFT JOIN acc_trans ac_fx_pair
+                     ON COALESCE(ac.fx_transaction, FALSE) IS TRUE
+                    AND ac_fx_pair.trans_id = ac.trans_id
+                    AND ac_fx_pair.id       = ac.id
+                    AND ac_fx_pair.chart_id = ac.chart_id
+                    AND COALESCE(ac_fx_pair.fx_transaction, FALSE) IS FALSE
+                 LEFT JOIN chart tc_fx_pair ON (tc_fx_pair.id = ac_fx_pair.tax_chart_id)
                  LEFT JOIN (
                      SELECT at2.trans_id,
                             STRING_AGG(DISTINCT CONCAT(c2.accno, '--', c2.description), ', ' ORDER BY CONCAT(c2.accno, '--', c2.description)) AS rt_account
