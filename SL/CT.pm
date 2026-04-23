@@ -809,6 +809,7 @@ sub search {
 	        LEFT JOIN language l ON (l.code = c.language_code)
 		LEFT JOIN paymentmethod pm ON (pm.id = c.paymentmethod_id)
 		  WHERE $where
+		  AND a.approved = '1'
 		  AND a.invoice = '0'
 		  $transwhere
 		  $openarap
@@ -849,6 +850,7 @@ sub search {
 	        LEFT JOIN language l ON (l.code = c.language_code)
 		LEFT JOIN paymentmethod pm ON (pm.id = c.paymentmethod_id)
 		  WHERE $where
+		  AND a.approved = '1'
 		  AND a.invoice = '1'
 		  $transwhere
 		  $openarap
@@ -1094,7 +1096,7 @@ sub get_history {
 
   if ($form->{db} eq 'customer') {
     if ($form->{type} eq 'invoice') {
-      $where .= qq| AND a.invoice = '1' AND i.assemblyitem = '0'|;
+      $where .= qq| AND a.approved = '1' AND a.invoice = '1' AND i.assemblyitem = '0'|;
       $table = 'ar';
       $sellprice = "fxsellprice";
     } else {
@@ -1111,7 +1113,7 @@ sub get_history {
   }
   if ($form->{db} eq 'vendor') {
     if ($form->{type} eq 'invoice') {
-      $where .= qq| AND a.invoice = '1' AND i.assemblyitem = '0'|;
+      $where .= qq| AND a.approved = '1' AND a.invoice = '1' AND i.assemblyitem = '0'|;
       $table = 'ap';
       $sellprice = "fxsellprice";
     } else {

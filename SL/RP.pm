@@ -1922,7 +1922,8 @@ sub alltaxes {
     ( $form->{department_name}, $form->{department_id} ) = split /--/, $form->{department};
     $form->{department_id} *= 1;
 
-    my $aawhere;
+    # Only include approved (posted) transactions, consistent with other reports.
+    my $aawhere = qq| AND aa.approved = '1'|;
 
     if ( $form->{fromdate} ) {
         $aawhere .= qq| AND aa.transdate >= '$form->{fromdate}'|;
