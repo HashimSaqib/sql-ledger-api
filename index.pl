@@ -11008,13 +11008,34 @@ $api->get(
 
         my @line_items;
 
-        # For each transaction item
+        # When taxincluded, acc_trans holds net lines; scale to tax-included
+        # totals (same as POST input): net * doc_total / sum(nets). SL/AA.pm.
+        my @line_net;
         for my $entry (@sorted_entries) {
+            push @line_net, $amount_multiplier * ( -$entry->{amount} );
+        }
+        my $net_lines_total = 0;
+        $net_lines_total += $_ for @line_net;
+        my $doc_total_tax_incl = $form->{oldinvtotal};
+
+        for my $i ( 0 .. $#sorted_entries ) {
+            my $entry = $sorted_entries[$i];
+            my $net   = $line_net[$i];
+            my $amt   = $net;
+            if (   $form->{taxincluded}
+                && $net_lines_total
+                && defined $doc_total_tax_incl
+                && $doc_total_tax_incl != 0 )
+            {
+                $amt = $form->round_amount(
+                    $net * $doc_total_tax_incl / $net_lines_total,
+                    $form->{precision} );
+            }
             push @line_items,
               {
                 accno       => $entry->{accno},
                 description => $entry->{memo} || '',
-                amount      => $amount_multiplier * ( -$entry->{amount} ),
+                amount      => $amt,
                 taxAccount  => $entry->{tax_accno},
                 taxAmount   => $entry->{linetaxamount},
                 project     => $entry->{project_id},
@@ -11023,8 +11044,6 @@ $api->get(
 
         # Create payments array
         my @payments;
-
-        warn Dumper $form->{acc_trans}{"${transaction_type}_paid"};
 
         # Check if payments exist
         if ( defined $form->{acc_trans}{"${transaction_type}_paid"}
