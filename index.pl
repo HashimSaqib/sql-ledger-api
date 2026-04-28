@@ -14253,16 +14253,21 @@ $api->get(
 
         if ( scalar(@departments) > 1 ) {
             # Department comparison: each department becomes a column keyed by
-            # its description looked up from the database.
+            # its description looked up from the database. The special value
+            # "Overall" adds a column with no department filter.
+            my @dept_ids_only = grep { !_is_comparison_overall($_) } @departments;
             my %labels = _lookup_comparison_labels(
-                $c->dbs($client), 'department', @departments );
+                $c->dbs($client), 'department', @dept_ids_only );
+            $labels{$_} = 'Overall' for grep { _is_comparison_overall($_) } @departments;
             $form->{comparison_mode} = 'department';
             $periods = [
                 map {
-                    {   label      => $labels{$_},
-                        department => $_,
-                        fromdate   => $common_fromdate,
-                        todate     => $common_todate,
+                    my $overall = _is_comparison_overall($_);
+                    +{
+                        label    => $labels{$_},
+                        fromdate => $common_fromdate,
+                        todate   => $common_todate,
+                        ( $overall ? () : ( department => $_ ) ),
                     }
                 } @departments
             ];
@@ -14271,16 +14276,21 @@ $api->get(
         }
         elsif ( scalar(@projectnumbers) > 1 ) {
             # Project comparison: each project becomes a column keyed by its
-            # description looked up from the database.
+            # description looked up from the database. "Overall" adds a column
+            # with no project filter.
+            my @proj_ids_only = grep { !_is_comparison_overall($_) } @projectnumbers;
             my %labels = _lookup_comparison_labels(
-                $c->dbs($client), 'project', @projectnumbers );
+                $c->dbs($client), 'project', @proj_ids_only );
+            $labels{$_} = 'Overall' for grep { _is_comparison_overall($_) } @projectnumbers;
             $form->{comparison_mode} = 'project';
             $periods = [
                 map {
-                    {   label         => $labels{$_},
-                        projectnumber => $_,
-                        fromdate      => $common_fromdate,
-                        todate        => $common_todate,
+                    my $overall = _is_comparison_overall($_);
+                    +{
+                        label    => $labels{$_},
+                        fromdate => $common_fromdate,
+                        todate   => $common_todate,
+                        ( $overall ? () : ( projectnumber => $_ ) ),
                     }
                 } @projectnumbers
             ];
@@ -14802,6 +14812,20 @@ sub build_balance_sheet {
     return 1;    # Indicate success
 }
 
+# True when the client selected the synthetic "Overall" column (company-wide,
+# no department or project filter). Accepts plain "Overall" or "Overall--" with
+# no numeric id; a real row named Overall with an id stays "Name--123".
+sub _is_comparison_overall {
+    my ($val) = @_;
+    return 0 unless defined $val && $val =~ /\S/;
+    $val =~ s/^\s+|\s+$//g;
+    return 1 if lc($val) eq 'overall';
+    my ( $name, $id ) = split /--/, $val, 2;
+    return 0 unless defined $name && lc($name) eq 'overall';
+    return 1 if !defined $id || $id eq '' || $id !~ /^\d+$/;
+    return 0;
+}
+
 # Helper function to calculate account levels in hierarchy
 # Look up human-readable descriptions for a list of "value--id" strings from
 # either the 'department' or 'project' table.  Returns a hash mapping each
@@ -14961,15 +14985,20 @@ $api->get(
 
         if ( scalar(@departments) > 1 ) {
             # Department comparison: each department becomes a column keyed by
-            # its description looked up from the database.
+            # its description looked up from the database. The special value
+            # "Overall" adds a column with no department filter.
+            my @dept_ids_only = grep { !_is_comparison_overall($_) } @departments;
             my %labels = _lookup_comparison_labels(
-                $c->dbs($client), 'department', @departments );
+                $c->dbs($client), 'department', @dept_ids_only );
+            $labels{$_} = 'Overall' for grep { _is_comparison_overall($_) } @departments;
             $form->{comparison_mode} = 'department';
             $periods = [
                 map {
-                    {   label      => $labels{$_},
-                        department => $_,
-                        todate     => $common_todate,
+                    my $overall = _is_comparison_overall($_);
+                    +{
+                        label  => $labels{$_},
+                        todate => $common_todate,
+                        ( $overall ? () : ( department => $_ ) ),
                     }
                 } @departments
             ];
@@ -14978,15 +15007,20 @@ $api->get(
         }
         elsif ( scalar(@projectnumbers) > 1 ) {
             # Project comparison: each project becomes a column keyed by its
-            # description looked up from the database.
+            # description looked up from the database. "Overall" adds a column
+            # with no project filter.
+            my @proj_ids_only = grep { !_is_comparison_overall($_) } @projectnumbers;
             my %labels = _lookup_comparison_labels(
-                $c->dbs($client), 'project', @projectnumbers );
+                $c->dbs($client), 'project', @proj_ids_only );
+            $labels{$_} = 'Overall' for grep { _is_comparison_overall($_) } @projectnumbers;
             $form->{comparison_mode} = 'project';
             $periods = [
                 map {
-                    {   label         => $labels{$_},
-                        projectnumber => $_,
-                        todate        => $common_todate,
+                    my $overall = _is_comparison_overall($_);
+                    +{
+                        label  => $labels{$_},
+                        todate => $common_todate,
+                        ( $overall ? () : ( projectnumber => $_ ) ),
                     }
                 } @projectnumbers
             ];

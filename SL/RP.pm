@@ -92,10 +92,10 @@ sub income_statement_periods {
       # get_accounts queries the correct slice of data for each column.
       my $saved_dept = $form->{department};
       my $saved_proj = $form->{projectnumber};
-      if ( $form->{comparison_mode} eq 'department' && defined $p->{department} ) {
+      if ( $form->{comparison_mode} eq 'department' && $p->{department} ) {
         $form->{department} = $p->{department};
       }
-      if ( $form->{comparison_mode} eq 'project' && defined $p->{projectnumber} ) {
+      if ( $form->{comparison_mode} eq 'project' && $p->{projectnumber} ) {
         $form->{projectnumber} = $p->{projectnumber};
       }
 
@@ -161,10 +161,10 @@ sub balance_sheet_periods {
       # get_accounts queries the correct slice of data for each column.
       my $saved_dept = $form->{department};
       my $saved_proj = $form->{projectnumber};
-      if ( $form->{comparison_mode} eq 'department' && defined $p->{department} ) {
+      if ( $form->{comparison_mode} eq 'department' && $p->{department} ) {
         $form->{department} = $p->{department};
       }
-      if ( $form->{comparison_mode} eq 'project' && defined $p->{projectnumber} ) {
+      if ( $form->{comparison_mode} eq 'project' && $p->{projectnumber} ) {
         $form->{projectnumber} = $p->{projectnumber};
       }
 

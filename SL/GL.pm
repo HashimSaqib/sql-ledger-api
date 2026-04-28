@@ -689,7 +689,7 @@ sub transactions {
  
   my $query = qq|SELECT g.id, 'gl' AS type, $false AS invoice, g.reference,
                  g.description, g.created, g.updated, ac.transdate, ac.source,
-		 ac.amount, c.accno, c.description as account_description,
+		 ac.amount, ac.entry_id AS acc_trans_id, c.accno, c.description as account_description,
                  l.description AS account_translation, c.category,
                  c.contra AS ca,
                  c.gifi_accno, g.notes, c.link,
@@ -712,7 +712,7 @@ sub transactions {
 	UNION ALL
 	         SELECT a.id, 'ar' AS type, a.invoice, a.invnumber,
 		 a.description, a.created, a.updated, ac.transdate, ac.source,
-		 ac.amount, c.accno, c.description as account_description,
+		 ac.amount, ac.entry_id AS acc_trans_id, c.accno, c.description as account_description,
                  l.description AS account_translation, c.category,
                  c.contra AS ca,
                  c.gifi_accno, a.notes, c.link,
@@ -752,7 +752,7 @@ sub transactions {
 	UNION ALL
 	         SELECT a.id, 'ap' AS type, a.invoice, a.invnumber,
 		 a.description, a.created, a.updated, ac.transdate, ac.source,
-		 ac.amount, c.accno, c.description as account_description,
+		 ac.amount, ac.entry_id AS acc_trans_id, c.accno, c.description as account_description,
                  l.description AS account_translation, c.category,
                  c.contra AS ca,
                  c.gifi_accno, a.notes, c.link,
@@ -907,7 +907,8 @@ sub transactions {
                      debit => $ref->{debit},
                     credit => $ref->{credit},
                     amount => $ref->{debit} + $ref->{credit},
-                   balance => $ref->{balance}
+                   balance => $ref->{balance},
+              acc_trans_id => $ref->{acc_trans_id}
 		             };
     push @{ $form->{GL} }, $ref;
 
@@ -922,122 +923,282 @@ sub transactions {
   
   $form->report_level($myconfig, $dbh);
 
+  # Load full journal for ALL visible transactions in one query, then
+  # group by trans_id in Perl.  This replaces N per-transaction queries
+  # with a single bulk fetch.
+  my %full_by_trans;   # trans_id => { entry_id => line_hashref }
+  if (%trans) {
+    my $ids       = join ',', map { $_ * 1 } keys %trans;
+    my $fx_clause = $form->{fx_transaction}
+      ? ''
+      : " AND ac.fx_transaction = $false";
+    my $full_lines_q = qq|
+      SELECT ac.trans_id, ac.entry_id, ac.transdate, ac.amount,
+             c.accno, c.gifi_accno, c.link
+      FROM acc_trans ac
+      JOIN chart c ON ac.chart_id = c.id
+      WHERE ac.trans_id IN ($ids)
+        AND ac.amount <> 0
+        $fx_clause
+      ORDER BY ac.entry_id
+    |;
+    my $sth_full = $dbh->prepare($full_lines_q);
+    $sth_full->execute || $form->dberror($full_lines_q);
+    while ( my $row = $sth_full->fetchrow_hashref(NAME_lc) ) {
+      my $debit  = $row->{amount} < 0  ? -$row->{amount} : 0;
+      my $credit = $row->{amount} >= 0 ? $row->{amount}  : 0;
+      $full_by_trans{ $row->{trans_id} }{ $row->{entry_id} } = {
+        transdate  => $row->{transdate},
+        link       => $row->{link},
+        accno      => $row->{accno},
+        gifi_accno => $row->{gifi_accno},
+        debit      => $debit,
+        credit     => $credit,
+        amount     => $debit + $credit,
+      };
+    }
+    $sth_full->finish;
+  }
+
+  # For range-filtered reports with a start date, also include accounts
+  # that sit within the account-number range but had no transactions in
+  # the period.  They are added as debit=0/credit=0 rows so the caller
+  # can still display the opening balance.
+  if ( ($form->{accnofrom} || $form->{accnoto}) && $form->{datefrom} ) {
+    my %seen_accno;
+    $seen_accno{ $_->{accno} } = 1 for @{ $form->{GL} };
+
+    my @rc;
+    push @rc, "c.accno >= '$form->{accnofrom}'" if $form->{accnofrom};
+    push @rc, "c.accno <= '$form->{accnoto}'"   if $form->{accnoto};
+    my $range_cond = join ' AND ', @rc;
+
+    my $ob_q = qq|
+      SELECT c.accno,
+             COALESCE(l.description, c.description) AS account_description,
+             c.gifi_accno, c.category, c.link, c.contra AS ca,
+             SUM(ac.amount) AS balance
+        FROM chart c
+        JOIN acc_trans ac ON (ac.chart_id = c.id
+                              AND ac.approved = TRUE
+                              AND ac.transdate < date '$form->{datefrom}'
+                              AND ac.amount <> 0
+                              AND ac.fx_transaction = $false)
+        LEFT JOIN translation l ON (l.trans_id = c.id
+                                    AND l.language_code = '$myconfig->{countrycode}')
+       WHERE $range_cond
+       GROUP BY c.accno, c.description, l.description,
+                c.gifi_accno, c.category, c.link, c.contra
+      HAVING SUM(ac.amount) <> 0
+      ORDER BY c.accno
+    |;
+
+    my $sth_ob = $dbh->prepare($ob_q);
+    $sth_ob->execute || $form->dberror($ob_q);
+    while ( my $ref = $sth_ob->fetchrow_hashref(NAME_lc) ) {
+      next if $seen_accno{ $ref->{accno} };
+      next if $form->{category} ne 'X' && $ref->{category} ne $form->{category};
+      push @{ $form->{GL} }, {
+        id                  => 0,
+        type                => 'gl',
+        module              => 'gl',
+        invoice             => $false,
+        reference           => '',
+        description         => '',
+        transdate           => undef,
+        source              => '',
+        amount              => 0,
+        accno               => $ref->{accno},
+        account_description => $ref->{account_description},
+        category            => $ref->{category},
+        ca                  => $ref->{ca},
+        gifi_accno          => $ref->{gifi_accno},
+        notes               => '',
+        link                => $ref->{link},
+        till                => '',
+        cleared             => undef,
+        department          => '',
+        memo                => '',
+        name_id             => 0,
+        db                  => '',
+        lineitem            => '',
+        name                => '',
+        vcnumber            => '',
+        address             => '',
+        debit               => 0,
+        credit              => 0,
+        balance             => $ref->{balance} + 0,
+        contra              => '',
+        gifi_contra         => '',
+      };
+    }
+    $sth_ob->finish;
+  }
+
   $dbh->disconnect;
 
-  if (! ($form->{accnofrom} || $form->{accnoto}) ) {
-    for my $id (keys %trans) {
+  for my $id (keys %trans) {
+    my ($any_i) = keys %{ $trans{$id} };
+    my $doctype  = $trans{$id}{$any_i}{type};
+    my $full_ref = $full_by_trans{$id} // {};
 
-      my $arap = "";
-      my $ARAP;
-      my $gifi_arap = "";
-      my $paid = "";
-      my $gifi_paid = "";
-      my $accno = "";
-      my $gifi_accno = "";
-      my @arap = ();
-      my @paid = ();
-      my @accno = ();
-      my %accno = ();
-      my $aa = 0;
-      my $j;
+    # stamp the doc type onto each line (needed by _assign_contra_lines)
+    my %full;
+    for my $eid (keys %$full_ref) {
+      $full{$eid} = { %{ $full_ref->{$eid} }, type => $doctype };
+    }
 
-      for $i (reverse sort { $trans{$id}{$a}{amount} <=> $trans{$id}{$b}{amount} } keys %{$trans{$id}}) {
+    my ( $contra_f, $gifi_f ) = _assign_contra_lines( $form, \%full );
 
-	if ($trans{$id}{$i}{type} =~ /(ar|ap)/) {
-	  $ARAP = uc $trans{$id}{$i}{type};
-	  $aa = 1;
-	  if ($trans{$id}{$i}{link} eq $ARAP) {
-	    $arap = $trans{$id}{$i}{accno};
-	    $gifi_arap = $trans{$id}{$i}{gifi_accno};
-	    push @arap, $i;
-	  } elsif ($trans{$id}{$i}{link} =~ /${ARAP}_paid/) {
-	    $paid = $trans{$id}{$i}{accno};
-	    $gifi_paid = $trans{$id}{$i}{gifi_accno};
-	    push @paid, $i;
-	  } else {
-	    push @accno, { accno => $trans{$id}{$i}{accno},
-		      gifi_accno => $trans{$id}{$i}{gifi_accno},
-                       transdate => $trans{$id}{$i}{transdate},
-			       i => $i };
-	  }
-	}
+    for my $gl_i ( keys %{ $trans{$id} } ) {
+      my $atid = $trans{$id}{$gl_i}{acc_trans_id};
+      next unless defined $atid;
+      $form->{GL}[$gl_i]{contra}      = $contra_f->{$atid}
+        if defined $contra_f->{$atid};
+      $form->{GL}[$gl_i]{gifi_contra} = $gifi_f->{$atid}
+        if defined $gifi_f->{$atid};
+    }
+  }
+
+}
+
+sub _assign_contra_lines {
+  my ( $form, $lines ) = @_;
+  my %contra;
+  my %gifi_contra;
+
+  my $arap      = "";
+  my $ARAP;
+  my $gifi_arap = "";
+  my $paid      = "";
+  my $gifi_paid = "";
+  my @arap;
+  my @paid;
+  my @accno;
+  my %accno;
+  my $aa = 0;
+  my $j;
+  my $i;
+  my %seen;
+
+  for $i (
+    reverse sort { $lines->{$a}{amount} <=> $lines->{$b}{amount} }
+    keys %$lines )
+  {
+    if ( $lines->{$i}{type} =~ /(ar|ap)/ ) {
+      $ARAP = uc $lines->{$i}{type};
+      $aa   = 1;
+      if ( $lines->{$i}{link} eq $ARAP ) {
+        $arap      = $lines->{$i}{accno};
+        $gifi_arap = $lines->{$i}{gifi_accno};
+        push @arap, $i;
       }
-
-      if ($aa) {
-	for (@paid) {
-	  $form->{GL}[$_]{contra} = $arap;
-	  $form->{GL}[$_]{gifi_contra} = $gifi_arap;
-	}
-	if (@paid) {
-	  $i = pop @arap;
-	  $form->{GL}[$i]{contra} = $paid;
-	  $form->{GL}[$i]{gifi_contra} = $gifi_paid;
-	}
-	for (@arap) {
-	  $i = 0;
-	  for $ref (@accno) {
-	    $form->{GL}[$_]{contra} .= "$ref->{accno} " unless $seen{"$ref->{accno}$ref->{transdate}"};
-	    $seen{"$ref->{accno}$ref->{transdate}"} = 1;
-
-	    $form->{GL}[$_]{gifi_contra} .= "$ref->{gifi_accno} " unless $seen{"$ref->{gifi_accno}$ref->{transdate}"};
-	    $seen{"$ref->{gifi_accno}$ref->{transdate}"} = 1;
-	  }
-	  $i++;
-	}
-	for $ref (@accno) {
-	  $form->{GL}[$ref->{i}]{contra} = $arap;
-	  $form->{GL}[$ref->{i}]{gifi_contra} = $gifi_arap;
-	}
-      } else {
-	
-	%accno = %{$trans{$id}};
-
-	for $i (reverse sort { $trans{$id}{$a}{amount} <=> $trans{$id}{$b}{amount} } keys %{$trans{$id}}) {
-	  $found = 0;
-	  $amount = $trans{$id}{$i}{amount};
-	  $j = $i;
-
-	  if ($trans{$id}{$i}{debit}) {
-	    $amt = "debit";
-	    $rev = "credit";
-	  } else {
-	    $amt = "credit";
-	    $rev = "debit";
-	  }
-
-	  if ($amount) {
-	    for (keys %accno) {
-	      if ($accno{$_}{$rev} == $amount) {
-		$form->{GL}[$i]{contra} = $accno{$_}{accno};
-		$form->{GL}[$i]{gifi_contra} = $accno{$_}{gifi_accno};
-		$found = 1;
-		last;
-	      }
-	    }
-	  }
-
-	  if (!$found) {
-	    if ($amount) {
-	      for $i (reverse sort { $accno{$a}{amount} <=> $accno{$b}{amount} } keys %accno) {
-		if ($accno{$i}{$rev}) {
-
-                  # add contra to accno
-		  $form->{GL}[$j]{contra} .= "$accno{$i}{accno} ";
-		  $form->{GL}[$j]{gifi_contra} .= "$accno{$i}{gifi_accno} ";
-
-		  $amount = $form->round_amount($amount - $accno{$i}{$rev}, 10);
-                  last if $amount <= 0;
-
-		}
-	      }
-              $form->{GL}[$j]{contra} = join ' ', sort split / /, $form->{GL}[$j]{contra};
-              $form->{GL}[$j]{gifi_contra} = join ' ', sort split / /, $form->{GL}[$j]{gifi_contra};
-	    }
-	  }
-	}
+      elsif ( $lines->{$i}{link} =~ /${ARAP}_paid/ ) {
+        $paid      = $lines->{$i}{accno};
+        $gifi_paid = $lines->{$i}{gifi_accno};
+        push @paid, $i;
+      }
+      else {
+        push @accno,
+          {
+          accno     => $lines->{$i}{accno},
+          gifi_accno => $lines->{$i}{gifi_accno},
+          transdate => $lines->{$i}{transdate},
+          i         => $i
+          };
       }
     }
   }
+
+  if ($aa) {
+    for (@paid) {
+      $contra{$_}      = $arap;
+      $gifi_contra{$_} = $gifi_arap;
+    }
+    if (@paid) {
+      $i = pop @arap;
+      $contra{$i}      = $paid;
+      $gifi_contra{$i} = $gifi_paid;
+    }
+    %seen = ();
+    for (@arap) {
+      for my $ref (@accno) {
+        $contra{$_} .= "$ref->{accno} "
+          unless $seen{"$ref->{accno}$ref->{transdate}"};
+        $seen{"$ref->{accno}$ref->{transdate}"} = 1;
+
+        $gifi_contra{$_} .= "$ref->{gifi_accno} "
+          unless $seen{"$ref->{gifi_accno}$ref->{transdate}"};
+        $seen{"$ref->{gifi_accno}$ref->{transdate}"} = 1;
+      }
+    }
+    for my $ref (@accno) {
+      $contra{$ref->{i}}      = $arap;
+      $gifi_contra{$ref->{i}} = $gifi_arap;
+    }
+  }
+  else {
+    %accno = %$lines;
+
+    for $i (
+      reverse sort { $lines->{$a}{amount} <=> $lines->{$b}{amount} }
+      keys %$lines )
+    {
+      my $found  = 0;
+      my $amount = $lines->{$i}{amount};
+      $j = $i;
+
+      my ( $amt, $rev );
+      if ( $lines->{$i}{debit} ) {
+        $amt = "debit";
+        $rev = "credit";
+      }
+      else {
+        $amt = "credit";
+        $rev = "debit";
+      }
+
+      if ($amount) {
+        for ( keys %accno ) {
+          if ( $accno{$_}{$rev} == $amount ) {
+            $contra{$i}      = $accno{$_}{accno};
+            $gifi_contra{$i} = $accno{$_}{gifi_accno};
+            $found           = 1;
+            last;
+          }
+        }
+      }
+
+      if ( !$found ) {
+        if ($amount) {
+          for my $ak (
+            reverse sort { $accno{$a}{amount} <=> $accno{$b}{amount} }
+            keys %accno )
+          {
+            if ( $accno{$ak}{$rev} ) {
+
+              # add contra to accno
+              $contra{$j}      .= "$accno{$ak}{accno} ";
+              $gifi_contra{$j} .= "$accno{$ak}{gifi_accno} ";
+
+              $amount =
+                $form->round_amount( $amount - $accno{$ak}{$rev}, 10 );
+              last if $amount <= 0;
+
+            }
+          }
+          $contra{$j}      ||= '';
+          $gifi_contra{$j} ||= '';
+          $contra{$j} =
+            join ' ', sort split / /, $contra{$j};
+          $gifi_contra{$j} =
+            join ' ', sort split / /, $gifi_contra{$j};
+        }
+      }
+    }
+  }
+
+  return ( \%contra, \%gifi_contra );
 
 }
 
