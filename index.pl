@@ -572,6 +572,85 @@ helper is_admin => sub {
     return 1;
 };
 
+# Returns true when the currently authenticated user is listed in SUPER_USERS.
+# Renders a 403 and returns false when the caller is not a super user.
+helper is_super_user => sub {
+    my $c           = shift;
+    my $check_only  = shift;    # if true, return 0/1 instead of rendering 403
+    my $profile     = $c->get_user_profile();
+    return 0 unless ref($profile) eq 'HASH' && $profile->{email};
+
+    my @super_users =
+      map { s/^\s+|\s+$//gr }
+      split /,/, ( $ENV{SUPER_USERS} // '' );
+
+    my $is_super = grep { lc($_) eq lc( $profile->{email} ) } @super_users;
+
+    unless ($is_super) {
+        return 0 if $check_only;
+        $c->render( status => 403, json => { message => "Superuser access required" } );
+        return undef;    # falsy so "return unless $c->is_super_user()" short-circuits
+    }
+    return 1;
+};
+
+# Fetches the singleton backend_settings row from centraldb.
+# Falls back to env-var values when the row does not yet exist.
+helper get_backend_settings => sub {
+    my $c   = shift;
+    my $dbs = $c->central_dbs();
+    return unless $dbs;
+
+    my $row = eval {
+        $dbs->query(
+            'SELECT public_signup, allow_db_creation, db_creation_rules,
+                    global_dataset_admins, extra
+             FROM backend_settings WHERE id = 1'
+        )->hash;
+    };
+
+    my $env_public_signup = ( $ENV{PUBLIC_SIGNUP}     // 1 ) ? \1 : \0;
+    my $env_allow_db      = ( $ENV{ALLOW_DB_CREATION} // 1 ) ? \1 : \0;
+
+    unless ($row) {
+        return {
+            public_signup          => $env_public_signup,
+            allow_db_creation      => $env_allow_db,
+            db_creation_rules      => { allowed_emails => [], allowed_domains => [] },
+            global_dataset_admins  => [],
+            extra                  => {},
+        };
+    }
+
+    my $rules = $row->{db_creation_rules};
+    if ( $rules && !ref($rules) ) {
+        $rules = eval { decode_json($rules) } // { allowed_emails => [], allowed_domains => [] };
+    }
+    $rules //= { allowed_emails => [], allowed_domains => [] };
+    $rules->{allowed_emails}  //= [];
+    $rules->{allowed_domains} //= [];
+
+    my $extra = $row->{extra};
+    if ( $extra && !ref($extra) ) {
+        $extra = eval { decode_json($extra) } // {};
+    }
+    $extra //= {};
+
+    my $global_admins = $row->{global_dataset_admins};
+    if ( $global_admins && !ref($global_admins) ) {
+        $global_admins = eval { decode_json($global_admins) } // [];
+    }
+    $global_admins //= [];
+
+    return {
+        public_signup         => $row->{public_signup}     ? \1 : \0,
+        allow_db_creation     => $row->{allow_db_creation} ? \1 : \0,
+        db_creation_rules     => $rules,
+        global_dataset_admins => $global_admins,
+        extra                 => $extra,
+    };
+};
+
 # Route to generate an OTP for signup
 $central->post(
     '/signup_otp' => sub {
@@ -588,9 +667,10 @@ $central->post(
             );
         }
 
-        # Check if public signup is allowed.
-        my $public_signup = $ENV{PUBLIC_SIGNUP} // 0;
-        unless ( $public_signup == 1 ) {
+        # Check if public signup is allowed (DB setting, env as fallback).
+        my $settings      = $c->get_backend_settings();
+        my $public_signup = $settings ? ${ $settings->{public_signup} } : ( $ENV{PUBLIC_SIGNUP} // 0 );
+        unless ($public_signup) {
             return $c->render(
                 status => 403,
                 json   => { message => "Public signups are not allowed" }
@@ -648,11 +728,12 @@ $central->post(
             );
         }
 
-        # Check PUBLIC_SIGNUP flag (defaults to 0 if undefined)
-        my $public_signup = $ENV{PUBLIC_SIGNUP} // 0;
+        # Check PUBLIC_SIGNUP flag (DB setting, env as fallback)
+        my $settings      = $c->get_backend_settings();
+        my $public_signup = $settings ? ${ $settings->{public_signup} } : ( $ENV{PUBLIC_SIGNUP} // 0 );
 
         # When public signup is not allowed, an invite is mandatory.
-        if ( $public_signup != 1 && !$invite ) {
+        if ( !$public_signup && !$invite ) {
             return $c->render(
                 status => 400,
                 json   => { message => "Invite code required for signup" }
@@ -765,8 +846,8 @@ $central->get(
 
         my $params        = $c->req->params;
         my $invite        = $c->param('invite');
-        my $public_signup = $ENV{PUBLIC_SIGNUP} || 0;
-        warn($public_signup);
+        my $settings      = $c->get_backend_settings();
+        my $public_signup = $settings ? ${ $settings->{public_signup} } : ( $ENV{PUBLIC_SIGNUP} // 0 );
 
         # Handle public signup disabled case
         if ( $public_signup == 0 ) {
@@ -1472,6 +1553,14 @@ $central->get(
         my $profile = $c->get_user_profile();
         my $dbs     = $c->central_dbs();
 
+        my @super_users =
+          map { s/^\s+|\s+$//gr }
+          split /,/, ( $ENV{SUPER_USERS} // '' );
+        my $is_super_user =
+          ( grep { lc($_) eq lc( $profile->{email} // '' ) } @super_users )
+          ? 1
+          : 0;
+
         my $datasets = $dbs->query(
             "SELECT d.id, d.db_name, d.description, da.access_level 
              FROM dataset d
@@ -1575,7 +1664,10 @@ $central->get(
             }
         }
 
-        $c->render( json => $datasets );
+        $c->render( json => {
+            is_super_user => $is_super_user,
+            datasets      => $datasets,
+        } );
     }
 );
 $api->get(
@@ -1694,22 +1786,155 @@ $api->post(
     }
 );
 
+###############################################################################
+####                                                                       ####
+####   BACKEND MANAGEMENT (super-user only)                               ####
+####                                                                       ####
+###############################################################################
+
+# GET /management/settings
+# Returns the current backend settings (super-user only).
+$central->get(
+    '/management/settings' => sub {
+        my $c = shift;
+        return unless $c->is_super_user();
+
+        my $settings = $c->get_backend_settings();
+        return unless $settings;
+
+        return $c->render( json => $settings );
+    }
+);
+
+# PUT /management/settings
+# Updates backend settings (super-user only).
+# Accepted body fields (all optional, send only what you want to change):
+#   public_signup     : boolean
+#   allow_db_creation : boolean
+#   db_creation_rules : { allowed_emails: [...], allowed_domains: [...] }
+#   extra             : arbitrary object for future use
+$central->put(
+    '/management/settings' => sub {
+        my $c      = shift;
+        return unless $c->is_super_user();
+
+        my $params = $c->req->json // {};
+        my $dbs    = $c->central_dbs();
+        return unless $dbs;
+
+        # Build SET clause dynamically for only the provided fields
+        my @set_parts;
+        my @bind_vals;
+
+        if ( exists $params->{public_signup} ) {
+            push @set_parts, 'public_signup = ?';
+            push @bind_vals, $params->{public_signup} ? 1 : 0;
+        }
+        if ( exists $params->{allow_db_creation} ) {
+            push @set_parts, 'allow_db_creation = ?';
+            push @bind_vals, $params->{allow_db_creation} ? 1 : 0;
+        }
+        if ( exists $params->{db_creation_rules} ) {
+            my $rules = $params->{db_creation_rules};
+            $rules->{allowed_emails}  //= [];
+            $rules->{allowed_domains} //= [];
+            push @set_parts, 'db_creation_rules = ?';
+            push @bind_vals, encode_json($rules);
+        }
+        if ( exists $params->{global_dataset_admins} ) {
+            my $admins = $params->{global_dataset_admins};
+            $admins = [] unless ref($admins) eq 'ARRAY';
+
+            if (@$admins) {
+                my $placeholders = join ', ', map { '?' } @$admins;
+                my $found = $dbs->query(
+                    "SELECT email FROM profile WHERE email IN ($placeholders)",
+                    @$admins
+                )->hashes;
+                my %found_map = map { lc( $_->{email} ) => 1 } @$found;
+                my @missing = grep { !$found_map{ lc($_) } } @$admins;
+                if (@missing) {
+                    return $c->render(
+                        status => 400,
+                        json   => {
+                            message => "The following emails are not registered users: "
+                              . join( ', ', @missing )
+                        }
+                    );
+                }
+            }
+
+            push @set_parts, 'global_dataset_admins = ?';
+            push @bind_vals, encode_json($admins);
+        }
+        if ( exists $params->{extra} ) {
+            push @set_parts, 'extra = ?';
+            push @bind_vals, encode_json( $params->{extra} );
+        }
+
+        unless (@set_parts) {
+            return $c->render(
+                status => 400,
+                json   => { message => "No valid fields provided" }
+            );
+        }
+
+        push @set_parts, 'updated_at = CURRENT_TIMESTAMP';
+
+        my $sql = 'UPDATE backend_settings SET '
+          . join( ', ', @set_parts )
+          . ' WHERE id = 1';
+
+        my $result = $dbs->query( $sql, @bind_vals );
+
+        # If no row existed yet (first call), insert the defaults then retry
+        if ( $result->rows == 0 ) {
+            $dbs->query(
+                'INSERT INTO backend_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING'
+            );
+            $dbs->query( $sql, @bind_vals );
+        }
+
+        my $updated = $c->get_backend_settings();
+        return $c->render( json => $updated );
+    }
+);
+
 $central->get(
     'create_dataset' => sub {
         my $c = shift;
 
-        # Retrieve environment settings
-        my $allow_db_creation = $ENV{ALLOW_DB_CREATION} // 0;
-
-        # SUPER_USERS is a comma-separated list
-        my @super_users = split /,/, ( $ENV{SUPER_USERS} // '' );
-
         # Get the current user's profile
         my $profile = $c->get_user_profile();
 
-        # Determine if the user is allowed to create a database
-        my $db_creation = ( $allow_db_creation
-              || grep { $_ eq $profile->{email} } @super_users ) ? 1 : 0;
+        # Retrieve settings (DB with env fallback)
+        my $settings          = $c->get_backend_settings();
+        my $allow_db_creation = $settings ? ${ $settings->{allow_db_creation} } : ( $ENV{ALLOW_DB_CREATION} // 0 );
+        my $rules             = $settings ? $settings->{db_creation_rules} : {};
+        my @allowed_emails    = @{ $rules->{allowed_emails}  // [] };
+        my @allowed_domains   = @{ $rules->{allowed_domains} // [] };
+
+        # SUPER_USERS (hardcoded in env) always bypass the restriction
+        my @super_users =
+          map { s/^\s+|\s+$//gr }
+          split /,/, ( $ENV{SUPER_USERS} // '' );
+
+        my $email = lc( $profile->{email} // '' );
+
+        my $is_super         = grep { lc($_) eq $email } @super_users;
+        my $is_allowed_email = grep { lc($_) eq $email } @allowed_emails;
+        my $is_allowed_domain = grep {
+            my $domain = lc($_);
+            $domain =~ s/^\@//;
+            $email =~ /\@\Q$domain\E$/i
+        } @allowed_domains;
+
+        my $db_creation = (
+                 $allow_db_creation
+              || $is_super
+              || $is_allowed_email
+              || $is_allowed_domain
+        ) ? 1 : 0;
 
         # If not allowed, return only the db_creation flag
         if ( !$db_creation ) {
@@ -1776,18 +2001,33 @@ $central->post(
             );
         }
 
-        # Retrieve environment settings
-        my $allow_db_creation = $ENV{ALLOW_DB_CREATION} // 0;
-
-        # SUPER_USERS is a comma-separated list
-        my @super_users = split /,/, ( $ENV{SUPER_USERS} // '' );
-
         # Get the current user's profile
         my $profile = $c->get_user_profile();
 
-        # If DB creation is not allowed, ensure the user is a super user
-        if ( !$allow_db_creation ) {
-            unless ( grep { $_ eq $profile->{email} } @super_users ) {
+        # Retrieve settings (DB with env fallback)
+        my $settings          = $c->get_backend_settings();
+        my $allow_db_creation = $settings ? ${ $settings->{allow_db_creation} } : ( $ENV{ALLOW_DB_CREATION} // 0 );
+        my $rules             = $settings ? $settings->{db_creation_rules} : {};
+        my @allowed_emails    = @{ $rules->{allowed_emails}  // [] };
+        my @allowed_domains   = @{ $rules->{allowed_domains} // [] };
+
+        # SUPER_USERS (hardcoded in env) always bypass the restriction
+        my @super_users =
+          map { s/^\s+|\s+$//gr }
+          split /,/, ( $ENV{SUPER_USERS} // '' );
+
+        my $email = lc( $profile->{email} // '' );
+
+        unless ($allow_db_creation) {
+            my $is_super = grep { lc($_) eq $email } @super_users;
+            my $is_allowed_email  = grep { lc($_) eq $email } @allowed_emails;
+            my $is_allowed_domain = grep {
+                my $domain = lc($_);
+                $domain =~ s/^\@//;
+                $email =~ /\@\Q$domain\E$/i
+            } @allowed_domains;
+
+            unless ( $is_super || $is_allowed_email || $is_allowed_domain ) {
                 return $c->render(
                     json   => { error => "Not authorized to create dataset." },
                     status => 403
@@ -2047,7 +2287,30 @@ $central->post(
             while ( my $row = $super_profiles->hash ) {
                 next if $row->{id} == $profile->{profile_id};
                 $central_dbs->query(
-"INSERT INTO dataset_access(profile_id, dataset_id, access_level, role_id) VALUES (?, ?, 'admin', ?)",
+"INSERT INTO dataset_access(profile_id, dataset_id, access_level, role_id)
+ VALUES (?, ?, 'admin', ?)
+ ON CONFLICT (profile_id, dataset_id) DO NOTHING",
+                    $row->{id}, $dataset_id, $role_id
+                );
+            }
+        }
+
+        # Add globally configured dataset admins from backend_settings
+        my $global_admins = $settings
+          ? $settings->{global_dataset_admins}
+          : [];
+        if ( $global_admins && @$global_admins ) {
+            my $placeholders = join ', ', map { '?' } @$global_admins;
+            my $admin_profiles = $central_dbs->query(
+                "SELECT id FROM profile WHERE email IN ($placeholders)",
+                @$global_admins
+            );
+            while ( my $row = $admin_profiles->hash ) {
+                next if $row->{id} == $profile->{profile_id};
+                $central_dbs->query(
+"INSERT INTO dataset_access(profile_id, dataset_id, access_level, role_id)
+ VALUES (?, ?, 'admin', ?)
+ ON CONFLICT (profile_id, dataset_id) DO NOTHING",
                     $row->{id}, $dataset_id, $role_id
                 );
             }
