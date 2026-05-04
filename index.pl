@@ -6346,25 +6346,6 @@ helper api_gl_transaction => sub {
           "UPDATE gl SET offset_account_id = ?, offset_tax_id = ? WHERE id = ?";
         $dbs->query( $update_sql, $offset_account_id, $offset_tax_id,
             $form->{id} );
-
-        my @sources =
-          map { $_->{source} } grep { $_->{source} } @{ $data->{lines} };
-
-        if (@sources) {
-            my $placeholders = join( ", ", ("?") x @sources );
-
-            my ($any_pending) = $dbs->query(
-"SELECT bool_or(pending) FROM bank_transactions WHERE transaction_id IN ($placeholders)",
-                @sources
-            )->list;
-
-            if ($any_pending) {
-                $dbs->query(
-                    "UPDATE acc_trans SET approved = false WHERE trans_id = ?",
-                    $form->{id}
-                );
-            }
-        }
     }
 
     if ( $data->{files} && ref $data->{files} eq 'ARRAY' ) {

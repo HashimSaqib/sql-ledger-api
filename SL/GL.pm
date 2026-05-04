@@ -404,7 +404,11 @@ sub transactions {
   for (keys %defaults) { $form->{$_} = $defaults{$_} }
 
   my ($glwhere, $arwhere, $apwhere) = ("g.approved = '1'", "a.approved = '1'", "a.approved = '1'");
-  
+  # Match balance sheet / RP::get_accounts: only posted acc_trans lines
+  $glwhere .= " AND ac.approved = '1'";
+  $arwhere .= " AND ac.approved = '1'";
+  $apwhere .= " AND ac.approved = '1'";
+
   if ($form->{reference}) {
     $var = $form->like(lc $form->{reference});
     $glwhere .= " AND lower(g.reference) LIKE '$var'";
@@ -621,6 +625,8 @@ sub transactions {
                   JOIN chart c ON (ac.chart_id = c.id)
                   JOIN gl g ON (g.id = ac.trans_id)
                   WHERE c.accno = '$form->{accno}'
+                  AND ac.approved = '1'
+                  AND g.approved = '1'
                   AND ac.transdate < date '$form->{datefrom}'
                   |;
       my ($balance) = $dbh->selectrow_array($query);
@@ -632,6 +638,8 @@ sub transactions {
                   JOIN ar a ON (a.id = ac.trans_id)
                   JOIN customer ct ON (ct.id = a.customer_id)
                   WHERE c.accno = '$form->{accno}'
+                  AND ac.approved = '1'
+                  AND a.approved = '1'
                   AND ac.transdate < date '$form->{datefrom}'
                   |;
       ($balance) = $dbh->selectrow_array($query);
@@ -643,6 +651,8 @@ sub transactions {
                   JOIN ap a ON (a.id = ac.trans_id)
                   JOIN vendor ct ON (ct.id = a.vendor_id)
                   WHERE c.accno = '$form->{accno}'
+                  AND ac.approved = '1'
+                  AND a.approved = '1'
                   AND ac.transdate < date '$form->{datefrom}'
                   |;
       
@@ -659,6 +669,8 @@ sub transactions {
 		  JOIN chart c ON (ac.chart_id = c.id)
 		  JOIN gl g ON (g.id = ac.trans_id)
 		  WHERE ac.transdate < date '$form->{datefrom}'
+                  AND ac.approved = '1'
+                  AND g.approved = '1'
                   AND c.accno = ?
 		  |;
       $bgl = $dbh->prepare($query);
@@ -669,6 +681,8 @@ sub transactions {
 		  JOIN ar a ON (a.id = ac.trans_id)
 		  JOIN customer ct ON (ct.id = a.customer_id)
 		  WHERE ac.transdate < date '$form->{datefrom}'
+                  AND ac.approved = '1'
+                  AND a.approved = '1'
                   AND c.accno = ?
 		  |;
       $bar = $dbh->prepare($query);
@@ -679,6 +693,8 @@ sub transactions {
 		  JOIN ap a ON (a.id = ac.trans_id)
 		  JOIN vendor ct ON (ct.id = a.vendor_id)
 		  WHERE ac.transdate < date '$form->{datefrom}'
+                  AND ac.approved = '1'
+                  AND a.approved = '1'
                   AND c.accno = ?
 		  |;
       $bap = $dbh->prepare($query);
@@ -938,6 +954,7 @@ sub transactions {
       FROM acc_trans ac
       JOIN chart c ON ac.chart_id = c.id
       WHERE ac.trans_id IN ($ids)
+        AND ac.approved = '1'
         AND ac.amount <> 0
         $fx_clause
       ORDER BY ac.entry_id
