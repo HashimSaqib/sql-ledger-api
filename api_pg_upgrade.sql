@@ -452,3 +452,5 @@ CREATE INDEX idx_chart_category_links_chart_id ON chart_category_links(chart_id)
 CREATE INDEX idx_chart_category_links_category_id ON chart_category_links(category_id);
 
 INSERT INTO db_updates (version, last_update) VALUES ('019', 'Chart Categories');
+
+ALTER TABLE invoice ALTER COLUMN unit TYPE varchar(10);
