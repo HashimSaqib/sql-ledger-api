@@ -1,13 +1,22 @@
 openapi: 3.0.0
 info:
   title: SQL Ledger API
-  version: '0.1'
+  version: "0.1"
   description: |
     Backend API for interacting with Neo-Ledger (modern remake of SQL-Ledger). While the entire backend is based on API, this documentation covers interacting with client data. For integrations, it is recommended to use an API key that can be created for a client in the user dashboard. You need to be owner of a dataset to create an API key. API key will grant the API access to the entire dataset (it is planned to introduce scops later on).  All dates will be in yyyy-mm-dd format. 
 
+    **Path prefix** — All operations in this document are relative to **`servers[].url`**
+    (typically **`/client/{client}`**), matching **`$r->under('/client/:client')`** in the server.
+
+    **Documentation coverage** — This file describes the main integration routes (GL, AR/AP, invoices,
+    company defaults, chart, catalogue services, workstations, etc.). The **`index.pl`** app defines
+    additional endpoints (reports, batch, import, bank, projects, auth helpers, …) that are **not**
+    necessarily listed here; treat this spec as the **documented contract**, not an exhaustive route list.
+
     **HTTP methods**
       - **GET**: retrieve data  
-      - **POST**: create or update records. Normal post routes will create and post routes ending with /:id will update.
+      - **POST**: create records (and some updates, e.g. sales invoices via path or body).  
+      - **PUT**: update records where supported (e.g. `PUT /gl/transactions/{id}`).  
       - **DELETE**: delete an object
 
     **Authentication**
@@ -24,7 +33,8 @@ servers:
   # Added by API Auto Mocking Plugin
   - description: SwaggerHub API Auto Mocking
     url: https://virtserver.swaggerhub.com/HASHIM1SAQIB/sql-ledger-api/0.1
-  - description: A default testing server is provided. You can configure your own server for hosting by updating the host.
+  - description: A default testing server is provided. You can configure your own
+      server for hosting by updating the host.
     url: https://{host}/client/{client}
     variables:
       host:
@@ -34,19 +44,56 @@ servers:
         default: neoledger
         description: Your database/client identifier
 
-
 security:
   - ApiKeyAuth: []
 
 tags:
   - name: Auth
     description: Authentication and API key validation
+  - name: Customers & Vendors
+    description: Customer and vendor (counterparty) search, detail, create, and update
   - name: General Ledger
     description: Endpoints for general ledger transactions
   - name: Customers
-    description: Endpoints for customer-related transactions (sales invoices)
+    description: Customer sales invoices (AR invoices)
+  - name: AR/AP Transactions
+    description: Non-invoice AR and AP transactions (charges, credit notes, debit notes)
   - name: Payments
-    description: Endpoints for payment information
+    description: Payment lookups and cash receipt/payment posting
+  - name: Reference Data
+    description: >-
+      System lookup tables — chart of accounts, currencies, departments, taxes,
+      and **next-document** numbering (`GET /next_number/{module}`).
+  - name: System
+    description: >-
+      Company-wide **defaults**: number-sequence templates, account defaults,
+      SMTP and company master data (`GET`/`POST /system/companydefaults`).
+  - name: Items
+    description: Parts and services catalogue (inventory control)
+  - name: Workstations
+    description: >-
+      **Neo AI plugin** workstation / approval workflow
+      (`neo_ai_plugin/WorkStations.pl`). All paths are under the API server base
+      **`…/client/{client}`** (see **Servers**). Only active when that plugin
+      loads.
+
+      **Permissions:** **`stations.manage`** — list/write/delete stations and
+      user assignments (**`GET /workstations*`** writes). **`stations.get`** —
+      operator inbox (**`GET /workstations/user/stations`**).
+      **`vendor.transaction`** — move invoices between stations (**`POST
+      /workstations/transfer-invoice`**).
+
+      **Scope:** Routings (**`invoice_station`**, **`GET …/user/stations`**,
+      **transfer**) target **vendor AP** documents (`ap.id`), not AR/customer
+      invoices.
+
+      **Approval rules** are stored per station in **`station_approval_rules`**.
+      On save, if the JSON body includes a **`rules`** property (including
+      **`"rules": []`**), the server deletes all rule rows for that station and
+      inserts the list you send (**empty array ⇒ no rules**). If you **omit**
+      the **`rules`** key entirely on update, rule rows are left unchanged. See
+      **`StationRuleInput`** for valid **`rule_type`** / **`operator`** /
+      **`condition_value`** combos.
 
 components:
   securitySchemes:
@@ -57,357 +104,623 @@ components:
       description: Your dataset-specific API key.
 
   schemas:
-    GeneralLedger:
+
+    # ─── Shared ───────────────────────────────────────────────────────────────
+
+    ErrorResponse:
       type: object
+      description: Standard error envelope returned by all error responses.
       properties:
-        approved:
-          type: integer
-          description: 1 if approved, 0 otherwise
-          readOnly: true
-        curr:
+        message:
           type: string
-          description: ISO currency code (e.g. "CHF")
-        department:
-          type: string
-          nullable: true
-        department_id:
-          type: integer
-          readOnly: true
-        description:
-          type: string
-        employeeId:
-          type: integer
-          nullable: true
-          readOnly: true
-        exchangeRate:
-          type: number
-          format: float
-        files:
-          type: array
-          items:
-            $ref: '#/components/schemas/File'
+          description: Human-readable description of the error.
+      required:
+        - message
+
+    FieldConstraintError:
+      description: >-
+        **`400`** when a string field violates a database-backed length limit before
+        SQL runs. Same JSON shape as **`ErrorResponse`**: **`message`** only (human-readable,
+        includes the field name and limit in the text).
+      allOf:
+        - $ref: "#/components/schemas/ErrorResponse"
+
+    IdResponse:
+      type: object
+      description: Minimal success envelope returned by create and update operations.
+      properties:
         id:
           type: integer
-          readOnly: true
-        lines:
-          type: array
-          items:
-            $ref: '#/components/schemas/GeneralLedgerLine'
-        notes:
-          type: string
-        reference:
-          type: string
-        transdate:
-          type: string
-          format: date
-          description: Transaction date (YYYY-MM-DD)
-        ts:
-          type: string
-          format: date-time
-          nullable: true
-          readOnly: true
-        created:
-          type: string
-          format: date-time
-          nullable: true
-          readOnly: true
-        updated:
-          type: string
-          format: date-time
-          nullable: true
-          readOnly: true
+          description: ID of the created or updated record.
       required:
-        - curr
-        - exchangeRate
-        - reference
-        - transdate
-        - lines
-
-    GeneralLedgerLine:
-      type: object
-      properties:
-        accno:
-          type: string
-        cleared:
-          type: boolean
-        credit:
-          type: number
-        debit:
-          type: number
-        fx_transaction:
-          type: boolean
-          readOnly: true
-        linetaxamount:
-          type: number
-        memo:
-          type: string
-        project:
-          type: string
-          nullable: true
-        source:
-          type: string
-        taxAccount:
-          type: integer
-        description:
-          type: string
-          readOnly: true
-      required:
-        - accno
-        - credit
-        - debit
-        - cleared
-        - taxAccount
-        - linetaxamount
+        - id
 
     File:
       type: object
+      description: >-
+        **Read (GET):** One row from the server **`files`** table linked to the
+        document by **`reference_id`** (same id as the invoice, GL batch, or
+        AR/AP transaction). **`files`** in the JSON body is **`[]`** when
+        nothing has been uploaded for that document yet — not a bug — and lists
+        entries after **`POST`** with attachments succeeds.
+
+        Each element has **`id`**, **`name`**, and **`link`**. The server always
+        returns **`link`** as a **fully qualified URL** your frontend can use
+        as-is (same field for local and cloud storage — no special casing
+        needed).
+
+        Omit **`files`** on write or send **`null`** unless you are attaching
+        binaries (see **`FileUploadInline`** and multipart below).
       properties:
         id:
           type: integer
+          readOnly: true
+          description: Database id of this attachment row (`files.id`).
+        name:
+          type: string
+          readOnly: true
+          description: Original or stored filename.
         link:
           type: string
           format: uri
-        name:
-          type: string
+          readOnly: true
+          description: Absolute URL to fetch or open the file (local and cloud backends
+            normalized the same way).
       required:
         - id
         - link
         - name
 
-    TransactionLineItem:
+    FileUploadInline:
       type: object
+      description: >-
+        **Write (POST with `application/json`):** Attach a file by embedding
+        Base64 inside the payload. The handler decodes **`data`** and persists
+        via **`FM->upload_files`**. Omit **`files`** or send **`[]`** when you
+        have no uploads.
+      required: [ name, data ]
+      properties:
+        name:
+          type: string
+          description: Original filename including extension (e.g. **`contract.pdf`**).
+        data:
+          type: string
+          description: >-
+            **Data URI**: **`data:<mime>;base64,<payload>`**. Example prefix:
+            **`data:application/pdf;base64,JVBERi0x`**… The server strips the
+            prefix and decodes the Base64 body (see **`decode_base64_files`** in
+            `index.pl`).
+
+    # ─── General Ledger ───────────────────────────────────────────────────────
+
+    GeneralLedger:
+      type: object
+      description: >-
+        Used for **write** (POST create, PUT update) and **read** (GET single).
+        `readOnly` fields are returned on GET but ignored on write. The list
+        endpoint (`GET /gl/transactions`) returns the same shape but omits `ts`,
+        `employeeId`, `department`, `offset_accno`, `offset_tax_accno`,
+        `pending`, and `taxincluded`. **`files`** is still included when
+        attachments exist (**`[]`** otherwise).
+
+        **Automatic reference:** On **create** (`POST /gl/transactions`), if
+        **`reference`** is omitted, empty, or only whitespace, the server
+        assigns it from **`glnumber`** defaults (see **`GET
+        /system/companydefaults`** → `number_sequences.gl_reference`).
       properties:
         id:
-          type: number
-          description: Transaction ID
+          type: integer
+          readOnly: true
+        reference:
+          type: string
+          nullable: true
+          description: >-
+            Transaction reference. Required on meaningful **updates** (`PUT`).
+            On **POST create**, omit or leave blank to allocate from
+            **`glnumber`** (**`GET /system/companydefaults`** / `GET
+            /next_number/gl`).
         transdate:
           type: string
           format: date
-          description: Transaction date (YYYY-MM-DD)
-        reference:
-          type: string
-          description: Transaction reference
+          description: Transaction date (YYYY-MM-DD). Required on write.
         description:
           type: string
-          description: Transaction description
-        files:
-          type: array
-          items:
-            $ref: '#/components/schemas/File'
-          description: Associated files
-        name:
+          nullable: true
+        notes:
           type: string
-          description: Company name
-        vcnumber:
+          nullable: true
+        curr:
           type: string
-          description: Vendor/Customer number
-        address:
-          type: string
-          description: Address
+          minLength: 3
+          maxLength: 3
+          description: ISO currency code (e.g. "CHF"). Required on write. Matches PostgreSQL **`gl.curr`** **`char(3)`** — validated before posting.
+        exchangeRate:
+          type: number
+          format: float
+          description: Exchange rate relative to base currency. Required on write.
         department:
           type: string
-          description: Department
-        project_description:
+          nullable: true
+          description: >-
+            Department label returned on GET single. On write, pass
+            `"Description--id"` (same format used throughout the ledger).
+        department_id:
+          type: integer
+          nullable: true
+          readOnly: true
+        approved:
+          type: integer
+          description: 1 = approved, 0 = pending. Set by the server.
+          readOnly: true
+        ts:
           type: string
-          description: Project description
-        debit:
-          type: number
-          description: Debit amount
-        credit:
-          type: number
-          description: Credit amount
-        linetax_account:
-          type: string
-          description: Tax account in accno--description format (multiple comma-separated)
-        linetaxamount:
-          type: number
-          description: Tax amount
-        source:
-          type: string
-          description: Transaction source
-        memo:
-          type: string
-          description: Transaction memo
-        accno:
-          type: string
-          description: Account number
-        account_description:
-          type: string
-          description: Account description
-        gifi_accno:
-          type: string
-          description: GIFI account number
-        contra:
-          type: string
-          description: Contra account
+          format: date-time
+          nullable: true
+          readOnly: true
+          description: Internal posting timestamp. Only present on GET single.
         created:
           type: string
           format: date-time
-          description: Creation timestamp (ISO timestamp)
+          nullable: true
+          readOnly: true
         updated:
           type: string
           format: date-time
-          description: Update timestamp (ISO timestamp)
+          nullable: true
+          readOnly: true
+        employeeId:
+          type: integer
+          nullable: true
+          readOnly: true
+          description: Only present on GET single.
+        offset_accno:
+          type: string
+          nullable: true
+          readOnly: true
+          description: Offset account number, if set. Only present on GET single.
+        offset_tax_accno:
+          type: string
+          nullable: true
+          readOnly: true
+          description: Offset tax account number, if set. Only present on GET single.
+        pending:
+          type: integer
+          description: 1 = not yet approved, 0 = approved. Only present on GET single.
+          readOnly: true
+        taxincluded:
+          type: integer
+          description: 1 = tax included in line amounts, 0 = tax added on top. Only
+            present on GET single.
+          readOnly: true
+        lines:
+          type: array
+          items:
+            $ref: "#/components/schemas/GeneralLedgerLine"
+          description: Transaction line items. Required on write (must balance debits =
+            credits).
+        files:
+          type: array
+          items:
+            $ref: "#/components/schemas/File"
+          description: >-
+            **GET** single (`GET /gl/transactions/{id}`): **`File`** refs for
+            this GL id, or **`[]`** when no rows exist yet in **`files`**.
+
+            **POST/PUT JSON:** set **`files`** to an array of
+            **`FileUploadInline`** (`name` + **`data`** data-URI).
+            **Multipart:** use repeated form field **`files`** (binary parts);
+            do not rely on a JSON **`files`** array in the same request.
+
+            **POST create response** from this API currently returns only **`{
+            id }`** — re-**GET** the transaction to see populated **`files`**.
+      required:
+        - curr
+        - exchangeRate
+        - transdate
+        - lines
+
+    GeneralLedgerLine:
+      type: object
+      description: >-
+        A single debit or credit line within a GL transaction. `debit` and
+        `credit` are mutually exclusive — set the non-zero side, leave the other
+        as `0`. They must balance across all lines in the transaction.
+      properties:
+        accno:
+          type: string
+          description: Chart-of-accounts account number. Required.
+        debit:
+          type: number
+          description: Debit amount. Set to 0 when this is a credit line.
+        credit:
+          type: number
+          description: Credit amount. Set to 0 when this is a debit line.
+        linetaxamount:
+          type: number
+          description: >-
+            Pre-calculated tax amount for this line. If `taxAccount` is set but
+            `linetaxamount` is 0 or omitted, the server calculates it
+            automatically.
+        taxAccount:
+          type: integer
+          nullable: true
+          description: Tax chart ID to apply to this line. Set to 0 or null for no tax.
+        memo:
+          type: string
+          nullable: true
+        source:
+          type: string
+          nullable: true
+          description: Source document reference (e.g. bank statement, invoice number).
+        cleared:
+          type: boolean
+          nullable: true
+          description: Bank reconciliation flag. Can be null before reconciliation.
+        project:
+          type: string
+          nullable: true
+          description: Project ID / number linked to this line (returned as string on GET).
+          readOnly: true
+        fx_transaction:
+          type: boolean
+          readOnly: true
+          description: True when this line is part of a foreign-currency transaction.
+      required:
+        - accno
+        - credit
+        - debit
+        - taxAccount
+        - linetaxamount
+
+    # ─── GL line-search (GET /gl/transactions/lines) ─────────────────────────
+
+    TransactionLineItem:
+      type: object
+      description: >-
+        One row returned by `GET /gl/transactions/lines`. Each row represents a
+        single `acc_trans` entry with its parent transaction and account
+        metadata joined in. All fields are read-only.
+      properties:
+        id:
+          type: integer
+          description: Parent transaction ID.
+        transdate:
+          type: string
+          format: date
+        reference:
+          type: string
+        description:
+          type: string
+          nullable: true
+          description: Transaction-level description.
+        files:
+          type: array
+          items:
+            $ref: "#/components/schemas/File"
+          description: >-
+            Attachments tied to this GL transaction (**`reference_id`** = parent
+            id); **`[]`** if none, otherwise same **`File`** shape as **`GET
+            /gl/transactions/{id}`**.
+        name:
+          type: string
+          nullable: true
+          description: Vendor/customer company name (if linked).
+        vcnumber:
+          type: string
+          nullable: true
+          description: Vendor/customer number.
+        address:
+          type: string
+          nullable: true
+        department:
+          type: string
+          nullable: true
+          description: Department in `"Description--id"` format.
+        project_description:
+          type: string
+          nullable: true
+        debit:
+          type: number
+        credit:
+          type: number
+        linetax_account:
+          type: string
+          nullable: true
+          description: Tax account(s) in `"accno--description"` format; comma-separated if
+            multiple.
+        linetaxamount:
+          type: number
+          nullable: true
+        source:
+          type: string
+          nullable: true
+        memo:
+          type: string
+          nullable: true
+        accno:
+          type: string
+          description: Account number for this line.
+        account_description:
+          type: string
+          nullable: true
+        gifi_accno:
+          type: string
+          nullable: true
+        contra:
+          type: string
+          nullable: true
+        created:
+          type: string
+          format: date-time
+          nullable: true
+        updated:
+          type: string
+          format: date-time
+          nullable: true
         amount:
           type: number
-          description: Transaction amount
+          description: Raw signed amount from `acc_trans`.
         type:
           type: string
-          description: Transaction type (gl/ar/ap)
+          description: Transaction type — `gl`, `ar`, or `ap`.
         till:
           type: boolean
-          description: Point of sale flag
+          description: True for point-of-sale transactions.
         invoice:
           type: boolean
-          description: Invoice flag
+          description: True for invoice-type transactions.
+
+    # ─── Sales Invoices ───────────────────────────────────────────────────────
 
     SalesInvoice:
       type: object
+      description: >-
+        Customer **sales invoice** payload — write (POST create / POST update)
+        and read (GET). `readOnly` fields are returned on GET but ignored on
+        write. `discount` on lines is always expressed as a **percentage**
+        (0–100).
+
+        **Attachments (**`files`**, **`File`** / **`FileUploadInline`):** see
+        the **`files`** property below — **`[]`** on GET simply means nothing is
+        stored yet; use JSON data-URI objects or multipart **`files`** parts to
+        upload after save.
+
+        **Automatic numbers:** If **`invNumber`** is omitted or blank on
+        **create**, the server allocates from **`sinumber`** defaults
+        (`number_sequences.sales_invoice` in **`GET /system/companydefaults`**),
+        consistent with **`GET /next_number/ar`**.
+
+        **Payments:** The **`payments`** array records **instant payment lines**
+        posted together with the invoice (e.g. cash received at sale time). Each
+        row is an **`InvoicePayment`**: payment **`date`**, **`amount`**,
+        bank/cash **`account`** (chart accno, e.g. `"1020"`), optional
+        **`source`**, **`memo`**, and **`exchangerate`** (defaults to **`1`** if
+        omitted). The server resolves **`account`** to a chart id and builds the
+        receipt-side postings. **`payments`** may be **`[]`** or omitted for a
+        fully unpaid document. To settle **already-open** invoices later,
+        use **`POST /open_invoices/{vc}`** (`**customer**` for AR) instead of relying on
+        invoice-body **`payments`**. **`GET /arap/payment/{vc}/{id}`**
+        returns a balance summary (**`PaymentInfo`**), not the full payment line
+        list.
       properties:
         id:
           type: integer
           readOnly: true
         customer_id:
           type: integer
-          description: Customer ID
+          description: ID of the customer. Required on write.
         customernumber:
           type: string
           readOnly: true
-          description: Customer number
+          description: Customer number — assigned by the server, not writable.
         invNumber:
           type: string
-          description: Invoice number
+          nullable: true
+          description: >-
+            Sales invoice number. Omit or leave blank on **create** to assign
+            from system defaults (**`sales_invoice`** in **`GET
+            /system/companydefaults`**).
         invDate:
           type: string
           format: date
-          description: Invoice date (YYYY-MM-DD)
+          description: Invoice date (YYYY-MM-DD). Required on write.
         dueDate:
           type: string
           format: date
-          description: Due date (YYYY-MM-DD)
+          description: Payment due date (YYYY-MM-DD). Required on write.
         ordNumber:
           type: string
-          description: Order number
+          nullable: true
         poNumber:
           type: string
-          description: Purchase order number
+          nullable: true
+          description: Customer purchase order number.
         description:
           type: string
+          nullable: true
+          description: Invoice-level description / subject line.
         notes:
           type: string
+          nullable: true
+          description: External notes (visible on printed invoice).
         intnotes:
           type: string
-          description: Internal notes
+          nullable: true
+          description: Internal notes (not printed).
         shippingPoint:
           type: string
+          nullable: true
         shipVia:
           type: string
+          nullable: true
         wayBill:
           type: string
+          nullable: true
         recordAccount:
           type: string
-          description: AR account number
+          description: >-
+            Accounts receivable control account accno (e.g. `"1100"`). Required
+            on write.
         currency:
           type: string
-          description: ISO currency code (e.g. "CHF")
+          minLength: 3
+          maxLength: 3
+          description: ISO currency code (e.g. "CHF"). Required on write. Must be exactly 3 characters; matches **`ar.curr`** **`char(3)`**.
+        till:
+          type: string
+          nullable: true
+          maxLength: 20
+          description: Till / POS label. Matches **`ar.till`** **`varchar(20)`** when set.
         exchangerate:
           type: number
           format: float
           readOnly: true
+          description: Effective exchange rate — resolved by the server from the
+            transaction date.
         dcn:
           type: string
           nullable: true
+          description: Document control number.
         department_id:
           type: integer
           readOnly: true
+          description: Resolved from `department` string during posting.
         paymentmethod_id:
           type: integer
-          readOnly: true
+          nullable: true
+          description: >-
+            **`bank` row id** for Swiss QR / creditor metadata (not the same as
+            cash postings in **`payments`**). Returned on **GET** invoice. May
+            be echoed on **POST**; with no **`payments`** lines the UI often
+            relies on this for QR routing—use **`payments`** (`InvoicePayment`)
+            when you need explicit bank/cash postings on the same request.
         type:
           type: string
-          description: Transaction type (invoice)
+          description: >-
+            Transaction type. Use `"invoice"` for a normal sales invoice,
+            `"credit_invoice"` for a credit note. Required on write.
         taxincluded:
           type: boolean
-          description: Whether tax is included in prices
+          description: >-
+            `true` = line prices already include tax; `false` = tax is added on
+            top. Defaults to `false`.
         lines:
           type: array
           items:
-            $ref: '#/components/schemas/SalesInvoiceLine'
+            $ref: "#/components/schemas/SalesInvoiceLine"
+          description: Invoice line items. Required on write (at least one line).
         shipto:
-          $ref: '#/components/schemas/ShipTo'
+          $ref: "#/components/schemas/ShipTo"
         payments:
           type: array
           items:
-            $ref: '#/components/schemas/InvoicePayment'
+            $ref: "#/components/schemas/InvoicePayment"
+          description: >-
+            **Payment lines** booked with this invoice (bank/cash **`account`**
+            credited for receipts). Omit or use **`[]`** for “invoice only, no
+            settlement”. See **`InvoicePayment`**. For settling **existing**
+            open AR invoices, use **`POST /open_invoices/customer`** (path **`vc`**
+            **`customer`**).
         taxes:
           type: array
           items:
-            $ref: '#/components/schemas/InvoiceTax'
+            $ref: "#/components/schemas/InvoiceTax"
+          description: >-
+            Tax breakdown per tax account. On write, provide to override
+            calculated amounts; omit to let the server calculate from line
+            rates.
         files:
           type: array
           items:
-            $ref: '#/components/schemas/File'
+            $ref: "#/components/schemas/File"
+          description: >-
+            **GET** invoice: list of **`File`** metadata for
+            **`files.reference_id` = invoice `id`**. **`[]`** is normal when no
+            attachments were ever stored.
+
+            **POST** (`application/json`): array of **`FileUploadInline`** to
+            upload after posting. **POST** (**`multipart/form-data`**): omit
+            JSON **`files`**; send one or more parts named **`files`**.
+            Successful save returns **`{ id }`** only — **`GET`** the invoice
+            again for **`files`**.
+
       required:
         - customer_id
         - invDate
         - dueDate
         - currency
+        - recordAccount
         - type
         - lines
 
     SalesInvoiceLine:
       type: object
+      description: >-
+        One line on a sales invoice. `number` (part/service ID) is required on
+        write. All `readOnly` fields are returned on GET but ignored on write.
+        `discount` is always a **percentage** (e.g. `10` = 10 %).
       properties:
         id:
           type: integer
           readOnly: true
+          description: Line record ID — server-assigned.
         number:
           type: integer
-          description: Part/Service ID (used when creating/updating)
+          description: Part or service ID. Required on write.
         partnumber:
           type: string
           readOnly: true
+          description: Part number string — resolved from `number` by the server.
         description:
           type: string
+          description: Line description. Required on write.
         qty:
           type: number
+          description: Quantity. Required on write.
         unit:
           type: string
+          nullable: true
+          maxLength: 10
+          description: Unit of measure. Matches PostgreSQL **`invoice.unit`** **`varchar(10)`**.
         price:
           type: number
+          description: Unit price. Required on write.
         discount:
           type: number
-          description: Discount percentage
+          description: Discount percentage (0–100). E.g. `10` = 10 %.
         lineitemdetail:
           type: boolean
+          description: Show expanded line-item detail on printed invoice.
         itemnotes:
           type: string
+          nullable: true
+        deliverydate:
+          type: string
+          format: date
+          nullable: true
+        ordernumber:
+          type: string
+          nullable: true
+        serialnumber:
+          type: string
+          nullable: true
+        customerponumber:
+          type: string
+          nullable: true
+        project:
+          type: string
+          nullable: true
+          description: Project ID / number linked to this line.
         cost:
           type: number
           readOnly: true
+          description: Cost of goods — server-resolved.
         costvendor:
           type: string
           nullable: true
           readOnly: true
         costvendorid:
           type: integer
-          readOnly: true
-        customerponumber:
-          type: string
-          readOnly: true
-        deliverydate:
-          type: string
-          format: date
-          nullable: true
-          readOnly: true
-        ordernumber:
-          type: string
-          readOnly: true
-        serialnumber:
-          type: string
-          readOnly: true
-        project:
-          type: string
           readOnly: true
         onhand:
           type: number
@@ -432,7 +745,7 @@ components:
           items:
             type: string
           readOnly: true
-          description: Tax account numbers applied to this line
+          description: Tax account numbers applied to this line (e.g. ["22010", "22020"]).
       required:
         - number
         - description
@@ -441,20 +754,1136 @@ components:
 
     ShipTo:
       type: object
+      description: >-
+        Shipping address for the invoice. All fields are optional. **`maxLength`**
+        values match PostgreSQL **`shipto`** columns (`shiptoname`, `shiptoaddress1`, …);
+        **`400`** **`FieldConstraintError`** when exceeded.
       properties:
         name:
+          type: string
+          nullable: true
+          maxLength: 64
+        address1:
+          type: string
+          nullable: true
+          maxLength: 64
+        address2:
+          type: string
+          nullable: true
+          maxLength: 64
+        city:
+          type: string
+          nullable: true
+          maxLength: 64
+        state:
+          type: string
+          nullable: true
+          maxLength: 32
+        zipcode:
+          type: string
+          nullable: true
+          maxLength: 32
+        country:
+          type: string
+          nullable: true
+          maxLength: 32
+        contact:
+          type: string
+          nullable: true
+          maxLength: 64
+        phone:
+          type: string
+          nullable: true
+          maxLength: 20
+        fax:
+          type: string
+          nullable: true
+          maxLength: 20
+        email:
+          type: string
+          nullable: true
+
+    InvoicePayment:
+      type: object
+      description: >-
+        One **payment line** on a **sales invoice** (`SalesInvoice.payments`).
+        Mirrors the server mapping: `datepaid_i` / `paid_i` / `AR_paid_i` (bank
+        accno), `source_i`, `memo_i`, `exchangerate_i`. **`account`** must be a
+        chart accno with a suitable **`AR_paid`** link (e.g. petty cash or
+        bank). **`amount`** is in **invoice currency**.
+      required: [ date, amount, account ]
+      properties:
+        date:
+          type: string
+          format: date
+          description: Payment date (**`YYYY-MM-DD`**). Maps to `datepaid_*`.
+        source:
+          type: string
+          nullable: true
+          description: Source reference (e.g. bank reference, cheque no.).
+        memo:
+          type: string
+          nullable: true
+          description: Memo shown on payment postings.
+        amount:
+          type: number
+          description: Payment amount in invoice currency. Maps to `paid_*`.
+        exchangerate:
+          type: number
+          nullable: true
+          default: 1
+          description: FX rate for this payment when document currency ≠ base; defaults to
+            **1**.
+        account:
+          type: string
+          description: >-
+            Bank or cash chart **accno** (e.g. `"1020"`) on the receipt side.
+
+    InvoiceTax:
+      type: object
+      description: Tax line per tax account on an invoice.
+      properties:
+        accno:
+          type: string
+          description: Tax account number.
+        amount:
+          type: number
+          description: Tax amount in invoice currency.
+        rate:
+          type: number
+          nullable: true
+          description: Tax rate as a decimal (e.g. `0.081` for 8.1 %).
+
+    # ─── Payments ─────────────────────────────────────────────────────────────
+
+    PaymentInfo:
+      type: object
+      description: Summary of payment status for a single invoice.
+      properties:
+        netamount:
+          type: number
+          description: Net invoice amount (excluding tax).
+        paid:
+          type: number
+          description: Total amount already paid.
+        datepaid:
+          type: string
+          format: date
+          nullable: true
+          description: Date of the most recent payment (YYYY-MM-DD).
+        difference:
+          type: number
+          description: Outstanding balance (`netamount - paid`).
+
+    # ─── AR/AP Transactions ───────────────────────────────────────────────────
+
+    ARAPTransactionSummary:
+      type: object
+      description: Single row in the AR/AP transaction list.
+      properties:
+        id:
+          type: integer
+          readOnly: true
+          description: Transaction ID.
+        invnumber:
+          type: string
+          description: Invoice/document number.
+        ordnumber:
+          type: string
+          nullable: true
+          description: Order number.
+        transdate:
+          type: string
+          format: date
+          description: Transaction date (YYYY-MM-DD).
+        duedate:
+          type: string
+          format: date
+          nullable: true
+          description: Payment due date.
+        name:
+          type: string
+          description: Customer or vendor name.
+        description:
+          type: string
+          nullable: true
+          description: Transaction description.
+        amount:
+          type: number
+          description: Total invoice amount (net + tax).
+        netamount:
+          type: number
+          description: Net amount before tax.
+        paid:
+          type: number
+          description: Amount already paid.
+        paymentdiff:
+          type: number
+          description: Outstanding balance (`amount - paid`). Computed server-side.
+          readOnly: true
+        tax:
+          type: number
+          description: Total tax amount.
+        curr:
+          type: string
+          description: Currency code (e.g. CHF, EUR).
+        department:
+          type: string
+          nullable: true
+          description: Department name.
+        employee:
+          type: string
+          nullable: true
+          description: Employee name.
+
+    ARAPTransactionTotals:
+      type: object
+      description: Running totals across all returned transactions.
+      properties:
+        amount:
+          type: number
+        netamount:
+          type: number
+        paid:
+          type: number
+        paymentdiff:
+          type: number
+        tax:
+          type: number
+
+    ARAPTransactionsResponse:
+      type: object
+      description: Response envelope for the transaction list endpoint.
+      properties:
+        transactions:
+          type: array
+          items:
+            $ref: "#/components/schemas/ARAPTransactionSummary"
+        totals:
+          $ref: "#/components/schemas/ARAPTransactionTotals"
+
+    ARAPTransactionLineItem:
+      type: object
+      description: >-
+        A single line in a retrieved AR/AP transaction. Note: in the write body
+        this array is called `lines`, not `lineitems`.
+      properties:
+        accno:
+          type: string
+          description: GL account number for this line.
+        description:
+          type: string
+          description: Line memo / description.
+        amount:
+          type: number
+          description: Line amount (positive for normal transactions).
+        taxAccount:
+          type: string
+          nullable: true
+          description: Tax account number applied to this line.
+        taxAmount:
+          type: number
+          nullable: true
+          description: Calculated tax amount for this line.
+        project:
+          type: integer
+          nullable: true
+          description: Project ID assigned to this line.
+
+    ARAPTransactionPayment:
+      type: object
+      description: >-
+        One **posted payment** leg on a retrieved AR/AP document. Same logical
+        fields as write-body **`ARAPTransactionWritePayment`**: bank/cash
+        **`account`**, **`amount`**, **`date`**, optional **`exchangerate`**,
+        **`source`**, **`memo`**.
+      properties:
+        date:
+          type: string
+          format: date
+          description: Payment date (YYYY-MM-DD).
+        source:
+          type: string
+          nullable: true
+          description: Payment reference / source.
+        memo:
+          type: string
+          nullable: true
+          description: Payment memo.
+        amount:
+          type: number
+          description: Payment amount.
+        exchangerate:
+          type: number
+          nullable: true
+          description: Exchange rate at time of payment.
+        account:
+          type: string
+          description: Bank/cash account number used for this payment.
+
+    ARAPTransactionTax:
+      type: object
+      description: Tax summary entry on an AR/AP transaction.
+      properties:
+        accno:
+          type: string
+          description: Tax account number.
+        amount:
+          type: number
+          description: Tax amount.
+        rate:
+          type: number
+          description: Tax rate (e.g. 0.077 for 7.7%).
+
+    ARAPTransactionDetail:
+      type: object
+      description: >-
+        Full detail of a single AR or AP transaction. Fields
+        `customernumber`/`customer_id` are present for vc=customer;
+        `vendornumber`/`vendor_id` for vc=vendor. **`payments`** lists posted
+        payment entries (date, amount, bank account, FX) — see
+        **`ARAPTransactionPayment`**. This is separate from **`POST
+        /open_invoices/{vc}`** cash batches.
+      properties:
+        id:
+          type: integer
+          readOnly: true
+          description: Transaction ID.
+        type:
+          type: string
+          enum: [ transaction, credit_note, debit_note ]
+          description: >-
+            Document type: `transaction` (normal), `credit_note` (AR only),
+            `debit_note` (AP only).
+        pending:
+          type: string
+          enum: [ "0", "1" ]
+          description: Approval status — `"0"` = approved, `"1"` = pending.
+        customernumber:
+          type: string
+          nullable: true
+          description: Customer number. Present only for vc=customer.
+        customer_id:
+          type: integer
+          nullable: true
+          description: Customer ID. Present only for vc=customer.
+        vendornumber:
+          type: string
+          nullable: true
+          description: Vendor number. Present only for vc=vendor.
+        vendor_id:
+          type: integer
+          nullable: true
+          description: Vendor ID. Present only for vc=vendor.
+        invNumber:
+          type: string
+          description: Invoice/document number.
+        invDate:
+          type: string
+          format: date
+          description: Transaction date (YYYY-MM-DD).
+        dueDate:
+          type: string
+          format: date
+          nullable: true
+          description: Payment due date.
+        executionDate:
+          type: string
+          format: date
+          nullable: true
+          description: Execution date (value date).
+        ordNumber:
+          type: string
+          nullable: true
+          description: Order number.
+        poNumber:
+          type: string
+          nullable: true
+          description: Purchase order number.
+        currency:
+          type: string
+          description: Currency code (e.g. CHF).
+        exchangerate:
+          type: number
+          nullable: true
+          description: Exchange rate against the base currency.
+        department_id:
+          type: integer
+          nullable: true
+          description: Department ID.
+        dcn:
+          type: string
+          nullable: true
+          description: Document control number.
+        description:
+          type: string
+          nullable: true
+          description: Transaction description.
+        notes:
+          type: string
+          nullable: true
+          description: External notes (visible on printed document).
+        intnotes:
+          type: string
+          nullable: true
+          description: Internal notes (not printed).
+        shippingPoint:
+          type: string
+          nullable: true
+        shipVia:
+          type: string
+          nullable: true
+        wayBill:
+          type: string
+          nullable: true
+        recordAccount:
+          type: object
+          nullable: true
+          description: The AR or AP control account for this transaction.
+          properties:
+            accno:
+              type: string
+            description:
+              type: string
+        paymentmethod_id:
+          type: integer
+          nullable: true
+        vc_bank_id:
+          type: integer
+          nullable: true
+          description: Bank account ID of the customer/vendor.
+        lineitems:
+          type: array
+          description: >-
+            Line items. Note: the write body uses the key `lines` (not
+            `lineitems`).
+          items:
+            $ref: "#/components/schemas/ARAPTransactionLineItem"
+        payments:
+          type: array
+          description: >-
+            Payment lines already posted on this document (empty if unpaid). See
+            **`ARAPTransactionPayment`**.
+          items:
+            $ref: "#/components/schemas/ARAPTransactionPayment"
+        taxes:
+          type: array
+          nullable: true
+          description: Tax summary entries. Omitted when no taxes apply.
+          items:
+            $ref: "#/components/schemas/ARAPTransactionTax"
+        taxincluded:
+          type: integer
+          nullable: true
+          enum: [ 0, 1 ]
+          description: >-
+            Present only when `taxes` is non-empty. 1 = amounts in `lineitems`
+            are tax-inclusive.
+        files:
+          type: array
+          items:
+            $ref: "#/components/schemas/File"
+          description: >-
+            **GET:** attachments for this transaction (`files.reference_id` =
+            transaction `id`). **`[]`** means no files row is linked yet — not
+            an error.
+
+    ARAPTransactionWriteLine:
+      type: object
+      description: A line item in the AR/AP transaction write body.
+      required: [ account, amount ]
+      properties:
+        account:
+          type: string
+          description: GL account number for this line (e.g. "4000").
+        description:
+          type: string
+          description: Line memo / description.
+        amount:
+          type: number
+          description: Line amount. Always positive; sign is determined by `type`.
+        taxAccount:
+          type: string
+          nullable: true
+          description: >-
+            Tax account number. When provided without `taxAmount`, the server
+            auto-calculates the tax.
+        taxAmount:
+          type: number
+          nullable: true
+          description: >-
+            Override the auto-calculated tax. Omit to let the server calculate.
+        project:
+          type: string
+          nullable: true
+          description: Project number to assign to this line.
+
+    ARAPTransactionWritePayment:
+      type: object
+      description: >-
+        One **payment line** included in **`POST /arap/transaction/{vc}/{id}`**.
+        Each row creates a paired posting to **`account`** (bank/cash accno)
+        alongside the AR/AP document. Use **`[]`** when there is no immediate
+        settlement. Optional **`exchangerate`** (default **1**). When
+        **`payments`** is empty, you may still pass **`paymentmethod_id`** for
+        QR/bank metadata (see server comment in `index.pl` / Swiss QR).
+      required: [ date, amount, account ]
+      properties:
+        date:
+          type: string
+          format: date
+          description: Payment date (YYYY-MM-DD).
+        amount:
+          type: number
+          description: Payment amount.
+        account:
+          type: string
+          description: Bank/cash account number (e.g. "1020").
+        source:
+          type: string
+          nullable: true
+          description: Payment reference.
+        memo:
+          type: string
+          nullable: true
+        exchangerate:
+          type: number
+          nullable: true
+          description: Exchange rate for foreign-currency payments.
+
+    ARAPTransactionWriteTax:
+      type: object
+      description: >-
+        Manual tax override. Only needed when taxes are not driven by
+        `taxAccount` on the line items.
+      required: [ accno, amount ]
+      properties:
+        accno:
+          type: string
+          description: Tax account number.
+        amount:
+          type: number
+          description: Tax amount.
+
+    ARAPTransactionWrite:
+      type: object
+      description: >-
+        Request body for creating or updating an AR/AP transaction (**`POST
+        /arap/transaction/{vc}/{id}`**). **Important:** currency must be sent as
+        **`curr`** (not **`currency`**).
+
+        **Automatic numbers:** If **`invNumber`** is omitted or blank on
+        **create**, the document number is taken from **`sinumber`** /
+        **`vinumber`** defaults (**`GET /system/companydefaults`** →
+        `number_sequences`), same family as **`GET /next_number/ar`** or **`GET
+        /next_number/ap`**.
+
+        **Payments:** **`payments`** is an array of
+        **`ARAPTransactionWritePayment`** (one row per bank/cash posting with
+        the document). Use **`[]`** if nothing is paid at creation. For later
+        settlement of open invoices, **`POST /open_invoices/{vc}`**. Optional
+        **`paymentmethod_id`** wires Swiss-QR / default **bank** metadata when
+        there are no payment rows.
+
+        **Vendor (AP) workstation approvals (Neo AI plugin):** when the AI
+        plugin loads and **`vc`** is **`vendor`**, **`verify_station_access`**
+        runs **before** **`AA->post_transaction`** whenever the **`stations`**
+        table has **any** rows (**`SELECT * FROM stations`** ignores
+        **`is_active`** — any row, even on an “inactive” station record, turns
+        the subsystem on). It inspects active `station_users` rows
+        (`su.is_active`) joined to active `station_approval_rules`
+        (`sar.is_active`) for the authenticated `profile.id`.
+
+        • Posting `"pending": "0"` (**approved** immediately): require either an
+        `all` rule on the user's matched stations, or — under `amount` rules
+        only — that the document total (sum of `lines[].amount` plus computed
+        taxes from `taxAccount`/`taxAmount` on lines or entries in `taxes`) is
+        **≤** the **maximum** numeric `condition_value` across those `amount`
+        rules (Perl takes the highest threshold).
+
+        • Posting `"pending": "1"` (**or omitting `pending`** — both set
+        internal **pending** truthy before the ledger) **skips denial** branches
+        of **`verify_station_access`** (**`access_denied`**,
+        **`amount_exceeded`**, **`no_amount_rules`** — see
+        **`ARAPTransactionPostErrorResponse`**), so drafts can bypass those
+        gates.
+
+        There is **no** equivalent gate for **`vc`** **`customer`** (AR paths
+        never call **`verify_station_access`**).
+
+        Approval rules/stations are administered via **`/workstations*`**
+        (**Workstations** tag).
+      required: [ type, invDate, lines ]
+      properties:
+        type:
+          type: string
+          enum: [ transaction, credit_note, debit_note ]
+          description: >-
+            Document type: `transaction` (normal AR debit / AP credit),
+            `credit_note` (AR), `debit_note` (AP).
+        customer_id:
+          type: integer
+          nullable: true
+          description: Customer ID. Required for vc=customer.
+        vendor_id:
+          type: integer
+          nullable: true
+          description: Vendor ID. Required for vc=vendor.
+        invNumber:
+          type: string
+          nullable: true
+          description: >-
+            Document number. Omit or blank on **create** to assign from
+            **`sinumber`** / **`vinumber`** defaults (`number_sequences` in
+            **`GET /system/companydefaults`**).
+        invDate:
+          type: string
+          format: date
+          description: Transaction date (YYYY-MM-DD).
+        dueDate:
+          type: string
+          format: date
+          nullable: true
+          description: Payment due date.
+        executionDate:
+          type: string
+          format: date
+          nullable: true
+          description: Value date / execution date.
+        curr:
+          type: string
+          minLength: 3
+          maxLength: 3
+          description: Currency code (e.g. CHF). Note — field name is `curr`, not
+            `currency`. Must be exactly 3 characters when sent. Matches **`ar.curr`**
+            / **`ap.curr`** **`char(3)`**.
+        exchangerate:
+          type: number
+          nullable: true
+          description: Exchange rate against the base currency. Defaults to 1.
+        pending:
+          type: string
+          enum: [ "0", "1" ]
+          description: >-
+            Mirrors SQL-Ledger **`pending`** / approval flag passed into
+            **`AA->post_transaction`**.
+
+            **Critical — defaults:** The server maps **`"pending"`** **`"0"`**
+            to “post **approved**/final” (internal **`$form->{pending}`** falsy
+            ⇒ workstation **`verify_station_access`** gates **apply** for AP
+            when the Neo AI plugin and **`stations`** rows exist). **Any value
+            other than the string **`"0"`** — including omission of the JSON
+            field — resolves to **`pending`** truthy**, i.e. “save pending” and
+            **those denial checks are skipped** (Perl: **`$data->{pending} eq
+            '0' ? undef : 1`**).
+
+            Use **`"0"`** explicitly when you intend an immediate booked AP
+            transaction subject to workstation rules; use **`"1"`** (or omit)
+            for draft/pending payloads that bypass that enforcement.
+        recordAccount:
+          type: string
+          description: AR or AP control account number (e.g. "1100").
+        department:
+          type: string
+          nullable: true
+          description: Department name or ID.
+        ordNumber:
+          type: string
+          nullable: true
+        poNumber:
+          type: string
+          nullable: true
+        dcn:
+          type: string
+          nullable: true
+          description: Document control number.
+        notes:
+          type: string
+          nullable: true
+          description: External notes.
+        intnotes:
+          type: string
+          nullable: true
+          description: Internal notes.
+        paymentmethod_id:
+          type: integer
+          nullable: true
+          description: >-
+            **`bank`** table id for QR / default creditor-debtor routing when
+            **`payments`** has no rows (same pattern as invoice). Does not
+            replace explicit **`payments`** lines.
+        vc_bank_id:
+          type: integer
+          nullable: true
+          description: Bank account ID of the customer/vendor.
+        lines:
+          type: array
+          description: Line items. At least one line is required.
+          items:
+            $ref: "#/components/schemas/ARAPTransactionWriteLine"
+        payments:
+          type: array
+          description: >-
+            **Payment lines** at posting time; each item is
+            **`ARAPTransactionWritePayment`** (`date`, `amount`, `account`
+            accno, …). Default **`[]`**.
+          items:
+            $ref: "#/components/schemas/ARAPTransactionWritePayment"
+        taxes:
+          type: array
+          nullable: true
+          description: Manual tax overrides. Ignored when line-level `taxAccount` is set.
+          items:
+            $ref: "#/components/schemas/ARAPTransactionWriteTax"
+        taxincluded:
+          type: boolean
+          description: True if line amounts already include tax.
+          default: false
+        files:
+          type: array
+          nullable: true
+          items:
+            $ref: "#/components/schemas/File"
+          description: >-
+            **Optional on POST.** JSON body: **`FileUploadInline`** objects
+            (`name` + data-URI **`data`). Multipart: repeated part **`files`**.
+            Persisted via **`FM->upload_files`** after the document posts;
+            unsuccessful upload yields **`file_upload_failed`**. Omit or
+            **`[]`** when attaching nothing.
+
+    # ─── Open Invoices ────────────────────────────────────────────────────────
+
+    OpenInvoiceItem:
+      type: object
+      description: A single open (unpaid or partially paid) invoice returned by the lookup.
+      properties:
+        id:
+          type: integer
+          readOnly: true
+          description: Invoice ID.
+        invnumber:
+          type: string
+          description: Invoice number.
+        transdate:
+          type: string
+          format: date
+          description: Invoice date.
+        duedate:
+          type: string
+          format: date
+          nullable: true
+          description: Payment due date.
+        name:
+          type: string
+          description: Customer or vendor name.
+        netamount:
+          type: number
+          description: Net invoice amount.
+        amount:
+          type: number
+          description: Total invoice amount (including tax).
+        paid:
+          type: number
+          description: Amount already paid.
+        due:
+          type: number
+          description: Outstanding balance.
+        curr:
+          type: string
+          description: Currency code.
+        invoice:
+          type: integer
+          enum: [ 0, 1 ]
+          description: 1 = sales/purchase invoice, 0 = AR/AP transaction.
+
+    # ─── Reference Data ───────────────────────────────────────────────────────
+
+    ChartCategory:
+      type: object
+      description: A reporting category assigned to a chart account.
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        accno:
+          type: string
+          description: Category account number.
+        description:
+          type: string
+
+    ChartAccount:
+      type: object
+      description: A chart of accounts entry.
+      properties:
+        id:
+          type: integer
+          readOnly: true
+          description: Internal account ID.
+        accno:
+          type: string
+          description: Account number.
+        description:
+          type: string
+          description: Account description.
+        charttype:
+          type: string
+          enum: [ A, H ]
+          description: >-
+            Account type: `A` = normal account, `H` = heading (used for grouping
+            only).
+        category:
+          type: string
+          enum: [ A, E, I, L, Q ]
+          description: >-
+            Account category: A = Asset, E = Expense, I = Income, L = Liability,
+            Q = Equity.
+        link:
+          type: string
+          nullable: true
+          description: >-
+            Colon-separated account link tags (e.g. `AR:AR_paid`). Controls
+            which transaction contexts this account appears in.
+        symbol_link:
+          type: string
+          nullable: true
+          maxLength: 128
+          description: Optional symbol / external link (**`chart.symbol_link`** **`varchar(128)`**).
+        gifi_accno:
+          type: string
+          nullable: true
+          description: GIFI account code (Canadian tax reporting).
+        contra:
+          type: integer
+          enum: [ 0, 1 ]
+          description: 1 = contra account (reverses normal debit/credit sign).
+        taxkey:
+          type: integer
+          nullable: true
+          description: Tax key used for VAT reporting.
+        taxaccounts:
+          type: string
+          nullable: true
+          description: Space-separated list of tax account numbers linked to this account.
+        categories:
+          type: array
+          readOnly: true
+          items:
+            $ref: "#/components/schemas/ChartCategory"
+
+    ChartAccountDetail:
+      allOf:
+        - $ref: "#/components/schemas/ChartAccount"
+        - type: object
+          description: >-
+            Extended chart account with usage flags and rate information.
+            Returned only by `GET /system/chart/accounts/{id}`.
+          properties:
+            has_transactions:
+              type: boolean
+              readOnly: true
+              description: True if this account has posted transactions.
+            has_defaults:
+              type: boolean
+              readOnly: true
+              description: True if this account is referenced in system defaults.
+            has_parts:
+              type: boolean
+              readOnly: true
+              description: True if this account is linked to any part/service.
+
+    Currency:
+      type: object
+      description: A currency supported by the system.
+      properties:
+        curr:
+          type: string
+          description: ISO 4217 currency code (e.g. CHF, EUR, USD).
+          example: CHF
+        prec:
+          type: integer
+          description: Number of decimal places for this currency (0–10).
+          example: 2
+        rn:
+          type: integer
+          readOnly: true
+          description: Sort order. The currency with `rn=1` is the base currency.
+
+    Department:
+      type: object
+      description: An organisational department used to classify transactions.
+      properties:
+        id:
+          type: integer
+          readOnly: true
+          description: Department ID.
+        description:
+          type: string
+          description: Department name.
+        role:
+          type: string
+          enum: [ C, P ]
+          maxLength: 1
+          nullable: true
+          description: >-
+            Department role: `C` = cost centre, `P` = profit centre. PostgreSQL **`department.role`** is **`char(1)`**; at most one character when sent.
+        rn:
+          type: integer
+          readOnly: true
+          description: Sort order.
+        transactions:
+          type: integer
+          enum: [ 0, 1 ]
+          readOnly: true
+          description: 1 if this department has associated transactions.
+
+    TaxRate:
+      type: object
+      description: A tax rate configured in the system.
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        chart_id:
+          type: integer
+          description: ID of the linked chart account.
+        accno:
+          type: string
+          description: Tax account number.
+        description:
+          type: string
+          description: Tax account description.
+        rate:
+          type: number
+          description: Tax rate as a decimal (e.g. 0.077 for 7.7%).
+        taxnumber:
+          type: string
+          nullable: true
+          description: Tax registration number.
+        validto:
+          type: string
+          format: date
+          nullable: true
+          description: Date after which this rate expires (YYYY-MM-DD).
+
+    # ─── Items ────────────────────────────────────────────────────────────────
+
+    ItemSummary:
+      type: object
+      description: >-
+        A catalogue line as returned from search or GET. The **`POST
+        /ic/items/{id}`** route persists **services** only (no stock / assembly
+        / kit payloads).
+      properties:
+        id:
+          type: integer
+          readOnly: true
+          description: Part ID.
+        partnumber:
+          type: string
+          description: Part or service number.
+        description:
+          type: string
+          description: Part or service description.
+        unit:
+          type: string
+          nullable: true
+          description: Unit of measure.
+        sellprice:
+          type: number
+          description: Default selling price.
+        listprice:
+          type: number
+          nullable: true
+          description: List / catalogue price.
+        onhand:
+          type: number
+          description: Current stock quantity (0 for services).
+        taxaccounts:
+          type: string
+          nullable: true
+          description: Space-separated tax account numbers applied to this item.
+        income_accno:
+          type: string
+          nullable: true
+          description: Income account number (e.g. **`3400`** Dienstleistungserlöse on
+            Swiss charts).
+        expense_accno:
+          type: string
+          nullable: true
+          description: Expense / purchase account when used (link includes
+            **`IC_expense`**).
+        inventory_accno:
+          type: string
+          nullable: true
+          description: >-
+            Inventory (**empty** on services). **`POST /ic/items/{id}`** only
+            supports service lines.
+
+    ItemServiceUpsert:
+      type: object
+      description: >-
+        **Upsert body for catalogue services only** (`POST /ic/items/{id}`, id **`0`** = create).
+        **Income:** **`income_accno`** — chart **`accno`** string; row’s **`link`** must include **`IC_income`**.
+        **Expense:** **`expense_accno`** — chart **`accno`** string; row’s **`link`** must include **`IC_expense`**.
+        Both are **required on create**. On **update**, you may omit either field if the stored row already has that account.
+        Do not send **`income_accno_id`**, **`IC_income`**, or other alternate shapes — they are rejected.
+        Omit **`partnumber`** on create to assign from **`number_sequences.part`** in **`GET /system/companydefaults`**.
+      additionalProperties: true
+      properties:
+        partnumber:
+          type: string
+          nullable: true
+          description: >-
+            Catalogue/service number. Omit or leave blank on **create** to
+            allocate from **`number_sequences.part.pattern`** in **`GET
+            /system/companydefaults`**.
+        description:
+          type: string
+        unit:
+          type: string
+          maxLength: 5
+          description: Unit abbreviation. Matches **`parts.unit`** **`varchar(5)`** in PostgreSQL.
+        sellprice:
+          type: number
+        listprice:
+          type: number
+        notes:
+          type: string
+        income_accno:
+          type: string
+          example: "3400"
+          description: >-
+            **Required on create** (or omit on update if already stored). Chart **`accno`** for service revenue;
+            **`link`** must include **`IC_income`**.
+        expense_accno:
+          type: string
+          example: "4999"
+          description: >-
+            **Required on create** (or omit on update if already stored). Chart **`accno`** for expense / COGS;
+            **`link`** must include **`IC_expense`**.
+        taxaccounts:
+          description: >-
+            Swiss output VAT (e.g. **`34970`** MWST). Space-separated chart
+            accnos or a JSON array; internal form uses `IC_tax_<accno>` checkbox
+            fields.
+          oneOf:
+            - type: string
+              example: "34970"
+            - type: array
+              items:
+                type: string
+              example: [ "34970" ]
+        inventory_accno:
+          type: string
+          writeOnly: true
+          deprecated: true
+          description: Rejected for this route.
+        inventory_accno_id:
+          type: integer
+          writeOnly: true
+          deprecated: true
+          description: Rejected for this route.
+        assembly:
+          type: boolean
+          description: Rejected — assemblies are out of scope for this endpoint.
+
+    NextNumberResponse:
+      type: object
+      description: >-
+        The next value for a **`module`** counter. Patterns and lock flags are
+        edited under **`GET /system/companydefaults`** (`number_sequences`).
+        **Note:** catalogue **part/service** numbers use the same **defaults**
+        but are **not** reserved through this endpoint — they are allocated when
+        saving **`POST /ic/items/{id}`** if **`partnumber`** is empty.
+      properties:
+        number:
+          type: string
+          description: >-
+            The next sequential number (e.g. "AR-2025-042"). Calling this
+            endpoint increments the counter.
+          readOnly: true
+
+    CompanyDefaults:
+      type: object
+      description: >-
+        Company configuration returned by **`GET /system/companydefaults`** and
+        accepted (partially) by **`POST /system/companydefaults`**. Top-level
+        sections mirror the API: **`company_info`** (name, address, contact,
+        identifiers), **`settings`** (precision, rounding, reporting,
+        `line_tax`, etc.), **`account_defaults`** (numeric chart ids for
+        IC/AR/AP/etc.), **`number_sequences`** (pattern + `locked` booleans per
+        sequence), **`all_accounts`** (reference pick list), and **`smtp`**
+        (host metadata; password via separate server flow). Omitted POST
+        sections are left unchanged.
+      additionalProperties: true
+      properties:
+        company_info:
+          type: object
+          additionalProperties: true
+        settings:
+          type: object
+          additionalProperties: true
+        account_defaults:
+          type: object
+          additionalProperties: true
+        number_sequences:
+          type: object
+          additionalProperties: true
+          description: >-
+            Templates such as `gl_reference`, `sales_invoice`, `customer`,
+            `vendor`, `part`, etc. Each sub-key usually has `pattern` (string)
+            and `locked` (boolean) where supported.
+        all_accounts:
+          type: array
+          items: { type: object, additionalProperties: true }
+        smtp:
+          type: object
+          additionalProperties: true
+
+    CompanyDefaultsSaveResult:
+      type: object
+      description: Successful save from **`POST /system/companydefaults`**.
+      properties:
+        status:
+          type: string
+          enum: [ success ]
+        message:
+          type: string
+
+    # ─── Customers & Vendors ───────────────────────────────────────────────────
+
+    VcParty:
+      type: object
+      description: >-
+        A **customer** or **vendor** record as returned by SQL-Ledger CT and
+        address/contact joins. The payload is large and includes many optional,
+        dataset-specific fields (`taxaccounts`, `arap_accno_id`,
+        `discount_accno_id`, etc.). Use `additionalProperties` tolerance in
+        clients.
+      additionalProperties: true
+      properties:
+        id:
+          type: integer
+          readOnly: true
+          description: Party ID.
+        name:
+          type: string
+          description: Display name.
+        customernumber:
+          type: string
+          nullable: true
+          description: Customer number. Present when `vc` is `customer`.
+        vendornumber:
+          type: string
+          nullable: true
+          description: Vendor number. Present when `vc` is `vendor`.
+        notes:
           type: string
           nullable: true
         address1:
           type: string
           nullable: true
-        address2:
-          type: string
-          nullable: true
         city:
-          type: string
-          nullable: true
-        state:
           type: string
           nullable: true
         zipcode:
@@ -463,67 +1892,816 @@ components:
         country:
           type: string
           nullable: true
+        firstname:
+          type: string
+          nullable: true
+        lastname:
+          type: string
+          nullable: true
         contact:
+          type: string
+          nullable: true
+        discount:
+          type: number
+          nullable: true
+          description: Discount rate (internal fraction, not a percentage).
+      example:
+        id: 1001
+        name: "Example AG"
+        customernumber: "C-001"
+        address1: "Musterstrasse 1"
+        city: "Zürich"
+        zipcode: "8000"
+        country: "CH"
+
+    VcPartyWrite:
+      type: object
+      description: >-
+        Create or update payload for **`POST /arap/{vc}`**. **Create** — omit
+        **`id`**. **Update** — include **`id`**. JSON keys are merged with
+        **`exists`** semantics (you can set fields to **`0`**, **`false`**, or
+        empty string when supported by the ledger). **`vcnumber`** is sent as
+        `vcnumber`; the server maps it to **`customernumber`** or
+        **`vendornumber`**. Omit **`vcnumber`** or leave it blank on **create**
+        to assign the next customer/vendor number from defaults (**`GET
+        /system/companydefaults`** → **`number_sequences.customer`** /
+        **`vendor`**, same family as **`GET /next_number/customer`** /
+        **`vendor`**).
+
+        **String limits:** `maxLength` values mirror PostgreSQL **`customer`**
+        / **`vendor`**, **`address`**, and **`contact`** columns; the API returns
+        **`400`** with **`FieldConstraintError`** before **`CT->save`** when a
+        value is too long (or **`curr`** / ISO currency is not exactly 3
+        characters when provided).
+      additionalProperties: true
+      required:
+        - name
+        - address1
+        - city
+        - zipcode
+        - country
+      properties:
+        id:
+          type: integer
+          nullable: true
+          description: Set when updating an existing party.
+        vcnumber:
+          type: string
+          nullable: true
+          maxLength: 32
+          description: >-
+            Customer or vendor number. Omit on **create** to auto-assign from
+            system defaults.
+        customernumber:
+          type: string
+          nullable: true
+          maxLength: 32
+        vendornumber:
+          type: string
+          nullable: true
+          maxLength: 32
+        name:
+          type: string
+          maxLength: 128
+        contact:
+          type: string
+          nullable: true
+          maxLength: 64
+        firstname:
+          type: string
+          nullable: true
+          maxLength: 32
+        lastname:
+          type: string
+          nullable: true
+          maxLength: 32
+        salutation:
+          type: string
+          nullable: true
+          maxLength: 32
+        contacttitle:
+          type: string
+          nullable: true
+          maxLength: 32
+        occupation:
+          type: string
+          nullable: true
+          maxLength: 32
+        typeofcontact:
+          type: string
+          nullable: true
+          maxLength: 20
+        mobile:
+          type: string
+          nullable: true
+          maxLength: 20
+        gender:
+          type: string
+          nullable: true
+          maxLength: 1
+        notes:
+          type: string
+          nullable: true
+          description: Use this field for searchable integration markers (e.g. `APItest …`).
+        address1:
+          type: string
+          maxLength: 64
+        address2:
+          type: string
+          nullable: true
+          maxLength: 64
+        street:
+          type: string
+          nullable: true
+          maxLength: 255
+        post_office:
+          type: string
+          nullable: true
+          maxLength: 64
+        city:
+          type: string
+          maxLength: 64
+        state:
+          type: string
+          nullable: true
+          maxLength: 32
+        zipcode:
+          type: string
+          maxLength: 32
+        country:
+          type: string
+          maxLength: 32
+        email:
           type: string
           nullable: true
         phone:
           type: string
           nullable: true
+          maxLength: 20
         fax:
           type: string
           nullable: true
+          maxLength: 20
+        taxnumber:
+          type: string
+          nullable: true
+          maxLength: 32
+        sic_code:
+          type: string
+          nullable: true
+          maxLength: 6
+        language_code:
+          type: string
+          nullable: true
+          maxLength: 6
+        curr:
+          type: string
+          nullable: true
+          maxLength: 3
+          description: >-
+            ISO 4217 code; when non-empty must be exactly 3 characters (matches
+            **`customer.curr`** / **`vendor.curr`** **`char(3)`**).
+        iban:
+          type: string
+          nullable: true
+          maxLength: 34
+        bic:
+          type: string
+          nullable: true
+          maxLength: 11
+        gifi_accno:
+          type: string
+          nullable: true
+          maxLength: 30
+
+    StationApprovalRule:
+      type: object
+      description: >-
+        One **`station_approval_rules`** row. **Reads** return DB columns as-is;
+        **`all`** rows are persisted with **`operator`** **`eq`**,
+        **`condition_value`** **`{}`**, **`condition_field`** **`null`**
+        regardless of inputs.
+      additionalProperties: true
+      properties:
+        id:
+          type: integer
+        station_id:
+          type: integer
+        rule_type:
+          type: string
+          enum: [ all, amount ]
+          description: >-
+            **`all`** — unlimited approval ceiling for matching users
+            (**`verify_station_access`**). **`amount`** — capped by
+            **`condition_value`** (total document + tax totals compared on
+            post).
+        operator:
+          type: string
+          description: >-
+            Stored **`eq`** or **`lte`**. Writes accept only the combinations
+            enforced in **`StationRuleInput`** — **`amount`** must use **`lte`**
+            only.
+        condition_field:
+          type: string
+          nullable: true
+          description: >-
+            Persisted column; **currently not evaluated** when computing station
+            limits (**`verify_station_access`** reads **`condition_value`** only
+            for **`amount`** rules).
+        condition_value:
+          nullable: true
+          description: >-
+            **`amount`** — numeric threshold as plain string (must match
+            **`/^\d+(\.\d+)?$/`** on write). May be decoded as JSON in DB;
+            runtime code treats non-object values as numeric. **`all`** — stored
+            as **`{}`** (string **`{}`** in DB).
+        is_active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    StationUserAssignment:
+      type: object
+      description: Junction row **`station_users`** plus central **`profile`** email
+        (as returned).
+      properties:
+        id:
+          type: integer
+          description: Primary key on **`station_users`**.
+        profile_id:
+          type: integer
+        is_active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_by:
+          type: integer
+          nullable: true
         email:
           type: string
+        user_active:
+          type: boolean
+      additionalProperties: true
+
+    WorkstationStation:
+      type: object
+      description: One **`stations`** row plus nested **`users`** and **`rules`** when
+        returned from list/detail.
+      additionalProperties: true
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        is_default:
+          type: integer
+          nullable: true
+        station_type:
+          type: string
+          nullable: true
+          description: >-
+            Arbitrary string label used for unique **routing slots** among
+            **active** stations — at most **one** active station may use a given
+            non-null type (server returns **409** on conflict). Plugin code
+            references include **`default`** (legacy via **`is_default`**), and
+            **`receipt`** (AI bank/ingest flows in **`neo_ai_plugin/AI.pl`**).
+            You may define other types for your own automation; they are not
+            validated against a fixed enum in SQL.
+        workflow_order:
+          type: integer
+          nullable: true
+        is_active:
+          type: boolean
+          nullable: true
+        user_count:
+          type: integer
+          nullable: true
+          description: Included on **`GET /workstations`** list response.
+        users:
+          type: array
+          items:
+            $ref: "#/components/schemas/StationUserAssignment"
+        rules:
+          type: array
+          items:
+            $ref: "#/components/schemas/StationApprovalRule"
+
+    WorkstationWrite:
+      type: object
+      description: >-
+        Create/update JSON for **`POST /workstations`** (create) or
+        **`PUT`**/**`POST /workstations/{id}`** (update).
+
+        **`is_default` (deprecated):** when **`true`** and **`station_type`** is
+        omitted, the server sets **`station_type`** to **`default`**.
+
+        **`is_active` trap:** the handler uses Perl truthiness — **omitted** or
+        **`false`** becomes **`0`** (inactive). To keep a station active on
+        update you must send **`"is_active": true`** explicitly.
+
+        **`station_type` uniqueness:** assigning a non-empty type clears that
+        type from any other **active** station first.
+
+        **`rules`:** include the key only when you want to replace rules (see
+        **Workstations** tag). Use **`[]`** to clear all rules. Omit the
+        property on update to leave existing rules unchanged.
+      required: [ name ]
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        station_type:
+          type: string
+          nullable: true
+        is_default:
+          type: boolean
+          nullable: true
+          deprecated: true
+          description: When **`true`** without **`station_type`**, sets **`station_type`**
+            **`default`**.
+        workflow_order:
+          type: integer
+          nullable: true
+        is_active:
+          type: boolean
+          nullable: true
+          default: true
+          description: >-
+            **Required `true` on updates** if you intend the station to stay
+            active — omitted means inactive (**`0`**).
+        rules:
+          type: array
+          nullable: true
+          description: Replace-all semantics when the property is present (see
+            **Workstations** tag).
+          items:
+            $ref: "#/components/schemas/StationRuleInput"
+
+    StationRuleInput:
+      type: object
+      description: >-
+        **Write body** for one approval rule. Use exactly one shape — **`all`**
+        or **`amount`** — per array element. Server validates **`rule_type`**,
+        **`operator`**, and (for **`amount`**) **`condition_value`** per
+        **`process_approval_rules`** in **`WorkStations.pl`**.
+
+        **Errors (400, `error` string):** missing
+        **`rule_type`**/**`operator`**; **`rule_type`** not
+        **`all`**/**`amount`**; **`amount`** with **`operator`** ≠ **`lte`**;
+        **`amount`** without numeric **`condition_value`** matching
+        **`/^\d+(\.\d+)?$/`** (integer or decimal string, no sign).
+      oneOf:
+        - $ref: "#/components/schemas/StationRuleInputAll"
+        - $ref: "#/components/schemas/StationRuleInputAmount"
+
+    StationRuleInputAll:
+      type: object
+      description: >-
+        **Unlimited** approval for users linked to this station (subject to
+        **`verify_station_access`**). The server **overwrites** whatever you
+        send: **`operator`** → **`eq`**, **`condition_value`** → **`{}`**,
+        **`condition_field`** → **`null`** before insert.
+      required: [ rule_type, operator ]
+      properties:
+        rule_type:
+          type: string
+          enum: [ all ]
+        operator:
+          type: string
+          enum: [ eq ]
+          description: Must be **`eq`** (server normalizes **`all`** rules to **`eq`**
+            anyway).
+        condition_field:
+          type: string
+          nullable: true
+          description: Ignored — cleared on persist.
+        condition_value:
+          type: string
+          nullable: true
+          description: Ignored — stored as **`{}`**.
+
+    StationRuleInputAmount:
+      type: object
+      description: >-
+        **Capped approval:** user may approve non-pending vendor/AP postings
+        whose computed total (line amounts plus tax lines from
+        **`taxaccounts`**) is **≤** **`condition_value`**. **`operator`**
+        supported in code **only**: **`lte`**.
+      required: [ rule_type, operator, condition_value ]
+      properties:
+        rule_type:
+          type: string
+          enum: [ amount ]
+        operator:
+          type: string
+          enum: [ lte ]
+        condition_field:
+          type: string
+          nullable: true
+          description: Stored in DB; **not used** when evaluating the ceiling in
+            **`verify_station_access`**.
+        condition_value:
+          type: string
+          pattern: "^[0-9]+(\\.[0-9]+)?$"
+          description: >-
+            Threshold as a non-negative numeric **string** (e.g. **`"10000"`**,
+            **`"10000.50"`**). Leading **`+`/`-`** rejected.
+
+    InvoiceTransferRequest:
+      type: object
+      description: >-
+        **`invoice_id`** is **`ap.id`** (vendor/AP invoice). **`to_station_id`**
+        must reference an **active** **`stations`** row. **`transfer_notes`**
+        persisted on **`invoice_station_history`** (optional, default empty
+        string).
+      required: [ invoice_id, to_station_id ]
+      properties:
+        invoice_id:
+          type: integer
+        to_station_id:
+          type: integer
+        transfer_notes:
+          type: string
           nullable: true
 
-    InvoicePayment:
+    InvoiceTransferResponse:
       type: object
+      description: >-
+        **`from_station_id`** is **`null`** when the invoice had **no**
+        **`invoice_station`** row before the transfer (first assignment —
+        history still records the move).
       properties:
-        date:
+        message:
+          type: string
+        invoice_number:
+          type: string
+        from_station_id:
+          type: integer
+          nullable: true
+        to_station_id:
+          type: integer
+        transferred_by:
+          type: integer
+        transferred_at:
+          type: string
+
+    ARAPTransactionPostErrorResponse:
+      type: object
+      description: >-
+        **`POST /arap/transaction/{vc}/{id}`** failure envelope (see
+        **`index.pl`** routing). **`message`** is always present; **`code`** is
+        set only for categorized failures (**`drive_response`** accompanies
+        **`file_upload_failed`**).
+      required: [ message ]
+      properties:
+        message:
+          type: string
+        code:
+          type: string
+          nullable: true
+          description: >-
+            **`access_denied`** (**403**) — workstation subsystem armed
+            (**vendor AP**, **`stations`** table non-empty), **`"pending":
+            "0"`**, yet **no** joined **`station_users`** +
+            **`station_approval_rules`** rows for this **`profile`**
+            (**`su.is_active`** / **`sar.is_active`** as in
+            **`verify_station_access`**).
+
+            **`amount_exceeded`** (**400**) — **`"pending": "0"`**, user has
+            **`amount`**-type rules; document total (**sum of
+            **`lines[].amount`** plus taxes merged from line-level tax or
+            **`taxes`**) exceeds the **max** numeric **`condition_value`**
+            observed on those **`amount`** rules (**`message`** repeats
+            amounts).
+
+            **`no_amount_rules`** (**400**) — user lines up with stations but
+            the rule set carries **neither** **`all`** nor **`amount`** entries
+            the code recognizes; bypass by posting **`"pending": "1"`** / omit
+            **`pending`**.
+
+            **`post_transaction_failed`** (**500**) — **`AA->post_transaction`**
+            raised.
+
+            **`file_upload_failed`** (**400**) — **`FM->upload_files`** failed
+            after the document posted (**`drive_response`** when present).
+        drive_response:
+          description: Present for some cloud upload failures.
+          nullable: true
+
+    PluginLegacyErrorResponse:
+      type: object
+      description: >-
+        Legacy plugin JSON errors use an **`error`** property instead of
+        **`message`**.
+      properties:
+        error:
+          type: string
+      required:
+        - error
+
+    WorkstationAssignUserBody:
+      type: object
+      description: >-
+        **`profile_id`** is the central authentication **`profile.id`** (matches
+        **`id`** from **`GET /workstations/users`**).
+      required: [ profile_id ]
+      properties:
+        profile_id:
+          type: integer
+
+    WorkflowPendingInvoice:
+      type: object
+      description: >-
+        Unapproved (**`approved = false`**) **`ap`** invoice joined for the
+        operator inbox (**`GET /workstations/user/stations`**). **`amount`** /
+        **`netamount`** may be scaled by **`exchangerate`** (`round_amount` in
+        plugin). Rows include many extra vendor/bank/address/`files` columns —
+        schema allows **`additionalProperties`**.
+      additionalProperties: true
+      properties:
+        id:
+          type: integer
+        invnumber:
+          type: string
+        transdate:
           type: string
           format: date
-        source:
+        vendor_id:
+          type: integer
+          nullable: true
+        vendor_name:
           type: string
-        memo:
-          type: string
+          nullable: true
         amount:
-          type: number
-        account:
-          type: string
-          description: Payment account number
-
-    InvoiceTax:
-      type: object
-      properties:
-        accno:
-          type: string
-          description: Tax account number
-        amount:
-          type: number
-        rate:
           type: number
           nullable: true
-          description: Tax rate (e.g. 0.081 for 8.1%)
-
-    PaymentInfo:
-      type: object
-      properties:
         netamount:
           type: number
-          description: Net amount of the invoice
-        paid:
-          type: number
-          description: Amount already paid
-        datepaid:
-          type: string
-          format: date
           nullable: true
-          description: Date of last payment (YYYY-MM-DD)
-        difference:
-          type: number
-          description: Outstanding balance (netamount - paid)
+        curr:
+          type: string
+        files:
+          type: array
+          items:
+            $ref: "#/components/schemas/File"
+
+    WorkstationOperatorInbox:
+      type: object
+      properties:
+        stations:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+            properties:
+              id:
+                type: integer
+              name:
+                type: string
+              invoices:
+                type: array
+                items:
+                  $ref: "#/components/schemas/WorkflowPendingInvoice"
+              is_unassigned:
+                type: boolean
+                nullable: true
+
+    DatasetProfileRow:
+      type: object
+      description: Central **`profile`** with dataset access — response of **`GET
+        /workstations/users`**.
+      additionalProperties: true
+      properties:
+        id:
+          type: integer
+        email:
+          type: string
+        active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+          nullable: true
+        access_level:
+          type: string
+          nullable: true
+        access_created_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    WorkstationMutationEnvelope:
+      type: object
+      properties:
+        message:
+          type: string
+        id:
+          type: integer
 
 paths:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Customers & Vendors (counterparties)
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  /arap/list/{vc}:
+    get:
+      tags:
+        - Customers & Vendors
+      summary: Lightweight picker list — all customers or vendors
+      description: >-
+        Returns `{ id, name, customernumber|vendornumber, …, label }` rows for
+        transaction/invoice dropdowns. Requires at least one of the listed
+        transaction/draft permissions per `vc`.
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - in: path
+          name: vc
+          required: true
+          schema:
+            type: string
+            enum: [ customer, vendor ]
+      responses:
+        "200":
+          description: Array of party summary rows for pickers.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: true
+
+  /arap/list/{vc}/{id}:
+    get:
+      tags:
+        - Customers & Vendors
+      summary: Picker detail — one party with address and bank accounts
+      description: >-
+        Returns a compact party object including `label`, `full_address`, and
+        `bank_accounts` for use in AR/AP forms.
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - in: path
+          name: vc
+          required: true
+          schema:
+            type: string
+            enum: [ customer, vendor ]
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Party detail for pickers.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VcParty"
+        "400":
+          description: Invalid `vc`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /arap/{vc}:
+    get:
+      tags:
+        - Customers & Vendors
+      summary: Search customers or vendors
+      description: >-
+        Full-text-style search backed by SQL-Ledger CT search. Filter by passing
+        any combination of supported query keys (examples: `name`, `notes`,
+        `customernumber` / `vendornumber`, `city`, `email`, …). When no rows
+        match, returns an empty JSON array `[]`.
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - in: path
+          name: vc
+          required: true
+          schema:
+            type: string
+            enum: [ customer, vendor ]
+        - in: query
+          name: name
+          schema: { type: string }
+          description: Partial match on party name (`ILIKE`).
+        - in: query
+          name: notes
+          schema: { type: string }
+        - in: query
+          name: city
+          schema: { type: string }
+        - in: query
+          name: email
+          schema: { type: string }
+      responses:
+        "200":
+          description: Matching parties (possibly empty array).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/VcParty"
+    post:
+      tags:
+        - Customers & Vendors
+      summary: Create or update a customer or vendor
+      description: >-
+        Persists a party via **`CT->save`**. **Create** — omit **`id`**.
+        **Update** — include **`id`**; only fields present in the JSON are
+        copied (with **`exists`** semantics for scalars). Omit **`vcnumber`** on
+        **create** to assign the next number from system defaults (**`GET
+        /system/companydefaults`**, or reserve explicitly with **`GET
+        /next_number/customer`** / **`vendor`**). Requires **`customer.add`** or
+        **`vendor.add`**.
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - in: path
+          name: vc
+          required: true
+          schema:
+            type: string
+            enum: [ customer, vendor ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VcPartyWrite"
+            example:
+              vcnumber: "C-API-001"
+              name: "Example AG"
+              notes: "APItest May 2026"
+              address1: "Teststr 1"
+              city: "Zürich"
+              zipcode: "8000"
+              country: "CH"
+      responses:
+        "200":
+          description: Full form object after save (includes generated `id` on create).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VcParty"
+        "400":
+          description: >-
+            Request body string exceeds a PostgreSQL column limit for **`customer`**
+            / **`vendor`**, **`address`**, or **`contact`** ( **`FieldConstraintError`** ).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FieldConstraintError"
+
+  /arap/{vc}/{id}:
+    get:
+      tags:
+        - Customers & Vendors
+      summary: Load one customer or vendor for editing
+      description: >-
+        Returns the full party form with AR/AP account links, tax assignments,
+        resolved email templates (`message`, `reminder_*_message`), and
+        `discount` expressed as a **percentage** (multiplied by 100 from the
+        internal stored value for the API response). Requires `customer.add` /
+        `vendor.add` (same as the UI edit form).
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - in: path
+          name: vc
+          required: true
+          schema:
+            type: string
+            enum: [ customer, vendor ]
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Party master record for editing.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VcParty"
+
   /auth/validate_api:
     post:
       tags:
@@ -532,8 +2710,8 @@ paths:
       security:
         - ApiKeyAuth: []
       responses:
-        '200':
-          description: API key is valid and active
+        "200":
+          description: API key is valid and active.
           content:
             application/json:
               schema:
@@ -543,45 +2721,45 @@ paths:
                     type: integer
               example:
                 success: 1
-        '401':
-          description: Invalid or inactive API key
+        "400":
+          description: Missing `X-API-Key` header.
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  message:
-                    type: string
+                $ref: "#/components/schemas/ErrorResponse"
               example:
-                message: "Invalid or inactive API key"
-        '404':
-          description: Unknown dataset
+                message: "Missing X-API-Key header"
+        "401":
+          description: Invalid, inactive, or expired API key.
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  message:
-                    type: string
+                $ref: "#/components/schemas/ErrorResponse"
               example:
-                message: "Unknown dataset: neoledger"
-        '403':
-          description: API key has no access to dataset
+                message: "Invalid, inactive, or expired API key"
+        "403":
+          description: API key has no access to this dataset.
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  message:
-                    type: string
+                $ref: "#/components/schemas/ErrorResponse"
               example:
                 message: "API key has no access to dataset neoledger"
+        "404":
+          description: Dataset not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                message: "Unknown dataset: neoledger"
 
   /gl/transactions/lines:
     get:
       tags:
         - General Ledger
-      summary: Retrieve a list of general-ledger transaction lines based on query filters
+      summary: Retrieve a list of general-ledger transaction lines based on query
+        filters
       security:
         - ApiKeyAuth: []
       parameters:
@@ -675,7 +2853,7 @@ paths:
           name: department
           schema:
             type: string
-          description: 'Format: "description--id"'
+          description: "Format: \"description--id\""
         - in: query
           name: project_id
           schema:
@@ -687,20 +2865,31 @@ paths:
             type: string
           description: Vendor/Customer number
       responses:
-        '200':
-          description: A list of transaction lines matching the criteria
+        "404":
+          description: No lines matched the filters.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                message: "No transactions found"
+        "200":
+          description: A list of transaction lines matching the criteria.
           content:
             application/json:
               schema:
                 type: array
                 items:
-                  $ref: '#/components/schemas/TransactionLineItem'
+                  $ref: "#/components/schemas/TransactionLineItem"
               example:
                 - id: 10334
                   transdate: "2024-12-01"
                   reference: "X-4"
                   description: "Initial capital contribution"
-                  files: []
+                  files:
+                    - id: 5001
+                      name: "bank-receipt.pdf"
+                      link: "https://apineo.hashimsaqib.com/client/neoledger/files/8f3e2a1c9b0d7654"
                   name: "Client Corp"
                   vcnumber: "CUST-001"
                   address: "123 Main St"
@@ -764,14 +2953,20 @@ paths:
             type: string
           description: Filter transactions that involve this account number
       responses:
-        '200':
-          description: A list of general ledger transactions matching the criteria
+        "200":
+          description: >-
+            Array of GL transactions matching the filters. Uses the same
+            `GeneralLedger` schema. Note: `ts`, `employeeId`, `department`,
+            `offset_accno`, `offset_tax_accno`, `pending`, and `taxincluded` are
+            absent from list items — they only appear on `GET
+            /gl/transactions/{id}`. With only `datefrom` (no `dateto`), the
+            filter matches that exact date only.
           content:
             application/json:
               schema:
                 type: array
                 items:
-                  $ref: '#/components/schemas/GeneralLedger'
+                  $ref: "#/components/schemas/GeneralLedger"
               example:
                 - id: 10334
                   reference: "X-4"
@@ -781,69 +2976,43 @@ paths:
                   curr: "CHF"
                   department_id: 1
                   approved: 1
-                  ts: "2024-12-01T10:15:30Z"
                   exchangeRate: 1.0
                   created: "2024-12-01T10:15:30Z"
                   updated: "2024-12-01T10:15:30Z"
+                  files:
+                    - id: 5001
+                      name: "bank-receipt.pdf"
+                      link: "https://apineo.hashimsaqib.com/client/neoledger/files/8f3e2a1c9b0d7654"
                   lines:
                     - accno: "1020"
-                      description: "Bank Account"
                       debit: 5000000
                       credit: 0
                       memo: "Capital deposit"
                       source: "Bank Statement"
                       taxAccount: 10025
-                      taxAmount: 374653.09
+                      linetaxamount: 374653.09
                       fx_transaction: false
                       cleared: false
                     - accno: "2800"
-                      description: "Capital Stock"
                       debit: 0
                       credit: 5000000
                       memo: "Share issuance"
                       source: "Share Certificate"
                       taxAccount: 10026
-                      taxAmount: 2500000
+                      linetaxamount: 2500000
                       fx_transaction: false
                       cleared: false
-                - id: 10335
-                  reference: "X-5"
-                  transdate: "2024-12-02"
-                  description: "Office supplies purchase"
-                  notes: ""
-                  curr: "CHF"
-                  department_id: 2
-                  approved: 1
-                  ts: "2024-12-02T14:30:00Z"
-                  exchangeRate: 1.0
-                  created: "2024-12-02T14:30:00Z"
-                  updated: "2024-12-02T14:30:00Z"
-                  lines:
-                    - accno: "5100"
-                      description: "Office Supplies"
-                      debit: 1200
-                      credit: 0
-                      memo: "Printer paper and pens"
-                      source: "Invoice #12345"
-                      taxAccount: 10025
-                      taxAmount: 90
-                      fx_transaction: false
-                      cleared: false
-                    - accno: "1020"
-                      description: "Bank Account"
-                      debit: 0
-                      credit: 1200
-                      memo: "Payment for supplies"
-                      source: "Bank Transfer"
-                      taxAccount: 10026
-                      taxAmount: 0
-                      fx_transaction: false
-                      cleared: true
 
     post:
       tags:
         - General Ledger
       summary: Create a new general-ledger transaction
+      description: >-
+        Requires **`gl.add`**. Request may be JSON or **`multipart/form-data`**
+        (same as update). On **create**, omit **`reference`** (or leave blank)
+        to assign from **`glnumber`** defaults (**`GET
+        /system/companydefaults`**, or **`GET /next_number/gl`** to reserve a
+        value first).
       security:
         - ApiKeyAuth: []
       requestBody:
@@ -851,7 +3020,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/GeneralLedger'
+              $ref: "#/components/schemas/GeneralLedger"
             example:
               curr: "CHF"
               exchangeRate: 1
@@ -876,54 +3045,36 @@ paths:
                   cleared: false
                   taxAccount: 10026
                   linetaxamount: 2500000
-              files: []
+              files:
+                - name: "capital-proof.pdf"
+                  data: "data:application/pdf;base64,JVBERi0xLjQKJeLjz9MK"
       responses:
-        '201':
-          description: Transaction created
+        "201":
+          description: Transaction created successfully.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/GeneralLedger'
+                $ref: "#/components/schemas/IdResponse"
               example:
-                approved: 1
-                curr: "CHF"
-                department: null
-                department_id: 0
-                description: ""
-                employeeId: null
-                exchangeRate: 1.0
                 id: 10334
-                lines:
-                  - accno: "1020"
-                    cleared: null
-                    credit: 0
-                    debit: 5000000
-                    fx_transaction: false
-                    linetaxamount: 374653.098982424
-                    memo: ""
-                    project: null
-                    source: ""
-                    taxAccount: 10025
-                  - accno: "2800"
-                    cleared: null
-                    credit: 5000000
-                    debit: 0
-                    fx_transaction: false
-                    linetaxamount: 2500000
-                    memo: ""
-                    project: null
-                    source: ""
-                    taxAccount: 10026
-                notes: ""
-                reference: "X-4"
-                transdate: "2024-12-01"
-                ts: "2024-12-01T10:15:30Z"
+        "400":
+          description: >-
+            Validation or balance error (debits ≠ credits, unknown account), or
+            **`FieldConstraintError`** when **`curr`** is not exactly 3 characters.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/FieldConstraintError"
+                  - $ref: "#/components/schemas/ErrorResponse"
 
   /gl/transactions/{id}:
     get:
       tags:
         - General Ledger
       summary: Retrieve a general-ledger transaction by ID
+      description: Requires `gl.add` permission (stricter than `gl.transactions` used
+        for list and line search).
       security:
         - ApiKeyAuth: []
       parameters:
@@ -934,12 +3085,12 @@ paths:
           required: true
           description: The transaction ID
       responses:
-        '200':
+        "200":
           description: The requested transaction
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/GeneralLedger'
+                $ref: "#/components/schemas/GeneralLedger"
               example:
                 approved: 1
                 curr: "CHF"
@@ -949,6 +3100,10 @@ paths:
                 employeeId: null
                 exchangeRate: 1.0
                 id: 10334
+                offset_accno: null
+                offset_tax_accno: null
+                pending: 0
+                taxincluded: 0
                 lines:
                   - accno: "1020"
                     cleared: null
@@ -960,7 +3115,6 @@ paths:
                     project: null
                     source: ""
                     taxAccount: 10025
-                    id: 1
                   - accno: "2800"
                     cleared: null
                     credit: 5000000
@@ -971,27 +3125,28 @@ paths:
                     project: null
                     source: ""
                     taxAccount: 10026
-                    id: 2
                 notes: ""
                 reference: "X-4"
                 transdate: "2024-12-01"
                 ts: "2024-12-01T10:15:30Z"
-        '404':
-          description: Transaction not found
+                files:
+                  - id: 5001
+                    name: "bank-receipt.pdf"
+                    link: "https://apineo.hashimsaqib.com/client/neoledger/files/8f3e2a1c9b0d7654"
+        "404":
+          description: Transaction not found.
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  error:
-                    type: string
+                $ref: "#/components/schemas/ErrorResponse"
               example:
-                error: "Transaction with ID 12345 not found."
+                message: "The requested GL transaction was not found."
 
-    post:
+    put:
       tags:
         - General Ledger
       summary: Update an existing general-ledger transaction
+      description: Use **PUT** (not POST) with the transaction id in the path.
       security:
         - ApiKeyAuth: []
       parameters:
@@ -1006,7 +3161,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/GeneralLedger'
+              $ref: "#/components/schemas/GeneralLedger"
             example:
               curr: "CHF"
               exchangeRate: 1
@@ -1031,65 +3186,41 @@ paths:
                   cleared: false
                   taxAccount: 10026
                   linetaxamount: 2750000
-              files: []
+              files:
+                - name: "amended-scan.pdf"
+                  data: "data:application/pdf;base64,JVBERi0xLjQKJeLjz9MK"
       responses:
-        '200':
-          description: Transaction updated
+        "200":
+          description: Transaction updated successfully.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/GeneralLedger'
+                $ref: "#/components/schemas/IdResponse"
               example:
-                approved: 1
-                curr: "CHF"
-                department: null
-                department_id: 0
-                description: "Updated transaction description"
-                employeeId: null
-                exchangeRate: 1.0
                 id: 10334
-                lines:
-                  - accno: "1020"
-                    cleared: null
-                    credit: 0
-                    debit: 5500000
-                    fx_transaction: false
-                    linetaxamount: 411118.408880066
-                    memo: "Updated memo"
-                    project: null
-                    source: "Updated source"
-                    taxAccount: 10025
-                  - accno: "2800"
-                    cleared: null
-                    credit: 5500000
-                    debit: 0
-                    fx_transaction: false
-                    linetaxamount: 2750000
-                    memo: "Updated memo"
-                    project: null
-                    source: "Updated source"
-                    taxAccount: 10026
-                notes: "Updated notes"
-                reference: "X-4-UPDATED"
-                transdate: "2024-12-01"
-                ts: "2024-12-01T10:15:30Z"
-        '404':
-          description: Transaction not found
+        "400":
+          description: >-
+            Validation or balance error, or **`FieldConstraintError`** when **`curr`**
+            is not exactly 3 characters.
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  error:
-                    type: string
+                oneOf:
+                  - $ref: "#/components/schemas/FieldConstraintError"
+                  - $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Transaction not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
               example:
-                error: "Transaction with ID 12345 not found."
+                message: "Transaction with ID 12345 not found."
 
-  /arap/invoice/customer/{id}:
-    get:
+    delete:
       tags:
-        - Customers
-      summary: Retrieve a sales invoice by ID
+        - General Ledger
+      summary: Delete a general-ledger transaction
       security:
         - ApiKeyAuth: []
       parameters:
@@ -1098,14 +3229,55 @@ paths:
           schema:
             type: integer
           required: true
-          description: The sales invoice ID
+          description: The transaction ID to delete.
       responses:
-        '200':
+        "204":
+          description: Transaction deleted. No response body.
+        "404":
+          description: Transaction not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                message: "Transaction with ID 12345 not found."
+
+  /arap/invoice/{vc}/{id}:
+    get:
+      tags:
+        - Customers
+      summary: Retrieve an AR or AP invoice by ID
+      description: >-
+        Returns full invoice JSON: line items, **`payments`**, tax summary,
+        ship-to, and files. **`vc`** is **`customer`** (AR / sales invoice,
+        **`SalesInvoice`** shape) or **`vendor`** (AP / purchase invoice — same
+        overall structure with vendor fields). **`GET /arap/payment/{vc}/{id}`**
+        exposes aggregate paid/datepaid; **`POST /open_invoices/{vc}`** posts
+        cash against open invoices in bulk (separate from inline **`payments`**
+        on save).
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - in: path
+          name: vc
+          schema:
+            type: string
+            enum: [ customer, vendor ]
+          required: true
+          description: AR (**customer**) or AP (**vendor**) invoice module.
+        - in: path
+          name: id
+          schema:
+            type: integer
+          required: true
+          description: Invoice document id (`ar.id` or `ap.id`).
+      responses:
+        "200":
           description: The requested sales invoice
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/SalesInvoice'
+                $ref: "#/components/schemas/SalesInvoice"
               example:
                 id: 10322
                 customer_id: 10319
@@ -1152,7 +3324,7 @@ paths:
                     netweight: null
                     volume: null
                     package: null
-                    taxaccounts: ["22010", "22020", "22030"]
+                    taxaccounts: [ "22010", "22020", "22030" ]
                   - id: 10321
                     partnumber: "ART-2"
                     description: "Web Hosting Services"
@@ -1175,7 +3347,7 @@ paths:
                     netweight: null
                     volume: null
                     package: null
-                    taxaccounts: ["22010"]
+                    taxaccounts: [ "22010" ]
                 shipto:
                   name: null
                   address1: null
@@ -1199,196 +3371,22 @@ paths:
                   - accno: "22030"
                     amount: 13.0
                     rate: null
-                files: []
-        '404':
-          description: Sales invoice not found
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  error:
-                    type: string
-              example:
-                error: "Sales invoice with ID 12345 not found."
-
+                files:
+                  - id: 5010
+                    name: "signed-order.pdf"
+                    link: "https://apineo.hashimsaqib.com/client/neoledger/files/ar-inv-5010abcd"
     post:
       tags:
         - Customers
-      summary: Update an existing sales invoice
-      security:
-        - ApiKeyAuth: []
-      parameters:
-        - in: path
-          name: id
-          schema:
-            type: integer
-          required: true
-          description: The sales invoice ID to update
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/SalesInvoice'
-            example:
-              customer_id: 10319
-              shippingPoint: ""
-              shipVia: ""
-              wayBill: ""
-              description: ""
-              notes: ""
-              intnotes: ""
-              invNumber: ""
-              ordNumber: ""
-              invDate: "2025-12-18"
-              dueDate: "2025-12-18"
-              poNumber: ""
-              recordAccount: "1100"
-              currency: "CHF"
-              dcn: ""
-              type: "invoice"
-              lines:
-                - number: 10320
-                  description: "Web Development Services"
-                  qty: 1
-                  unit: ""
-                  price: 500
-                  discount: 0
-                  lineitemdetail: false
-                  itemnotes: ""
-                - number: 10321
-                  description: "Web Hosting Services"
-                  qty: 1
-                  unit: ""
-                  price: 500
-                  discount: 0
-                  lineitemdetail: false
-                  itemnotes: ""
-              shipto: {}
-              payments:
-                - date: "2025-12-18"
-                  source: ""
-                  memo: ""
-                  amount: 0
-                  account: "1000"
-              taxes:
-                - accno: "22010"
-                  amount: 81
-                  rate: 0.081
-                - accno: "22020"
-                  amount: 19
-                  rate: 0.038
-                - accno: "22030"
-                  amount: 13
-                  rate: 0.026
-              taxincluded: false
-              files: []
-      responses:
-        '200':
-          description: Sales invoice updated successfully
-          content:
-            application/json:
-              schema:
-                type: integer
-                description: The updated invoice ID
-              example: 10322
-        '404':
-          description: Sales invoice not found
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  error:
-                    type: string
-              example:
-                error: "Sales invoice with ID 12345 not found."
-
-  /arap/invoice/customer:
-    post:
-      tags:
-        - Customers
-      summary: Create a new sales invoice
-      security:
-        - ApiKeyAuth: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/SalesInvoice'
-            example:
-              customer_id: 10319
-              shippingPoint: ""
-              shipVia: ""
-              wayBill: ""
-              description: ""
-              notes: ""
-              intnotes: ""
-              invNumber: ""
-              ordNumber: ""
-              invDate: "2025-12-18"
-              dueDate: "2025-12-18"
-              poNumber: ""
-              recordAccount: "1100"
-              currency: "CHF"
-              dcn: ""
-              type: "invoice"
-              lines:
-                - number: 10320
-                  description: "Web Development Services"
-                  qty: 1
-                  unit: ""
-                  price: 500
-                  discount: 0
-                  lineitemdetail: false
-                  itemnotes: ""
-                - number: 10321
-                  description: "Web Hosting Services"
-                  qty: 1
-                  unit: ""
-                  price: 500
-                  discount: 0
-                  lineitemdetail: false
-                  itemnotes: ""
-              shipto: {}
-              payments:
-                - date: "2025-12-18"
-                  source: ""
-                  memo: ""
-                  amount: 0
-                  account: "1000"
-              taxes:
-                - accno: "22010"
-                  amount: 81
-                  rate: 0.081
-                - accno: "22020"
-                  amount: 19
-                  rate: 0.038
-                - accno: "22030"
-                  amount: 13
-                  rate: 0.026
-              taxincluded: false
-              files: []
-      responses:
-        '201':
-          description: Sales invoice created successfully
-          content:
-            application/json:
-              schema:
-                type: integer
-                description: The new invoice ID
-              example: 10322
-
-  /arap/payment/{vc}/{id}:
-    get:
-      tags:
-        - Payments
-      summary: Retrieve payment information for an invoice
-      description: |
-        Returns payment status for an invoice from AR (customer) or AP (vendor) table.
-        Use `vc=customer` for sales invoices (AR) or `vc=vendor` for purchase invoices (AP).
+      summary: Update an existing AR or AP invoice
+      description: >-
+        Request body may be `application/json` or `multipart/form-data` (same
+        handler as create). **`payments`** on the body carries **payment lines**
+        (`date`, `amount`, bank **`account`** accno; schema
+        **`InvoicePayment`**). Use **`[]`** if updating without changing
+        payments. **`paymentmethod_id`** selects default bank/QR routing when
+        **`payments`** is empty. For allocating cash to several invoices at
+        once, use **`POST /open_invoices/{vc}`** instead.
       security:
         - ApiKeyAuth: []
       parameters:
@@ -1396,7 +3394,240 @@ paths:
           name: vc
           schema:
             type: string
-            enum: [customer, vendor]
+            enum: [ customer, vendor ]
+          required: true
+          description: AR (**customer**) or AP (**vendor**).
+        - in: path
+          name: id
+          schema:
+            type: integer
+          required: true
+          description: Invoice id to update.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SalesInvoice"
+            example:
+              customer_id: 10319
+              shippingPoint: ""
+              shipVia: ""
+              wayBill: ""
+              description: ""
+              notes: ""
+              intnotes: ""
+              invNumber: ""
+              ordNumber: ""
+              invDate: "2025-12-18"
+              dueDate: "2025-12-18"
+              poNumber: ""
+              recordAccount: "1100"
+              currency: "CHF"
+              dcn: ""
+              type: "invoice"
+              lines:
+                - number: 10320
+                  description: "Web Development Services"
+                  qty: 1
+                  unit: ""
+                  price: 500
+                  discount: 0
+                  lineitemdetail: false
+                  itemnotes: ""
+                - number: 10321
+                  description: "Web Hosting Services"
+                  qty: 1
+                  unit: ""
+                  price: 500
+                  discount: 0
+                  lineitemdetail: false
+                  itemnotes: ""
+              shipto: {}
+              payments:
+                - date: "2025-12-18"
+                  source: ""
+                  memo: ""
+                  amount: 0
+                  account: "1000"
+              taxes:
+                - accno: "22010"
+                  amount: 81
+                  rate: 0.081
+                - accno: "22020"
+                  amount: 19
+                  rate: 0.038
+                - accno: "22030"
+                  amount: 13
+                  rate: 0.026
+              taxincluded: false
+              files:
+                - name: "delivery-note.pdf"
+                  data: "data:application/pdf;base64,JVBERi0xLjQKJeLjz9MK"
+      responses:
+        "200":
+          description: Invoice saved successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IdResponse"
+              example:
+                id: 10322
+        "400":
+          description: >-
+            **`FieldConstraintError`** — e.g. **`currency`** not 3 characters,
+            **`till`** over 20 characters, **`shipto.*`** over column limits,
+            **`lines[n].unit`** over 10 characters.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FieldConstraintError"
+    delete:
+      tags:
+        - Customers
+      summary: Delete an AR or AP invoice
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - in: path
+          name: vc
+          schema:
+            type: string
+            enum: [ customer, vendor ]
+          required: true
+          description: AR (**customer**) or AP (**vendor**).
+        - in: path
+          name: id
+          schema:
+            type: integer
+          required: true
+          description: Invoice id to delete.
+      responses:
+        "204":
+          description: Invoice deleted. No response body.
+
+  /arap/invoice/{vc}:
+    post:
+      tags:
+        - Customers
+      summary: Create a new AR or AP invoice
+      description: >-
+        Request body may be `application/json` or `multipart/form-data`.
+        Response is **200** with **`{ "id": … }`**. Use path **`vc`**
+        **`customer`** for AR sales invoices or **`vendor`** for AP purchase
+        invoices. Omit **`invNumber`** (or send empty string) on **create** to
+        assign from number-sequence defaults — see **`GET /system/companydefaults`**
+        (`sales_invoice` / vendor invoice patterns) or **`GET /next_number/ar`**
+        Optionally include **`payments`** (**`InvoicePayment`** rows). Omit or send **`payments: []`** for an unpaid document.
+        **`paymentmethod_id`** applies when there are no payment rows. Bulk
+        settlement uses **`POST /open_invoices/{vc}`**.
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - in: path
+          name: vc
+          schema:
+            type: string
+            enum: [ customer, vendor ]
+          required: true
+          description: AR (**customer**) or AP (**vendor**) invoice create.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SalesInvoice"
+            example:
+              customer_id: 10319
+              shippingPoint: ""
+              shipVia: ""
+              wayBill: ""
+              description: ""
+              notes: ""
+              intnotes: ""
+              invNumber: ""
+              ordNumber: ""
+              invDate: "2025-12-18"
+              dueDate: "2025-12-18"
+              poNumber: ""
+              recordAccount: "1100"
+              currency: "CHF"
+              dcn: ""
+              type: "invoice"
+              lines:
+                - number: 10320
+                  description: "Web Development Services"
+                  qty: 1
+                  unit: ""
+                  price: 500
+                  discount: 0
+                  lineitemdetail: false
+                  itemnotes: ""
+                - number: 10321
+                  description: "Web Hosting Services"
+                  qty: 1
+                  unit: ""
+                  price: 500
+                  discount: 0
+                  lineitemdetail: false
+                  itemnotes: ""
+              shipto: {}
+              payments:
+                - date: "2025-12-18"
+                  source: ""
+                  memo: ""
+                  amount: 0
+                  account: "1000"
+              taxes:
+                - accno: "22010"
+                  amount: 81
+                  rate: 0.081
+                - accno: "22020"
+                  amount: 19
+                  rate: 0.038
+                - accno: "22030"
+                  amount: 13
+                  rate: 0.026
+              taxincluded: false
+              files:
+                - name: "delivery-note.pdf"
+                  data: "data:application/pdf;base64,JVBERi0xLjQKJeLjz9MK"
+      responses:
+        "200":
+          description: Invoice created successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IdResponse"
+              example:
+                id: 10322
+        "400":
+          description: >-
+            Validation (**`message`** only): **`currency`** not 3 characters,
+            **`till`** over 20 characters, **`shipto.*`** over column limits,
+            **`lines[n].unit`** over 10 characters — same rules as **`POST
+            /arap/invoice/{vc}/{id}`** (update).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FieldConstraintError"
+
+  /arap/payment/{vc}/{id}:
+    get:
+      tags:
+        - Payments
+      summary: Retrieve payment information for an invoice
+      description: |
+        Returns payment status for an invoice in the AR/AP module.
+        Use `vc=customer` for sales invoices.
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - in: path
+          name: vc
+          schema:
+            type: string
+            enum: [ customer, vendor ]
           required: true
           description: Type of entity - "customer" for AR or "vendor" for AP
         - in: path
@@ -1406,36 +3637,1671 @@ paths:
           required: true
           description: The invoice ID
       responses:
-        '200':
+        "200":
           description: Payment information for the invoice
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/PaymentInfo'
+                $ref: "#/components/schemas/PaymentInfo"
               example:
                 netamount: 1000.00
                 paid: 250.00
                 datepaid: "2025-12-18"
                 difference: 750.00
-        '400':
-          description: Invalid vc parameter
+        "400":
+          description: Invalid `vc` parameter (must be `customer` or `vendor`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                message: "Invalid vc parameter. Must be 'customer' or 'vendor'."
+        "404":
+          description: Invoice not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                message: "Invoice with ID 12345 not found."
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # AR/AP TRANSACTIONS (non-invoice)
+  # ───────────────────────────────────────────────────────────────────────────
+
+  /arap/transactions/{vc}:
+    get:
+      tags:
+        - AR/AP Transactions
+      summary: List AR or AP transactions
+      description: >-
+        Returns a filtered, pageable list of AR (customer) or AP (vendor)
+        transactions with running totals across all returned rows. All query
+        parameters are optional filters.
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - in: path
+          name: vc
+          required: true
+          schema:
+            type: string
+            enum: [ customer, vendor ]
+          description: Entity type — `customer` for AR, `vendor` for AP.
+        - in: query
+          name: transdatefrom
+          schema: { type: string, format: date }
+          description: Filter transactions from this date (YYYY-MM-DD inclusive).
+        - in: query
+          name: transdateto
+          schema: { type: string, format: date }
+          description: Filter transactions up to this date (YYYY-MM-DD inclusive).
+        - in: query
+          name: invnumber
+          schema: { type: string }
+          description: Filter by invoice/document number (partial match).
+        - in: query
+          name: ordnumber
+          schema: { type: string }
+          description: Filter by order number.
+        - in: query
+          name: ponumber
+          schema: { type: string }
+          description: Filter by purchase order number.
+        - in: query
+          name: description
+          schema: { type: string }
+          description: Filter by description (partial match).
+        - in: query
+          name: notes
+          schema: { type: string }
+          description: Filter by notes.
+        - in: query
+          name: source
+          schema: { type: string }
+          description: Filter by source reference.
+        - in: query
+          name: employee
+          schema: { type: string }
+          description: Filter by employee.
+        - in: query
+          name: department
+          schema: { type: string }
+          description: Filter by department.
+        - in: query
+          name: vc_id
+          schema: { type: integer }
+          description: Filter by customer or vendor ID (supports comma-separated values).
+        - in: query
+          name: outstanding
+          schema: { type: integer, enum: [ 0, 1 ] }
+          description: 1 = only include outstanding (partially/fully unpaid) transactions.
+        - in: query
+          name: open
+          schema: { type: integer, enum: [ 0, 1 ] }
+          description: 1 = include open transactions.
+        - in: query
+          name: closed
+          schema: { type: integer, enum: [ 0, 1 ] }
+          description: 1 = include fully paid transactions.
+        - in: query
+          name: onhold
+          schema: { type: integer, enum: [ 0, 1 ] }
+          description: 1 = include on-hold transactions.
+      responses:
+        "200":
+          description: Filtered transaction list with totals.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ARAPTransactionsResponse"
+              example:
+                transactions:
+                  - id: 101
+                    invnumber: "AR-2025-001"
+                    transdate: "2025-11-01"
+                    duedate: "2025-11-30"
+                    name: "ACME Corp"
+                    amount: 1180.00
+                    netamount: 1000.00
+                    paid: 0.00
+                    paymentdiff: 1180.00
+                    tax: 180.00
+                    curr: "CHF"
+                totals:
+                  amount: 1180.00
+                  netamount: 1000.00
+                  paid: 0.00
+                  paymentdiff: 1180.00
+                  tax: 180.00
+        "400":
+          description: Invalid `vc` value or malformed date filter.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                message: "Invalid date format for transdatefrom. Use YYYY-MM-DD."
+        "404":
+          description: No transactions match the supplied filters.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                message: "No transactions found"
+
+  /arap/transaction/{vc}/{id}:
+    get:
+      tags:
+        - AR/AP Transactions
+      summary: Get a single AR or AP transaction
+      description: >-
+        Returns full detail of one AR (customer) or AP (vendor) transaction,
+        including line items, recorded payments, tax summary, and attached
+        files. The `type` field identifies `transaction`, `credit_note` (AR), or
+        `debit_note` (AP).
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - in: path
+          name: vc
+          required: true
+          schema:
+            type: string
+            enum: [ customer, vendor ]
+          description: Entity type — `customer` for AR, `vendor` for AP.
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+          description: Transaction ID.
+      responses:
+        "200":
+          description: Full transaction detail.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ARAPTransactionDetail"
+              example:
+                id: 101
+                type: "transaction"
+                pending: "0"
+                customernumber: "C-001"
+                customer_id: 5
+                invNumber: "AR-2025-001"
+                invDate: "2025-11-01"
+                dueDate: "2025-11-30"
+                currency: "CHF"
+                exchangerate: 1
+                recordAccount: { accno: "1100", description: "Accounts Receivable" }
+                lineitems:
+                  - accno: "4000"
+                    description: "Consulting"
+                    amount: 1000.00
+                    taxAccount: "2200"
+                    taxAmount: 77.00
+                payments: []
+                files:
+                  - id: 5020
+                    name: "contract-appendix.pdf"
+                    link: "https://apineo.hashimsaqib.com/client/neoledger/files/ar-txn-5020abcd"
+    post:
+      tags:
+        - AR/AP Transactions
+      summary: Create or update an AR or AP transaction
+      description: >-
+        Creates a new transaction when **`{id}`** is omitted, or updates an
+        existing transaction when **`{id}`** is provided.
+
+        Accepts **`application/json`** or **`multipart/form-data`** (for file
+        attachments).
+
+        **Key naming:** currency must be **`curr`** in the request body
+        (**`currency`** on responses).
+
+        **`type`:** **`transaction`**, **`credit_note`** (AR only),
+        **`debit_note`** (AP only).
+
+        **Document number:** omit **`invNumber`** on **create** for defaults
+        (**`sinumber`/`vinumber`** — **`GET /system/companydefaults`**, **`GET
+        /next_number/ar`** / **`ap`**).
+
+        **Payments / files:** see **`ARAPTransactionWrite`**,
+        **`ARAPTransactionWritePayment`**, **`FileUploadInline`**.
+
+        **Vendor (AP) approval / workstation gate:** when **Neo AI plugin** is
+        on and **`vc`** is **`vendor`**, and the **`stations`** table has any
+        row (including inactive station records — see
+        **`ARAPTransactionWrite`**), **`verify_station_access`** runs before
+        posting **only on the approved path** (**`"pending": "0"`**). Drafts
+        (**`"1"`** or omit **`pending`**) skip the deny branches. Errors:
+        **`access_denied`** (**403**), **`amount_exceeded`** /
+        **`no_amount_rules`** (**400**). See
+        **`ARAPTransactionPostErrorResponse`**. AR (**`customer`**) has no
+        equivalent.
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - in: path
+          name: vc
+          required: true
+          schema:
+            type: string
+            enum: [ customer, vendor ]
+          description: Entity type.
+        - in: path
+          name: id
+          required: false
+          schema:
+            type: integer
+          description: Transaction ID for updates. Omit to create.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ARAPTransactionWrite"
+            example:
+              type: "transaction"
+              customer_id: 5
+              invDate: "2025-11-01"
+              dueDate: "2025-11-30"
+              curr: "CHF"
+              pending: "0"
+              recordAccount: "1100"
+              lines:
+                - account: "4000"
+                  description: "Consulting"
+                  amount: 1000.00
+                  taxAccount: "2200"
+              payments: []
+              files:
+                - name: "supporting-doc.pdf"
+                  data: "data:application/pdf;base64,JVBERi0xLjQKJeLjz9MK"
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/ARAPTransactionWrite"
+      responses:
+        "200":
+          description: Transaction saved. Returns the transaction ID.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IdResponse"
+              example:
+                id: 101
+        "400":
+          description: >-
+            **`FieldConstraintError`** when **`curr`** is present and not exactly 3
+            characters; otherwise **`amount_exceeded`**, **`no_amount_rules`**,
+            **`file_upload_failed`**, malformed body, … (**`ARAPTransactionPostErrorResponse`**).
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/FieldConstraintError"
+                  - $ref: "#/components/schemas/ARAPTransactionPostErrorResponse"
+              examples:
+                field_length:
+                  summary: Invalid ISO currency length on **`curr`**
+                  value:
+                    message: 'The field "curr" must be exactly 3 characters.'
+                    code: field_length_invalid
+                    field: curr
+                    expected_length: 3
+                amount_exceeded:
+                  summary: Vendor AP exceeds workstation **`amount`** rule
+                  value:
+                    message: "Transaction amount (15000) exceeds allowed limit (10000)"
+                    code: amount_exceeded
+                no_amount_rules:
+                  summary: User lacks **`all`** and **`amount`** rules on assigned stations
+                  value:
+                    message: "No amount approval rules found for user stations"
+                    code: no_amount_rules
+                file_upload_failed:
+                  summary: Post succeeded but **`FM->upload_files`** failed
+                  value:
+                    message: "Failed to upload attachment: ..."
+                    code: file_upload_failed
+        "403":
+          description: >-
+            access_denied — vendor AP path with workstations armed, approved
+            post (`pending` "0"), but caller has no usable station+approval-rule
+            membership.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ARAPTransactionPostErrorResponse"
+              example:
+                message: "No station access permissions for this user"
+                code: access_denied
+        "500":
+          description: >-
+            post_transaction_failed (`code` in body) or unexpected server fault.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ARAPTransactionPostErrorResponse"
+              example:
+                message: "Failed to post transaction: ..."
+                code: post_transaction_failed
+    delete:
+      tags:
+        - AR/AP Transactions
+      summary: Delete an AR or AP transaction
+      description: Permanently deletes a transaction and its line items.
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - in: path
+          name: vc
+          required: true
+          schema:
+            type: string
+            enum: [ customer, vendor ]
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+          description: Transaction ID to delete.
+      responses:
+        "204":
+          description: Transaction deleted. No response body.
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # OPEN INVOICES
+  # ───────────────────────────────────────────────────────────────────────────
+
+  /open_invoices/{vc}:
+    get:
+      tags:
+        - Payments
+      summary: List open (unpaid) invoices
+      description: >-
+        Returns open or partially paid invoices for **`vc`**. This document
+        describes the **`customer`** (sales invoice / cash receipts) case.
+        Requires **`cash.receipts`** when **`vc`** is **`customer`**.
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - in: path
+          name: vc
+          required: true
+          schema:
+            type: string
+            enum: [ customer, vendor ]
+          description: Entity type.
+        - in: query
+          name: customer_id
+          schema: { type: integer }
+          description: Filter by customer ID (use for vc=customer).
+        - in: query
+          name: vendor_id
+          schema: { type: integer }
+          description: Filter by vendor ID (use for vc=vendor).
+        - in: query
+          name: currency
+          schema: { type: string }
+          description: Filter by currency code.
+        - in: query
+          name: fromdate
+          schema: { type: string, format: date }
+          description: Filter invoices from this date.
+        - in: query
+          name: todate
+          schema: { type: string, format: date }
+          description: Filter invoices up to this date.
+        - in: query
+          name: duedatefrom
+          schema: { type: string, format: date }
+          description: Filter by due date from.
+        - in: query
+          name: duedateto
+          schema: { type: string, format: date }
+          description: Filter by due date to.
+        - in: query
+          name: department
+          schema: { type: string }
+          description: Filter by department.
+        - in: query
+          name: paymentmethod
+          schema: { type: string }
+          description: Filter by payment method.
+      responses:
+        "200":
+          description: Array of open invoice summaries (empty array if none found).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/OpenInvoiceItem"
+              example:
+                - id: 101
+                  invnumber: "AR-2025-001"
+                  transdate: "2025-11-01"
+                  duedate: "2025-11-30"
+                  name: "ACME Corp"
+                  netamount: 1000.00
+                  amount: 1077.00
+                  paid: 0.00
+                  due: 1077.00
+                  curr: "CHF"
+                  invoice: 1
+        "400":
+          description: Invalid `vc` parameter.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                message: "Invalid vc parameter. Must be customer or vendor"
+    post:
+      tags:
+        - Payments
+      summary: Post cash receipts against open invoices
+      description: >-
+        Posts one or more payments against open invoices (**`customer`**
+        documented here).
+
+        - **`individual`** — post a single payment batch with per-invoice
+        **`paid`** amounts. - **`group`** — post separate payment batches per
+        counterparty group, each with invoice selection.
+
+        After posting, the system regenerates invoice PDFs where applicable.
+
+        Requires **`cash.receipts`** when **`vc`** is **`customer`**.
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - in: path
+          name: vc
+          required: true
+          schema:
+            type: string
+            enum: [ customer, vendor ]
+          description: Entity type.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ account, date, payments, method ]
+              properties:
+                account:
+                  type: string
+                  description: Bank/cash account number to post the payment to (e.g. "1020").
+                date:
+                  type: string
+                  format: date
+                  description: Payment date (YYYY-MM-DD).
+                method:
+                  type: string
+                  enum: [ individual, group ]
+                  description: Payment method — `individual` or `group`.
+                currency:
+                  type: string
+                  nullable: true
+                  minLength: 3
+                  maxLength: 3
+                  description: >-
+                    Payment currency. Defaults to the base currency. When sent,
+                    must be exactly 3 characters (ISO 4217; **`ar.curr`** / **`ap.curr`** **`char(3)`**).
+                exchangerate:
+                  type: number
+                  nullable: true
+                  description: Exchange rate. Defaults to 1.
+                source:
+                  type: string
+                  nullable: true
+                  description: Payment reference.
+                memo:
+                  type: string
+                  nullable: true
+                payments:
+                  type: array
+                  description: >-
+                    For `method=individual`: array of invoice payment rows. For
+                    `method=group`: array of payment group objects.
+                  items:
+                    type: object
+                    description: >-
+                      Individual mode: `{ id, paid }`. Group mode: `{ vc_id,
+                      total_amount, invoices: [{id, paid}] }`.
+            example:
+              account: "1020"
+              date: "2025-11-15"
+              method: "individual"
+              payments:
+                - id: 101
+                  paid: 1077.00
+      responses:
+        "200":
+          description: Payment(s) posted successfully.
           content:
             application/json:
               schema:
                 type: object
                 properties:
-                  error:
+                  success:
+                    type: integer
+                    enum: [ 1 ]
+                  message:
                     type: string
+                  method:
+                    type: string
+                  total_amount:
+                    type: number
+                  payments_processed:
+                    type: integer
               example:
-                error: "Invalid vc parameter. Must be 'customer' or 'vendor'."
-        '404':
-          description: Invoice not found
+                success: 1
+                message: "Payment(s) posted successfully"
+                method: "individual"
+                total_amount: 1077.00
+                payments_processed: 1
+        "400":
+          description: >-
+            Missing or invalid fields, or **`FieldConstraintError`** when **`currency`**
+            is non-empty and not exactly 3 characters.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/FieldConstraintError"
+                  - $ref: "#/components/schemas/ErrorResponse"
+              example:
+                message: "Missing required fields: account, date, payments, method"
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # SYSTEM — Company defaults
+  # ───────────────────────────────────────────────────────────────────────────
+
+  /system/companydefaults:
+    get:
+      tags:
+        - System
+      summary: Read company & system defaults
+      description: >-
+        Returns restructured company master data, financial settings, **account
+        defaults** (chart ids for IC / AR / AP / FX / cash-over-short), **number
+        sequence templates** (`glnumber`, `sinumber`, `customernumber`,
+        `partnumber`, …) with lock flags, chart pick lists, and SMTP metadata.
+        Drives auto-assigned **reference**, **invoice numbers**,
+        **customer/vendor numbers**, and **catalogue part numbers** when those
+        fields are omitted on create routes. Requires **`system.defaults`**
+        permission.
+      security:
+        - ApiKeyAuth: []
+      responses:
+        "200":
+          description: Defaults bundle (structure matches `CompanyDefaults` schema).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompanyDefaults"
+        "403":
+          description: Missing `system.defaults` permission.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    post:
+      tags:
+        - System
+      summary: Save company & system defaults
+      description: >-
+        Partial update: include only sections you want to change
+        (`company_info`, `settings`, `account_defaults`, `number_sequences`,
+        `smtp`). Omitted top-level keys are not cleared. Persists via
+        **`AM->save_defaults`**. Requires **`system.defaults`** permission.
+
+        **String limits:** **`settings.type_of_contact`** (max **20** characters,
+        matches **`contact.typeofcontact`**-style usage), **`company_info.name`**
+        (**128**), address lines (**64**–**255** by field), and **`company_info.contact`**
+        **`phone` / `fax`** (**20**) are validated early; overloads return **`400`**
+        **`FieldConstraintError`** (SMTP test failures may still return plain
+        **`ErrorResponse`**).
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CompanyDefaults"
+      responses:
+        "200":
+          description: Defaults saved.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompanyDefaultsSaveResult"
+              example:
+                status: success
+                message: Company defaults saved successfully
+        "400":
+          description: >-
+            Field length validation (**`FieldConstraintError`**) or SMTP test /
+            other save validation (**`ErrorResponse`**).
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/FieldConstraintError"
+                  - $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Save rejected by the ledger.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                status: error
+                message: Failed to save company defaults
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # REFERENCE DATA — Chart of Accounts
+  # ───────────────────────────────────────────────────────────────────────────
+
+  /system/chart/accounts:
+    get:
+      tags:
+        - Reference Data
+      summary: List all chart of accounts entries
+      description: >-
+        Returns all account entries in the chart of accounts, each with its
+        assigned reporting categories. Requires `system.chart.list` permission.
+      security:
+        - ApiKeyAuth: []
+      responses:
+        "200":
+          description: Array of chart account entries.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ChartAccount"
+              example:
+                - id: 1
+                  accno: "1000"
+                  description: "Cash"
+                  charttype: "A"
+                  category: "A"
+                  link: "AR_paid:AP_paid"
+                  contra: 0
+                  categories: []
+
+  /system/chart/accounts/{id}:
+    get:
+      tags:
+        - Reference Data
+      summary: Get a single chart account
+      description: >-
+        Returns one chart account with full detail, usage flags
+        (`has_transactions`, `has_defaults`, `has_parts`), and assigned
+        categories. Requires `system.chart.list` permission.
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+          description: Chart account ID.
+      responses:
+        "200":
+          description: Chart account detail.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChartAccountDetail"
+              example:
+                id: 1
+                accno: "1000"
+                description: "Cash"
+                charttype: "A"
+                category: "A"
+                link: "AR_paid:AP_paid"
+                contra: 0
+                has_transactions: true
+                has_defaults: false
+                has_parts: false
+                categories: []
+    post:
+      tags:
+        - Reference Data
+      summary: Create or update a chart account
+      description: >-
+        Creates a new account (omit `{id}`) or updates an existing one.
+        Optionally replaces the full set of category assignments via
+        `category_ids`. Requires `system.chart.add` permission.
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: false
+          schema:
+            type: integer
+          description: Account ID for updates. Omit to create.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/ChartAccount"
+                - type: object
+                  properties:
+                    category_ids:
+                      type: array
+                      nullable: true
+                      description: >-
+                        Full replacement list of category IDs to assign. When
+                        provided, all existing assignments are replaced.
+                      items:
+                        type: integer
+            example:
+              accno: "4000"
+              description: "Revenue"
+              charttype: "A"
+              category: "I"
+              link: "AR_amount"
+              contra: 0
+              category_ids: [ 1, 2 ]
+      responses:
+        "200":
+          description: Account saved. Returns the full account with its categories.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChartAccountDetail"
+        "400":
+          description: >-
+            **`FieldConstraintError`** when **`symbol_link`** exceeds 128 characters.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FieldConstraintError"
+    delete:
+      tags:
+        - Reference Data
+      summary: Delete a chart account
+      description: >-
+        Deletes a chart account. Returns `400` if the account has posted
+        transactions, is referenced by system defaults, or is linked to any
+        part/service. Requires `system.chart.add` permission.
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+          description: Chart account ID to delete.
+      responses:
+        "200":
+          description: Account deleted successfully.
           content:
             application/json:
               schema:
                 type: object
                 properties:
-                  error:
+                  message:
                     type: string
               example:
-                error: "Invoice with ID 12345 not found."
+                message: "Account deleted"
+        "400":
+          description: Account cannot be deleted (has transactions, defaults, or parts).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                message: "Cannot delete account: transactions exist"
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # REFERENCE DATA — Currencies
+  # ───────────────────────────────────────────────────────────────────────────
+
+  /system/currencies:
+    get:
+      tags:
+        - Reference Data
+      summary: List currencies
+      description: >-
+        Returns all currencies configured in the system. The currency with
+        `rn=1` is the base currency. Requires `system.currencies` permission.
+      security:
+        - ApiKeyAuth: []
+      responses:
+        "200":
+          description: Array of currencies.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Currency"
+              example:
+                - curr: "CHF"
+                  prec: 2
+                  rn: 1
+                - curr: "EUR"
+                  prec: 2
+                  rn: 2
+    post:
+      tags:
+        - Reference Data
+      summary: Create or update a currency
+      description: >-
+        Creates a new currency or updates an existing one (upsert by code).
+        Requires `system.currencies` permission.
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ curr, prec ]
+              properties:
+                curr:
+                  type: string
+                  pattern: "^[A-Z]{3}$"
+                  description: ISO 4217 currency code (exactly 3 uppercase letters).
+                prec:
+                  type: integer
+                  minimum: 0
+                  maximum: 10
+                  description: Decimal places (0–10).
+            example:
+              curr: "USD"
+              prec: 2
+      responses:
+        "201":
+          description: Currency created or updated.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+              example:
+                message: "Currency created successfully"
+        "400":
+          description: Invalid currency code or precision value.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                message: "Invalid input parameters"
+
+  /system/currencies/{curr}:
+    delete:
+      tags:
+        - Reference Data
+      summary: Delete a currency
+      description: >-
+        Deletes a currency by its code. Requires `system.currencies` permission.
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - in: path
+          name: curr
+          required: true
+          schema:
+            type: string
+            pattern: "^[A-Z]{3}$"
+          description: ISO 4217 currency code (e.g. USD).
+      responses:
+        "204":
+          description: Currency deleted. No response body.
+        "400":
+          description: Invalid currency code.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                message: "Invalid currency code"
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # REFERENCE DATA — Departments
+  # ───────────────────────────────────────────────────────────────────────────
+
+  /system/departments:
+    get:
+      tags:
+        - Reference Data
+      summary: List departments
+      description: >-
+        Returns all departments in display order. Each entry includes a
+        `transactions` flag indicating whether the department has any associated
+        transactions (relevant before delete). Requires `system.departments`
+        permission.
+      security:
+        - ApiKeyAuth: []
+      responses:
+        "200":
+          description: Array of departments.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Department"
+              example:
+                - id: 1
+                  description: "Sales"
+                  role: "P"
+                  rn: 1
+                  transactions: 0
+    post:
+      tags:
+        - Reference Data
+      summary: Create or update a department
+      description: >-
+        Creates a new department or updates an existing one. Required fields:
+        `description`. Optional: `role` (C or P), `id` (for update). Requires
+        `system.departments` permission.
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Department"
+              example:
+                description: "Operations"
+                role: "C"
+      responses:
+        "200":
+          description: Department saved. Returns the updated departments array.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Department"
+        "400":
+          description: >-
+            **`FieldConstraintError`** when **`role`** is longer than one character.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FieldConstraintError"
+
+  /system/departments/{id}:
+    delete:
+      tags:
+        - Reference Data
+      summary: Delete a department
+      description: >-
+        Deletes a department. Returns `409 Conflict` if the department has
+        associated transactions. Requires `system.departments` permission.
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+          description: Department ID to delete.
+      responses:
+        "204":
+          description: Department deleted. No response body.
+        "400":
+          description: Missing or invalid department ID.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                message: "Missing department ID"
+        "409":
+          description: Department has associated transactions and cannot be deleted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                message: "Department cannot be deleted because it has associated transactions"
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # REFERENCE DATA — Taxes
+  # ───────────────────────────────────────────────────────────────────────────
+
+  /system/taxes:
+    get:
+      tags:
+        - Reference Data
+      summary: List tax rates
+      description: >-
+        Returns all configured tax rates with their linked chart accounts.
+        Requires `system.taxes` permission.
+      security:
+        - ApiKeyAuth: []
+      responses:
+        "200":
+          description: Array of tax rate entries.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TaxRate"
+              example:
+                - id: 1
+                  chart_id: 55
+                  accno: "2200"
+                  description: "VAT 7.7%"
+                  rate: 0.077
+                  taxnumber: null
+                  validto: null
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # ITEMS — Services catalogue
+  # ───────────────────────────────────────────────────────────────────────────
+
+  /ic/items:
+    get:
+      tags:
+        - Items
+      summary: Search catalogue services (and catalogue rows)
+      description: >-
+        Searches the catalogue. The **`searchitems` query parameter is
+        required** and controls scope and permission (`items.search.*`):
+
+        `allitems` — every catalogue row • `part` • `service`.
+
+        Upsert semantics for **services** (`POST /ic/items/{id}`) use **`income_accno`** and **`expense_accno`**
+        (chart **`accno`** strings with **`IC_income`** / **`IC_expense`** in `link`). Both are required on **create**.
+        Numeric account ids or `IC_income` as a JSON key are not accepted on **`POST`**.
+        Sending `inventory_accno*` on that route is rejected.
+      operationId: searchIcItems
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - in: query
+          name: searchitems
+          required: true
+          schema:
+            type: string
+            enum: [ allitems, part, service ]
+          description: Scope of the search. Also determines the required permission.
+        - in: query
+          name: partnumber
+          schema: { type: string }
+          description: Filter by part number (partial match).
+        - in: query
+          name: description
+          schema: { type: string }
+          description: Filter by description (partial match).
+        - in: query
+          name: serialnumber
+          schema: { type: string }
+          description: Filter by serial number.
+        - in: query
+          name: barcode
+          schema: { type: string }
+          description: Filter by barcode.
+        - in: query
+          name: make
+          schema: { type: string }
+          description: Filter by manufacturer.
+        - in: query
+          name: model
+          schema: { type: string }
+          description: Filter by model.
+      responses:
+        "200":
+          description: >-
+            JSON array of matching rows (never `null`; use **`[]`** when nothing
+            matches).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ItemSummary"
+              example: []
+        "400":
+          description: Missing required `searchitems` parameter.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                message: "searchitem is required."
+
+  /ic/items/{id}:
+    get:
+      tags:
+        - Items
+      summary: Get one catalogue service row
+      description: >-
+        Returns full detail for one catalogue **`id`**. Intended for **service** lines;
+        requires **`items.service`**. Writing uses the same permission (**`POST`** below).
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+          description: Part ID.
+      responses:
+        "200":
+          description: Part or service detail.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ItemSummary"
+              example:
+                id: 10
+                partnumber: "SVC-01"
+                description: "Cloud Hosting"
+                unit: "month"
+                sellprice: 500.00
+                onhand: 0
+                taxaccounts: "34970"
+                income_accno: "3400"
+
+    post:
+      tags:
+        - Items
+      summary: Create or update a service
+      description: >-
+        Path **`id = 0`** creates a row. Requires **`items.service`** only.
+        Send **`income_accno`** and **`expense_accno`** (chart **`accno`** strings; rows must have **`IC_income`** / **`IC_expense`** in **`link`**, e.g. **`"3400"`** and an expense **`accno`** on your chart).
+      operationId: upsertIcService
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+          description: Catalogue row id (`0` = create).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ItemServiceUpsert"
+            example:
+              partnumber: "SVC-CH-3400"
+              description: "APItest consulting engagement"
+              unit: "hour"
+              sellprice: 195.00
+              income_accno: "3400"
+              expense_accno: "4999"
+              taxaccounts:
+                - "34970"
+      responses:
+        "200":
+          description: Saved catalogue row (**create** shares the **200** response today).
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+              example:
+                id: 10
+                partnumber: "SVC-CH-3400"
+                item: "service"
+        "400":
+          description: >-
+            Validation error (wrong chart link, missing income, forbidden inventory
+            payload), or **`FieldConstraintError`** when **`unit`** exceeds 5 characters.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/FieldConstraintError"
+                  - $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Missing catalogue permission.
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # WORKSTATIONS (Neo AI plugin — neo_ai_plugin/WorkStations.pl)
+  # ───────────────────────────────────────────────────────────────────────────
+
+  /workstations:
+    get:
+      tags:
+        - Workstations
+      summary: List workstations
+      description: >-
+        Active **`stations`** with nested **`users`** (central profile email)
+        and **`station_approval_rules`**. Each list row includes
+        **`user_count`**. Requires **`stations.manage`**.
+      security:
+        - ApiKeyAuth: []
+      responses:
+        "200":
+          description: Array of stations.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/WorkstationStation"
+        "403":
+          description: Missing **`stations.manage`**.
+    post:
+      tags:
+        - Workstations
+      summary: Create workstation
+      description: >-
+        **Create** — **`POST`** to **`…/workstations`** with **no trailing id
+        segment** (Mojolicious pattern **`/workstations/:id`** where **`id`** is
+        optional). Response **201** with **`message`** + **`id`**.
+
+        Sending **`rules`** (including **`[]`**) persists those rules
+        immediately after **`stations`** insert (**empty** ⇒ no
+        **`station_approval_rules`** rows).
+
+        Omitting **`is_active`** creates an **inactive** station — send
+        **`true`** explicitly for an active workstation.
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkstationWrite"
+            example:
+              name: "AP approval"
+              description: "Purchasing review"
+              workflow_order: 1
+              rules:
+                - rule_type: amount
+                  operator: lte
+                  condition_value: "10000"
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkstationMutationEnvelope"
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PluginLegacyErrorResponse"
+        "403":
+          description: Missing **`stations.manage`**.
+        "409":
+          description: Duplicate station name or conflicting **`station_type`**.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PluginLegacyErrorResponse"
+
+  /workstations/users:
+    get:
+      tags:
+        - Workstations
+      summary: Dataset users (for assignment pickers)
+      description: Active central **`profile`** rows with **`dataset_access`** to this
+        client. **`stations.manage`**.
+      security:
+        - ApiKeyAuth: []
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DatasetProfileRow"
+        "403":
+          description: Missing **`stations.manage`**.
+        "404":
+          description: Dataset not found in central DB.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PluginLegacyErrorResponse"
+
+  /workstations/transfer-invoice:
+    post:
+      tags:
+        - Workstations
+      summary: Transfer AP invoice to another station
+      description: >-
+        Targets **`invoice_station`** rows for **`ap`** only (**`invoice_id` =
+        `ap.id`** — not **`ar`**). Validates that the destination station exists
+        and differs from current assignment (**400** repeat). Writes
+        **`invoice_station_history`**.
+
+        **`vendor.transaction`** permission.
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InvoiceTransferRequest"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InvoiceTransferResponse"
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PluginLegacyErrorResponse"
+        "403":
+          description: Missing **`vendor.transaction`**.
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PluginLegacyErrorResponse"
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PluginLegacyErrorResponse"
+
+  /workstations/user/stations:
+    get:
+      tags:
+        - Workstations
+      summary: My stations with pending vendor invoices
+      description: >-
+        **`stations.get`** — returns **`{ stations: [...] }`**; each station
+        lists unapproved **`ap`** invoices joined with vendor/bank/address
+        columns, **`files`** via **`FM`**, optional plugin enrichments. Admin
+        users also receive synthetic **Unassigned** (**`id`**: **`-1`**) for AP
+        rows with no **`invoice_station`** row.
+      security:
+        - ApiKeyAuth: []
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkstationOperatorInbox"
+        "403":
+          description: Missing **`stations.get`**.
+
+  /workstations/{id}:
+    get:
+      tags:
+        - Workstations
+      summary: Workstation detail
+      description: Requires **`stations.manage`**.
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkstationStation"
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PluginLegacyErrorResponse"
+        "403":
+          description: Missing **`stations.manage`**.
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PluginLegacyErrorResponse"
+    put:
+      tags:
+        - Workstations
+      summary: Update workstation
+      description: >-
+        **`PUT`** (**`POST`** on the **same `/workstations/{id}`** pattern is
+        treated identically by the plugin).
+
+        Include **`rules`** only when rewriting approval rules (**`[]`** wipes
+        them). Omit **`rules`** to leave DB rules untouched.
+
+        Always send **`"is_active": true`** unless you intentionally deactivate
+        (**omission ⇒ inactive **`0`** in handler**).
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkstationWrite"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkstationMutationEnvelope"
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PluginLegacyErrorResponse"
+        "403":
+          description: Missing **`stations.manage`**.
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PluginLegacyErrorResponse"
+    delete:
+      tags:
+        - Workstations
+      summary: Deactivate workstation
+      description: Soft-delete — sets **`is_active`** false; fails with **409** if
+        active users remain.
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: Deactivated.
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PluginLegacyErrorResponse"
+        "403":
+          description: Missing **`stations.manage`**.
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PluginLegacyErrorResponse"
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PluginLegacyErrorResponse"
+
+  /workstations/{id}/users:
+    post:
+      tags:
+        - Workstations
+      summary: Assign user to workstation
+      description: >-
+        Inserts **`station_users`** after verifying the station and
+        **`profile`** exist. **201** for a brand-new link; **200** when a prior
+        row already existed (reactivation path that only backfills
+        **`created_by`**). **409** when the pair is already assigned and
+        **`created_by`** was already set (duplicate). Deletes use **`DELETE
+        …/users/{user_id}`** with **`user_id` = this same `profile_id`**.
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkstationAssignUserBody"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkstationMutationEnvelope"
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkstationMutationEnvelope"
+        "403":
+          description: Missing **`stations.manage`**.
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PluginLegacyErrorResponse"
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PluginLegacyErrorResponse"
+
+  /workstations/{id}/users/{user_id}:
+    delete:
+      tags:
+        - Workstations
+      summary: Remove user from workstation
+      description: >-
+        **`user_id`** is the central **`profile.id`**
+        (**`station_users.profile_id`**), not the junction row **`id`**.
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+        - in: path
+          name: user_id
+          required: true
+          schema:
+            type: integer
+          description: Central profile id (**`profile_id`**).
+      responses:
+        "204":
+          description: Removed.
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PluginLegacyErrorResponse"
+        "403":
+          description: Missing **`stations.manage`**.
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PluginLegacyErrorResponse"
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # REFERENCE DATA — Next Number
+  # ───────────────────────────────────────────────────────────────────────────
+
+  /next_number/{module}:
+    get:
+      tags:
+        - Reference Data
+      summary: Get (and increment) the next document number
+      description: >-
+        Returns the next sequential document number for the given module and
+        increments the counter. Call this once per new document to reserve a
+        number before saving (optional — many **POST** routes will allocate from
+        the same defaults when the number field is omitted; see **`GET
+        /system/companydefaults`**).
+
+        Supported modules and their required permissions:
+
+        | `module` | Sequence | Required permission | |---|---|---| | `gl` | GL
+        number | `gl.add` or `gl.import` | | `ar` | AR invoice number |
+        `customer.transaction` or `customer.invoice` | | `ap` | AP invoice
+        number | `vendor.transaction` or `vendor.invoice` | | `customer` |
+        Customer number | `customer.add` or `customer.import` | | `vendor` |
+        Vendor number | `vendor.add` or `vendor.import` | | `customer_order` |
+        Sales order number | `customer.order` | | `customer_quotation` |
+        Quotation number | `customer.quotation` | | `vendor_order` | Purchase
+        order number | `vendor.order` | | `vendor_quotation` | RFQ number |
+        `vendor.quotation` |
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - in: path
+          name: module
+          required: true
+          schema:
+            type: string
+            enum:
+              - gl
+              - ar
+              - ap
+              - customer
+              - vendor
+              - customer_order
+              - customer_quotation
+              - vendor_order
+              - vendor_quotation
+          description: Module identifier.
+      responses:
+        "200":
+          description: The next sequential number for the module.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NextNumberResponse"
+              example:
+                number: "AR-2025-042"
