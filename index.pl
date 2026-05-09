@@ -198,6 +198,52 @@ helper validate_date => sub {
     return 1;    # return true if the date is valid
 };
 
+# UTF-8 character length for API string limits (matches varchar byte limits on short fields).
+sub _api_utf8_len {
+    my ($v) = @_;
+    return 0 unless defined $v;
+    my $s = "$v";
+    utf8::upgrade($s);
+    length($s);
+}
+
+# Central copy for API validation messages (translations can be wired here later).
+helper api_validation_message => sub {
+    my ( $c, $kind, @args ) = @_;
+    if ( $kind eq 'field_max_length' ) {
+        my ( $field, $max ) = @args;
+        return
+          qq{The field "$field" may not be longer than $max characters.};
+    }
+    if ( $kind eq 'field_exact_length' ) {
+        my ( $field, $len ) = @args;
+        return qq{The field "$field" must be exactly $len characters.};
+    }
+    return 'Request validation failed.';
+};
+
+helper api_render_field_limit_violation => sub {
+    my ( $c, $field, $max ) = @_;
+    return $c->render(
+        status => 400,
+        json   => {
+            message => $c->api_validation_message(
+                'field_max_length', $field, $max ),
+        },
+    );
+};
+
+helper api_render_field_exact_length => sub {
+    my ( $c, $field, $len ) = @_;
+    return $c->render(
+        status => 400,
+        json   => {
+            message => $c->api_validation_message(
+                'field_exact_length', $field, $len ),
+        },
+    );
+};
+
 # plugin 'Minion::Admin' => { return_to => '/minion' };
 
 # Database Updates on Startup
@@ -4128,12 +4174,13 @@ $api->get(
                     memo           => $line->{memo},
                     source         => $line->{source},
                     taxAccount     => $taxAccount,
-                    taxAmount      => $line->{taxamount},
+                    linetaxamount  => $line->{linetaxamount} + 0,
                     fx_transaction => $fx_transaction,
                     cleared        => $line->{cleared},
                   };
             }
 
+            $transaction->{exchangeRate} = delete $transaction->{exchangerate};
             $transaction->{lines} = \@lines;
             push @transactions, $transaction;
         }
@@ -6113,6 +6160,10 @@ sub calc_line_tax {
 helper api_gl_transaction => sub {
     my ( $c, $dbs, $data, $id, $dbh ) = @_;
 
+    # Preserve whether we are updating an existing GL transaction (incoming route id).
+    # post_transaction assigns $form->{id}, so we cannot rely on overwriting $id below.
+    my $updating_existing = ( defined($id) && $id =~ /^\d+$/ && $id > 0 );
+
     # Check if 'transdate' is present in the data
     unless ( exists $data->{transdate} ) {
         return ( 400, { message => "The 'transdate' field is required." } );
@@ -6134,6 +6185,19 @@ helper api_gl_transaction => sub {
     # Check if 'lines' is present and is an array reference
     unless ( exists $data->{lines} && ref $data->{lines} eq 'ARRAY' ) {
         return ( 400, { message => "The 'lines' array is required." } );
+    }
+
+    if ( exists $data->{curr} && defined $data->{curr} ) {
+        my $cur = $data->{curr};
+        if ( $cur ne '' && _api_utf8_len($cur) != 3 ) {
+            return (
+                400,
+                {
+                    message => $c->api_validation_message(
+                        'field_exact_length', 'curr', 3 ),
+                }
+            );
+        }
     }
 
     # Find the default currency from the database
@@ -6334,11 +6398,11 @@ helper api_gl_transaction => sub {
 
     # seperate calls with dbh is needed to account for import
     if ($dbh) {
-        $id = GL->post_transaction( $c->slconfig, $form, $dbs );
+        GL->post_transaction( $c->slconfig, $form, $dbs );
         $dbh->commit;
     }
     else {
-        $id = GL->post_transaction( $c->slconfig, $form );
+        GL->post_transaction( $c->slconfig, $form );
     }
 
     if ( $form->{id} ) {
@@ -6348,7 +6412,8 @@ helper api_gl_transaction => sub {
             $form->{id} );
     }
 
-    if ( $data->{files} && ref $data->{files} eq 'ARRAY' ) {
+    if ( $data->{files} && ref $data->{files} eq 'ARRAY' && @{ $data->{files} } )
+    {
         $form->{files}  = $data->{files};
         $form->{client} = $c->param('client');
         FM->upload_files( $dbs, $c, $form, 'gl' );
@@ -6396,7 +6461,7 @@ helper api_gl_transaction => sub {
           };
     }
 
-    my $status_code = $id ? 200 : 201;    # 200 for update, 201 for create
+    my $status_code = $updating_existing ? 200 : 201;
 
     return ( $status_code, $response_json );
 };
@@ -7136,6 +7201,73 @@ $api->post(
         my $client = $c->param('client');
 
         my $json_data = $c->req->json;
+        if ( $json_data->{settings}
+            && ref( $json_data->{settings} ) eq 'HASH' )
+        {
+            my $v = $json_data->{settings}{type_of_contact};
+            if (   exists $json_data->{settings}{type_of_contact}
+                && defined $v
+                && $v ne ''
+                && _api_utf8_len($v) > 20 )
+            {
+                return $c->api_render_field_limit_violation(
+                    'settings.type_of_contact', 20 );
+            }
+        }
+        if ( $json_data->{company_info}
+            && ref( $json_data->{company_info} ) eq 'HASH' )
+        {
+            my $ci = $json_data->{company_info};
+            if ( exists $ci->{name} && defined $ci->{name} ) {
+                my $n = $ci->{name};
+                if ( $n ne '' && _api_utf8_len($n) > 128 ) {
+                    return $c->api_render_field_limit_violation(
+                        'company_info.name', 128 );
+                }
+            }
+            if ( $ci->{address} && ref( $ci->{address} ) eq 'HASH' ) {
+                my $a = $ci->{address};
+                for my $spec (
+                    [ street      => 255 ],
+                    [ post_office => 64 ],
+                    [ line1       => 64 ],
+                    [ line2       => 64 ],
+                    [ city        => 64 ],
+                    [ state       => 32 ],
+                    [ zip         => 32 ],
+                    [ country     => 32 ],
+                  )
+                {
+                    my ( $k, $max ) = @$spec;
+                    next unless exists $a->{$k};
+                    my $val = $a->{$k};
+                    next unless defined $val;
+                    if ( _api_utf8_len($val) > $max ) {
+                        return $c->api_render_field_limit_violation(
+                            "company_info.address.$k", $max );
+                    }
+                }
+            }
+            if ( $ci->{contact} && ref( $ci->{contact} ) eq 'HASH' ) {
+                my $co = $ci->{contact};
+                if ( exists $co->{phone} && defined $co->{phone} ) {
+                    if ( $co->{phone} ne ''
+                        && _api_utf8_len( $co->{phone} ) > 20 )
+                    {
+                        return $c->api_render_field_limit_violation(
+                            'company_info.contact.phone', 20 );
+                    }
+                }
+                if ( exists $co->{fax} && defined $co->{fax} ) {
+                    if ( $co->{fax} ne ''
+                        && _api_utf8_len( $co->{fax} ) > 20 )
+                    {
+                        return $c->api_render_field_limit_violation(
+                            'company_info.contact.fax', 20 );
+                    }
+                }
+            }
+        }
         my $mapped_data = {};
 
         if ( $json_data->{company_info} ) {
@@ -7782,6 +7914,18 @@ $api->post(
         my $params     = $c->req->json;
         my $dbs        = $c->dbs($client);
 
+        if ( ref($params) eq 'HASH' ) {
+            if ( exists $params->{symbol_link}
+                && defined $params->{symbol_link} )
+            {
+                my $s = $params->{symbol_link};
+                if ( $s ne '' && _api_utf8_len($s) > 128 ) {
+                    return $c->api_render_field_limit_violation(
+                        'symbol_link', 128 );
+                }
+            }
+        }
+
         # Extract category_ids before copying params into $form
         my $category_ids = $params->{category_ids};
         delete $params->{category_ids} if exists $params->{category_ids};
@@ -8383,7 +8527,9 @@ $api->get(
         my $departments = $dbs->query($query)->hashes;
 
         # Ensure departments is an array reference, even if empty
-        return [] unless $departments && @$departments;
+        unless ( $departments && @$departments ) {
+            return $c->render( json => [] );
+        }
 
         # Check for transactions for each department
         foreach my $dept (@$departments) {
@@ -8405,6 +8551,14 @@ $api->post(
         my $client = $c->param('client');
 
         my $data = $c->req->json;
+        if ( ref($data) eq 'HASH' ) {
+            if ( exists $data->{role} && defined $data->{role} ) {
+                my $r = $data->{role};
+                if ( $r ne '' && _api_utf8_len($r) > 1 ) {
+                    return $c->api_render_field_limit_violation( 'role', 1 );
+                }
+            }
+        }
         for my $key ( keys %$data ) {
             $form->{$key} = $data->{$key} if defined $data->{$key};
         }
@@ -8431,7 +8585,7 @@ $api->delete(
 
         return $c->render(
             status => 400,
-            json   => { error => "Missing department ID" }
+            json   => { message => "Missing department ID" }
         ) unless $id;
 
         my $dbs = $c->dbs($client);
@@ -8445,7 +8599,7 @@ $api->delete(
             return $c->render(
                 status => 409,    # HTTP 409 Conflict
                 json   => {
-                    error =>
+                    message =>
 "Department cannot be deleted because it has associated transactions"
                 }
             );
@@ -8569,7 +8723,7 @@ $api->get(
 
         # Return a 400 response if search parameter is not defined
         return $c->render(
-            json   => { error => "searchitem is required." },
+            json   => { message => "searchitem is required." },
             status => 400
         ) unless defined $search;
 
@@ -8604,18 +8758,16 @@ $api->get(
 
         IC->all_parts( $c->slconfig, $form );
         warn( Dumper $form );
-        my @results = $form->{parts};
-
-        # Render the filtered JSON response
-        $c->render( json => @results );
+        my $parts = $form->{parts};
+        $c->render(
+            json => ( ref($parts) eq 'ARRAY' ? $parts : [] ),
+        );
     }
 );
 $api->get(
     '/ic/items/:id' => sub {
         my $c = shift;
-        return
-          unless my $form =
-          ( $c->check_perms('items.part') || $c->check_perms('items.service') );
+        return unless my $form = $c->check_perms('items.service');
         my $client = $c->param('client');
         my $id     = $c->param('id');
 
@@ -8629,15 +8781,42 @@ $api->get(
 $api->post(
     '/ic/items/:id' => { id => undef } => sub {
         my $c = shift;
-        return
-          unless my $form =
-          ( $c->check_perms('items.part') || $c->check_perms('items.service') );
+        return unless my $form = $c->check_perms('items.service');
 
         my $client = $c->param('client');
         my $id     = $c->param('id');
         my $data   = $c->req->json;
         my $dbs    = $c->dbs($client);
         $form->{id} = $id;
+
+        if ( ref($data) eq 'HASH' ) {
+            for my $bad (
+                qw(
+                  income_accno_id income_account_id IC_income ic_income icIncome
+                  expense_accno_id expense_account_id
+                  )
+              )
+            {
+                if ( exists $data->{$bad} ) {
+                    return $c->render(
+                        status => 400,
+                        json   => {
+                            message =>
+qq{This endpoint only accepts the chart accno string fields "income_accno" and "expense_accno" (both required on create). Remove "$bad".},
+                        }
+                    );
+                }
+            }
+            if ( exists $data->{unit} && defined $data->{unit} ) {
+                my $u = $data->{unit};
+                if ( $u ne '' && _api_utf8_len($u) > 5 ) {
+                    return $c->api_render_field_limit_violation( 'unit', 5 );
+                }
+            }
+        }
+
+        my %effective_payload =
+          ref($data) eq 'HASH' ? (%$data) : ();
 
         if (   ( !$id )
             && $data->{partnumber}
@@ -8649,7 +8828,7 @@ $api->post(
             if ($existing) {
                 return $c->render(
                     status => 409,
-                    json   => { error => "Part number already exists" }
+                    json   => { message => "Part number already exists" }
                 );
             }
         }
@@ -8709,6 +8888,93 @@ $api->post(
             $form->{vendor_rows} = scalar @{ $data->{vendorLines} };
         }
         $form->{id} = $id;
+
+        if ($id) {
+            my $omit_income =
+              !( exists $data->{income_accno}
+                && defined $data->{income_accno}
+                && $data->{income_accno} ne '' );
+            my $omit_expense =
+              !( exists $data->{expense_accno}
+                && defined $data->{expense_accno}
+                && $data->{expense_accno} ne '' );
+
+            my $prow =
+              $dbs->query(
+                qq{SELECT assembly,
+                          COALESCE(income_accno_id, 0) AS income_accno_id,
+                          COALESCE(expense_accno_id, 0) AS expense_accno_id,
+                          COALESCE(inventory_accno_id, 0) AS inventory_accno_id
+                      FROM parts WHERE id = ?},
+                $id
+              )->hash;
+            if ( !$prow ) {
+                return $c->render(
+                    status => 404,
+                    json   => { message => 'Item not found.' }
+                );
+            }
+            if ( ( $prow->{inventory_accno_id} // 0 ) > 0 ) {
+                return $c->render(
+                    status => 400,
+                    json   => {
+                        message =>
+'This route only manages catalogue services (non-stocked lines). Stocked parts cannot be updated here.'
+                    }
+                );
+            }
+            if ( lc( ( $prow->{assembly} // '' ) . '' ) eq 't' ) {
+                return $c->render(
+                    status => 400,
+                    json   =>
+                      { message => 'Assembly records cannot be edited as a service.' }
+                );
+            }
+            if ($omit_income) {
+                my $iac = $prow->{income_accno_id} // 0;
+                return $c->render(
+                    status => 400,
+                    json   => {
+                        message =>
+'Existing item has no income account; send income_accno (chart accno string).'
+                    }
+                ) unless $iac =~ /^\d+$/ && $iac > 0;
+                my $irow =
+                  $dbs->query( q{SELECT accno FROM chart WHERE id = ?}, $iac )
+                  ->hash;
+                return $c->render(
+                    status => 400,
+                    json   => { message => 'Stored income chart id is invalid.' }
+                ) unless $irow && defined $irow->{accno} && $irow->{accno} ne '';
+                $effective_payload{income_accno} = $irow->{accno};
+            }
+            if ($omit_expense) {
+                my $eac = $prow->{expense_accno_id} // 0;
+                return $c->render(
+                    status => 400,
+                    json   => {
+                        message =>
+'Existing item has no expense account; send expense_accno (chart accno string).'
+                    }
+                ) unless $eac =~ /^\d+$/ && $eac > 0;
+                my $erow =
+                  $dbs->query( q{SELECT accno FROM chart WHERE id = ?}, $eac )
+                  ->hash;
+                return $c->render(
+                    status => 400,
+                    json   => { message => 'Stored expense chart id is invalid.' }
+                ) unless $erow && defined $erow->{accno} && $erow->{accno} ne '';
+                $effective_payload{expense_accno} = $erow->{accno};
+            }
+        }
+        if ( my $svc_err =
+            $c->ic_service_prepare_for_save( $dbs, $form, \%effective_payload ) )
+        {
+            return $c->render(
+                status => $svc_err->{status},
+                json   => $svc_err->{json}
+            );
+        }
         IC->save( $c->slconfig, $form );
         $c->render( json => {%$form} );
     }
@@ -9220,6 +9486,135 @@ helper batch_gl_resolve_update_chart => sub {
         return ( $row->{id} + 0, undef );
     }
     return ( undef, 'Missing chart_id or accno.' );
+};
+
+# Prepare $form for SL::IC->save when the API persists a catalogue **service** only:
+# validates income (IC_income) and optional expense (IC_expense), clears inventory, sets item/service flags.
+helper ic_service_prepare_for_save => sub {
+    my ( $c, $dbs, $form, $data ) = @_;
+    my $link_has = sub {
+        my ( $link, $token ) = @_;
+        return 0 unless defined $link && $link ne '';
+        for my $t ( split /:/, $link ) {
+            return 1 if $t eq $token;
+        }
+        return 0;
+    };
+    my $chart_err = sub {
+        my ( $status, $msg ) = @_;
+        return { status => $status, json => { message => $msg } };
+    };
+
+    if (   exists $data->{item}
+        && defined $data->{item}
+        && $data->{item} ne ''
+        && $data->{item} ne 'service' )
+    {
+        return $chart_err->(
+            400,
+            'This route only persists catalogue services; omit "item" or send "item":"service".'
+        );
+    }
+
+    if ( exists $data->{inventory_accno_id}
+        && defined $data->{inventory_accno_id}
+        && $data->{inventory_accno_id} =~ /^\d+$/
+        && $data->{inventory_accno_id} > 0 )
+    {
+        return $chart_err->( 400,
+            'inventory_accno_id must not be set for services.' );
+    }
+    if ( exists $data->{inventory_accno}
+        && defined $data->{inventory_accno}
+        && $data->{inventory_accno} ne '' )
+    {
+        return $chart_err->( 400, 'inventory_accno must not be set for services.' );
+    }
+
+    if ( $form->{assembly} ) {
+        return $chart_err->( 400,
+            'Assembly or kit catalogue entries are not supported on this endpoint.' );
+    }
+
+    # taxaccounts: IC.pm expects a space-separated string and IC_tax_$acc flags
+    my $tax = $form->{taxaccounts};
+    if ( ref($tax) eq 'ARRAY' ) {
+        $form->{taxaccounts} =
+          join( ' ', grep { defined $_ && $_ ne '' } @$tax );
+    }
+    $tax = $form->{taxaccounts} // '';
+    $tax =~ s/^\s+|\s+$//g;
+    $form->{taxaccounts} = $tax;
+    for my $acc ( split /\s+/, $tax ) {
+        next if $acc eq '';
+        $form->{"IC_tax_$acc"} = 1;
+    }
+
+    my $income_sql = q{SELECT id, accno, description, link FROM chart
+                        WHERE charttype <> 'H' AND COALESCE(closed, false) = false
+                          AND };
+    my $has_inc_acc =
+         exists $data->{income_accno}
+      && defined $data->{income_accno}
+      && $data->{income_accno} ne '';
+
+    unless ($has_inc_acc) {
+        return $chart_err->( 400,
+'Send income_accno: the chart account number (string) for service revenue. The chart row\'s link must include IC_income (e.g. accno 3400 on Swiss charts).'
+        );
+    }
+
+    my $inc_row = $dbs->query(
+        $income_sql . 'accno = ?',
+        $data->{income_accno}
+    )->hash;
+    return $chart_err->(
+        400,
+        'Unknown income_accno (or account is closed / is a heading).'
+    ) unless $inc_row;
+    unless ( $link_has->( $inc_row->{link}, 'IC_income' ) ) {
+        return $chart_err->(
+            400,
+'income_accno must reference a chart account whose link includes IC_income (e.g. Dienstleistungserlöse 3400).'
+        );
+    }
+    $form->{IC_income} =
+      $inc_row->{accno} . '--' . ( $inc_row->{description} // '' );
+
+    my $has_exp_acc =
+         exists $data->{expense_accno}
+      && defined $data->{expense_accno}
+      && $data->{expense_accno} ne '';
+    unless ($has_exp_acc) {
+        return $chart_err->( 400,
+'Send expense_accno: the chart account number (string) for service expense / COGS. The chart row\'s link must include IC_expense.'
+        );
+    }
+    my $exp_row = $dbs->query(
+        $income_sql . 'accno = ?',
+        $data->{expense_accno}
+    )->hash;
+    return $chart_err->(
+        400,
+        'Unknown expense_accno (or account is closed / is a heading).'
+    ) unless $exp_row;
+    unless ( $link_has->( $exp_row->{link}, 'IC_expense' ) ) {
+        return $chart_err->(
+            400,
+'expense_accno must reference a chart account whose link includes IC_expense.'
+        );
+    }
+    $form->{IC_expense} =
+      $exp_row->{accno} . '--' . ( $exp_row->{description} // '' );
+
+    # No inventory for services — required so IC.pm split + UPDATE get NULL ids, not stale values.
+    $form->{IC_inventory}        = '';
+    $form->{inventory_accno}     = '';
+    $form->{inventory_accno_id}  = '';
+    $form->{item}                = 'service';
+    $form->{assembly}            = '0';
+
+    return undef;
 };
 
 # Reference data for batch UIs. $param: empty/0/false => undef; 1/all/true => full set;
@@ -10318,7 +10713,7 @@ $api->get(
         unless ( $vc eq 'vendor' || $vc eq 'customer' ) {
             return $c->render(
                 json => {
-                    error => 'Invalid type. Must be either vendor or customer.'
+                    message => 'Invalid type. Must be either vendor or customer.'
                 },
                 status => 400
             );
@@ -10346,7 +10741,7 @@ $api->get(
             {
                 return $c->render(
                     json => {
-                        error =>
+                        message =>
                           "Invalid date format for $filter. Use YYYY-MM-DD."
                     },
                     status => 400
@@ -10670,7 +11065,7 @@ $api->get(
         unless ( $vc eq 'vendor' || $vc eq 'customer' ) {
             return $c->render(
                 json => {
-                    error => 'Invalid VC. Must be either vendor or customer.'
+                    message => 'Invalid VC. Must be either vendor or customer.'
                 },
                 status => 400
             );
@@ -10953,10 +11348,11 @@ $api->get(
         for ( keys %$params ) { $form->{$_} = $params->{$_} if $params->{$_} }
 
         CT->search( $c->slconfig, $form );
-        my @results = $form->{CT};
 
-        # Render the filtered JSON response
-        $c->render( json => @results );
+        # $form->{CT} is omitted when CT->search yields zero rows — always return []
+        # (do not pass an empty perl list as the json payload, which becomes `null`)
+        my $customers_vendors = $form->{CT} // [];
+        $c->render( json => $customers_vendors );
     }
 );
 $api->get(
@@ -11009,9 +11405,61 @@ $api->post(
         return unless my $form = $c->check_perms("$vc.add");
 
         my $params = $c->req->json;
+        if ( ref($params) eq 'HASH' ) {
+            my $p = $params;
+            for my $pair (
+                [ name           => 128 ],
+                [ contact        => 64 ],
+                [ phone          => 20 ],
+                [ fax            => 20 ],
+                [ vcnumber       => 32 ],
+                [ customernumber => 32 ],
+                [ vendornumber   => 32 ],
+                [ taxnumber      => 32 ],
+                [ sic_code       => 6 ],
+                [ language_code  => 6 ],
+                [ iban           => 34 ],
+                [ bic            => 11 ],
+                [ gifi_accno     => 30 ],
+                [ address1       => 64 ],
+                [ address2       => 64 ],
+                [ city           => 64 ],
+                [ state          => 32 ],
+                [ zipcode        => 32 ],
+                [ country        => 32 ],
+                [ street         => 255 ],
+                [ post_office    => 64 ],
+                [ salutation     => 32 ],
+                [ firstname      => 32 ],
+                [ lastname       => 32 ],
+                [ contacttitle   => 32 ],
+                [ occupation     => 32 ],
+                [ typeofcontact  => 20 ],
+                [ mobile         => 20 ],
+                [ gender         => 1 ],
+              )
+            {
+                my ( $k, $max ) = @$pair;
+                next unless exists $p->{$k};
+                my $v = $p->{$k};
+                next unless defined $v;
+                if ( _api_utf8_len($v) > $max ) {
+                    return $c->api_render_field_limit_violation( $k, $max );
+                }
+            }
+            if ( exists $p->{curr} && defined $p->{curr} ) {
+                my $cur = $p->{curr};
+                if ( $cur ne '' && _api_utf8_len($cur) != 3 ) {
+                    return $c->api_render_field_exact_length( 'curr', 3 );
+                }
+            }
+        }
 
         $form->{db} = lc($vc);
-        for ( keys %$params ) { $form->{$_} = $params->{$_} if $params->{$_} }
+        for my $k ( keys %$params ) {
+            next if $k eq 'vcnumber';
+            $form->{$k} = $params->{$k} if exists $params->{$k};
+        }
         $form->{message} = $params->{message} if exists $params->{message};
         for my $k (qw(reminder_1_message reminder_2_message reminder_3_message)) {
             $form->{$k} = $params->{$k} if exists $params->{$k};
@@ -11043,6 +11491,64 @@ $api->post(
         my @results;
         foreach my $transaction (@$transactions) {
             return unless my $form = $c->check_perms("$vc.invoice");
+            if ( ref($transaction) eq 'HASH' ) {
+                my $d = $transaction;
+                if ( exists $d->{currency} && defined $d->{currency} ) {
+                    my $cur = $d->{currency};
+                    if ( $cur ne '' && _api_utf8_len($cur) != 3 ) {
+                        return $c->api_render_field_exact_length(
+                            'currency', 3 );
+                    }
+                }
+                if ( exists $d->{till} && defined $d->{till} ) {
+                    my $t = $d->{till};
+                    if ( $t ne '' && _api_utf8_len($t) > 20 ) {
+                        return $c->api_render_field_limit_violation(
+                            'till', 20 );
+                    }
+                }
+                if ( $d->{shipto} && ref( $d->{shipto} ) eq 'HASH' ) {
+                    my $sh = $d->{shipto};
+                    for my $sp (
+                        [ name     => 64 ],
+                        [ address1 => 64 ],
+                        [ address2 => 64 ],
+                        [ city     => 64 ],
+                        [ state    => 32 ],
+                        [ zipcode  => 32 ],
+                        [ country  => 32 ],
+                        [ contact  => 64 ],
+                        [ phone    => 20 ],
+                        [ fax      => 20 ],
+                      )
+                    {
+                        my ( $api_key, $max ) = @$sp;
+                        next unless exists $sh->{$api_key};
+                        my $v = $sh->{$api_key};
+                        next unless defined $v;
+                        if ( _api_utf8_len($v) > $max ) {
+                            return $c->api_render_field_limit_violation(
+                                "shipto.$api_key", $max );
+                        }
+                    }
+                }
+                if ( $d->{lines} && ref( $d->{lines} ) eq 'ARRAY' ) {
+                    my $idx = 0;
+                    for my $line ( @{ $d->{lines} } ) {
+                        if ( ref($line) eq 'HASH'
+                            && exists $line->{unit}
+                            && defined $line->{unit} )
+                        {
+                            my $u = $line->{unit};
+                            if ( $u ne '' && _api_utf8_len($u) > 10 ) {
+                                return $c->api_render_field_limit_violation(
+                                    "lines[$idx].unit", 10 );
+                            }
+                        }
+                        $idx++;
+                    }
+                }
+            }
             my $new_invoice_id = $c->process_invoice( $transaction, $form );
             push @results,
               {
@@ -11075,6 +11581,15 @@ $api->post(
         my @results;
         foreach my $transaction (@$transactions) {
             return unless my $form = $c->check_perms("$vc.transaction");
+            if ( ref($transaction) eq 'HASH' ) {
+                my $td = $transaction;
+                if ( exists $td->{curr} && defined $td->{curr} ) {
+                    my $cur = $td->{curr};
+                    if ( $cur ne '' && _api_utf8_len($cur) != 3 ) {
+                        return $c->api_render_field_exact_length( 'curr', 3 );
+                    }
+                }
+            }
             my $result =
               $c->process_transaction( $transaction, $form, $client );
 
@@ -11119,6 +11634,56 @@ $api->post(
 
         my @results;
         foreach my $transaction (@$transactions) {
+            if ( ref($transaction) eq 'HASH' ) {
+                my $p = $transaction;
+                for my $pair (
+                    [ name           => 128 ],
+                    [ contact        => 64 ],
+                    [ phone          => 20 ],
+                    [ fax            => 20 ],
+                    [ vcnumber       => 32 ],
+                    [ customernumber => 32 ],
+                    [ vendornumber   => 32 ],
+                    [ taxnumber      => 32 ],
+                    [ sic_code       => 6 ],
+                    [ language_code  => 6 ],
+                    [ iban           => 34 ],
+                    [ bic            => 11 ],
+                    [ gifi_accno     => 30 ],
+                    [ address1       => 64 ],
+                    [ address2       => 64 ],
+                    [ city           => 64 ],
+                    [ state          => 32 ],
+                    [ zipcode        => 32 ],
+                    [ country        => 32 ],
+                    [ street         => 255 ],
+                    [ post_office    => 64 ],
+                    [ salutation     => 32 ],
+                    [ firstname      => 32 ],
+                    [ lastname       => 32 ],
+                    [ contacttitle   => 32 ],
+                    [ occupation     => 32 ],
+                    [ typeofcontact  => 20 ],
+                    [ mobile         => 20 ],
+                    [ gender         => 1 ],
+                  )
+                {
+                    my ( $k, $max ) = @$pair;
+                    next unless exists $p->{$k};
+                    my $v = $p->{$k};
+                    next unless defined $v;
+                    if ( _api_utf8_len($v) > $max ) {
+                        return $c->api_render_field_limit_violation( $k,
+                            $max );
+                    }
+                }
+                if ( exists $p->{curr} && defined $p->{curr} ) {
+                    my $cur = $p->{curr};
+                    if ( $cur ne '' && _api_utf8_len($cur) != 3 ) {
+                        return $c->api_render_field_exact_length( 'curr', 3 );
+                    }
+                }
+            }
             $form           = new Form;
             $form->{db}     = $vc;
             $form->{client} = $client;
@@ -11579,7 +12144,8 @@ helper process_transaction => sub {
         };
     };
 
-    if ( $data->{files} && ref $data->{files} eq 'ARRAY' ) {
+    if ( $data->{files} && ref $data->{files} eq 'ARRAY' && @{ $data->{files} } )
+    {
         $form->{files}  = $data->{files};
         $form->{client} = $client;
         my $upload_result = FM->upload_files( $dbs, $c, $form, $vc );
@@ -11649,6 +12215,15 @@ $api->post(
         my $vc = $c->param('vc');
         return unless my $form = $c->check_perms("$vc.transaction");
 
+        if ( ref($data) eq 'HASH' ) {
+            if ( exists $data->{curr} && defined $data->{curr} ) {
+                my $cur = $data->{curr};
+                if ( $cur ne '' && _api_utf8_len($cur) != 3 ) {
+                    return $c->api_render_field_exact_length( 'curr', 3 );
+                }
+            }
+        }
+
         my $result = $c->process_transaction( $data, $form, $client );
 
         if ( ref($result) eq 'HASH' && exists $result->{error} ) {
@@ -11666,9 +12241,20 @@ $api->post(
                 $status = 500;
             }
 
+            # Standard client envelope: { message, code?, ... } — avoid legacy "error" alone
+            my $payload = {
+                message => $result->{message} // 'Request failed',
+                (
+                    defined $result->{error}
+                    ? ( code => $result->{error} )
+                    : ()
+                ),
+            };
+            $payload->{drive_response} = $result->{drive_response}
+              if exists $result->{drive_response};
             return $c->render(
                 status => $status,
-                json   => $result
+                json   => $payload
             );
         }
 
@@ -11676,7 +12262,7 @@ $api->post(
     }
 );
 $api->delete(
-    'arap/transaction/:vc/:id' => sub {
+    '/arap/transaction/:vc/:id' => sub {
         my $c      = shift;
         my $client = $c->param('client');
         my $id     = $c->param('id');
@@ -12064,21 +12650,23 @@ helper process_invoice => sub {
 
     if ( $data->{files} && ref $data->{files} eq 'ARRAY' ) {
         $form->{files}  = $c->decode_base64_files( $data->{files} );
-        $form->{client} = $client;
-        my $upload_result = FM->upload_files( $dbs, $c, $form, $vc );
-        if ( ref($upload_result) ne 'HASH' || !$upload_result->{success} ) {
-            my $upload_error =
-              ref($upload_result) eq 'HASH' && $upload_result->{error}
-              ? $upload_result->{error}
-              : 'Unknown upload failure';
-            die "file_upload_failed: $upload_error";
-        }
-        if ( ref($upload_result) eq 'HASH' && $upload_result->{fallback} ) {
-            $form->{_cloud_upload_error} = {
-                error          => $upload_result->{cloud_error},
-                drive_response => $upload_result->{drive_response},
-                fallback_to    => 'local',
-            };
+        if ( @{ $form->{files} } ) {
+            $form->{client} = $client;
+            my $upload_result = FM->upload_files( $dbs, $c, $form, $vc );
+            if ( ref($upload_result) ne 'HASH' || !$upload_result->{success} ) {
+                my $upload_error =
+                  ref($upload_result) eq 'HASH' && $upload_result->{error}
+                  ? $upload_result->{error}
+                  : 'Unknown upload failure';
+                die "file_upload_failed: $upload_error";
+            }
+            if ( ref($upload_result) eq 'HASH' && $upload_result->{fallback} ) {
+                $form->{_cloud_upload_error} = {
+                    error          => $upload_result->{cloud_error},
+                    drive_response => $upload_result->{drive_response},
+                    fallback_to    => 'local',
+                };
+            }
         }
     }
 
@@ -12293,6 +12881,65 @@ $api->post(
                 $form = $c->check_perms("vendor.invoice");
             }
         }
+        if ( !$form ) {
+            return;
+        }
+        if ( ref($data) eq 'HASH' ) {
+            my $d = $data;
+            if ( exists $d->{currency} && defined $d->{currency} ) {
+                my $cur = $d->{currency};
+                if ( $cur ne '' && _api_utf8_len($cur) != 3 ) {
+                    return $c->api_render_field_exact_length( 'currency', 3 );
+                }
+            }
+            if ( exists $d->{till} && defined $d->{till} ) {
+                my $t = $d->{till};
+                if ( $t ne '' && _api_utf8_len($t) > 20 ) {
+                    return $c->api_render_field_limit_violation( 'till', 20 );
+                }
+            }
+            if ( $d->{shipto} && ref( $d->{shipto} ) eq 'HASH' ) {
+                my $sh = $d->{shipto};
+                for my $sp (
+                    [ name     => 64 ],
+                    [ address1 => 64 ],
+                    [ address2 => 64 ],
+                    [ city     => 64 ],
+                    [ state    => 32 ],
+                    [ zipcode  => 32 ],
+                    [ country  => 32 ],
+                    [ contact  => 64 ],
+                    [ phone    => 20 ],
+                    [ fax      => 20 ],
+                  )
+                {
+                    my ( $api_key, $max ) = @$sp;
+                    next unless exists $sh->{$api_key};
+                    my $v = $sh->{$api_key};
+                    next unless defined $v;
+                    if ( _api_utf8_len($v) > $max ) {
+                        return $c->api_render_field_limit_violation(
+                            "shipto.$api_key", $max );
+                    }
+                }
+            }
+            if ( $d->{lines} && ref( $d->{lines} ) eq 'ARRAY' ) {
+                my $idx = 0;
+                for my $line ( @{ $d->{lines} } ) {
+                    if ( ref($line) eq 'HASH'
+                        && exists $line->{unit}
+                        && defined $line->{unit} )
+                    {
+                        my $u = $line->{unit};
+                        if ( $u ne '' && _api_utf8_len($u) > 10 ) {
+                            return $c->api_render_field_limit_violation(
+                                "lines[$idx].unit", 10 );
+                        }
+                    }
+                    $idx++;
+                }
+            }
+        }
         my $new_invoice_id = $c->process_invoice( $data, $form, $client );
 
         # Return the newly posted or updated invoice ID
@@ -12336,7 +12983,7 @@ $api->get(
         else {
             return $c->render(
                 json => {
-                    error =>
+                    message =>
                       "Invalid vc parameter. Must be 'customer' or 'vendor'."
                 },
                 status => 400
@@ -12352,7 +12999,7 @@ $api->get(
 
         if ( !$row ) {
             return $c->render(
-                json   => { error => "Invoice with ID $id not found." },
+                json   => { message => "Invoice with ID $id not found." },
                 status => 404
             );
         }
@@ -12566,7 +13213,7 @@ $api->get(
         else {
             return $c->render(
                 json => {
-                    error => 'Invalid vc parameter. Must be customer or vendor'
+                    message => 'Invalid vc parameter. Must be customer or vendor'
                 },
                 status => 400
             );
@@ -12592,6 +13239,13 @@ $api->post(
             return unless $form = $c->check_perms("cash.payments");
         }
 
+        if ( exists $json->{currency} && defined $json->{currency} ) {
+            my $cur = $json->{currency};
+            if ( $cur ne '' && _api_utf8_len($cur) != 3 ) {
+                return $c->api_render_field_exact_length( 'currency', 3 );
+            }
+        }
+
         # Validate required JSON fields
         unless ( $json->{account}
             && $json->{date}
@@ -12600,7 +13254,7 @@ $api->post(
         {
             return $c->render(
                 json => {
-                    error =>
+                    message =>
                       'Missing required fields: account, date, payments, method'
                 },
                 status => 400
@@ -12612,7 +13266,7 @@ $api->post(
         {
             return $c->render(
                 json => {
-                    error => 'Invalid method. Must be "individual" or "group"'
+                    message => 'Invalid method. Must be "individual" or "group"'
                 },
                 status => 400
             );
@@ -12661,7 +13315,7 @@ $api->post(
                 unless ( $payment->{id} && defined $payment->{paid} ) {
                     return $c->render(
                         json => {
-                            error =>
+                            message =>
 "Payment $row_num missing required fields: id, paid"
                         },
                         status => 400
@@ -12700,7 +13354,7 @@ $api->post(
             }
             else {
                 return $c->render(
-                    json   => { error => 'Payment posting failed' },
+                    json   => { message => 'Payment posting failed' },
                     status => 500
                 );
             }
@@ -12719,7 +13373,7 @@ $api->post(
                 {
                     return $c->render(
                         json => {
-                            error =>
+                            message =>
 'Invalid payment group structure. Required: customer, total_amount, invoices'
                         },
                         status => 400
@@ -12759,7 +13413,7 @@ $api->post(
                     unless ( $invoice->{id} && defined $invoice->{paid} ) {
                         return $c->render(
                             json => {
-                                error =>
+                                message =>
 "Invoice in payment group for $payment_group->{customer} missing required fields: id, paid"
                             },
                             status => 400
@@ -12798,7 +13452,7 @@ $api->post(
                 else {
                     return $c->render(
                         json => {
-                            error =>
+                            message =>
 "Payment posting failed for customer: $payment_group->{customer}"
                         },
                         status => 500
@@ -13347,8 +14001,10 @@ sub process_order {
     # Handle file uploads
     if ( $data->{files} && ref $data->{files} eq 'ARRAY' ) {
         $form->{files}  = $c->decode_base64_files( $data->{files} );
-        $form->{client} = $client;
-        FM->upload_files( $dbs, $c, $form, $vc );
+        if ( @{ $form->{files} } ) {
+            $form->{client} = $client;
+            FM->upload_files( $dbs, $c, $form, $vc );
+        }
     }
 
     return $form->{id};
