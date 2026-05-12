@@ -3725,7 +3725,8 @@ helper check_perms => sub {
     $form->{revtrans}     = $defaults->{revtrans}                || 0;
     $form->{audittrail}   = $defaults->{audittrail}              || 0;
     $form->{profile_id}   = $profile->{profile_id};
-    $form->{paymentfile}  = $defaults->{paymentfile} ? 1 : 0;
+    $form->{paymentfile}          = $defaults->{paymentfile}          ? 1 : 0;
+    $form->{paymentfile_workflow} = $defaults->{paymentfile_workflow} ? 1 : 0;
 
     # admin/owner bypass
     my $admin = $central->query(
@@ -7093,8 +7094,9 @@ $api->get(
                 sort_names_by_number => to_boolean( $form->{namesbynumber} ),
                 xe_latex             => to_boolean( $form->{xelatex} ),
                 type_of_contact      => $form->{typeofcontact} || "",
-                paymentfile          => $form->{paymentfile}   || 0,
-                term_days            => $form->{term_days}     || 0
+                paymentfile          => $form->{paymentfile}          || 0,
+                paymentfile_workflow => $form->{paymentfile_workflow} || 0,
+                term_days            => $form->{term_days}            || 0
 
             },
 
@@ -7339,8 +7341,9 @@ $api->post(
             $mapped_data->{xelatex} = $json_data->{settings}->{xe_latex};
             $mapped_data->{typeofcontact} =
               $json_data->{settings}->{type_of_contact};
-            $mapped_data->{paymentfile} = $json_data->{settings}->{paymentfile};
-            $mapped_data->{term_days}   = $json_data->{settings}->{term_days};
+            $mapped_data->{paymentfile}          = $json_data->{settings}->{paymentfile};
+            $mapped_data->{paymentfile_workflow} = $json_data->{settings}->{paymentfile_workflow};
+            $mapped_data->{term_days}            = $json_data->{settings}->{term_days};
         }
 
  # Map account defaults (these appear to be ID values only in the old structure)
@@ -7425,7 +7428,7 @@ $api->post(
         }
 
         $form->{optional} =
-"company street post_office address address1 address2 city state zip country tel fax companyemail companywebsite yearend weightunit businessnumber closedto revtrans audittrail method cdt namesbynumber xelatex typeofcontact roundchange referenceurl annualinterest latepaymentfee restockingcharge checkinventory hideaccounts linetax forcewarehouse glnumber sinumber sonumber vinumber batchnumber vouchernumber ponumber sqnumber rfqnumber partnumber projectnumber employeenumber customernumber vendornumber lock_glnumber lock_sinumber lock_sonumber lock_ponumber lock_sqnumber lock_rfqnumber lock_employeenumber lock_customernumber lock_vendornumber clearing transition paymentfile term_days AR_paid AP_paid smtp_host smtp_port smtp_username smtp_from_name smtp_ssl smtp_sasl";
+"company street post_office address address1 address2 city state zip country tel fax companyemail companywebsite yearend weightunit businessnumber closedto revtrans audittrail method cdt namesbynumber xelatex typeofcontact roundchange referenceurl annualinterest latepaymentfee restockingcharge checkinventory hideaccounts linetax forcewarehouse glnumber sinumber sonumber vinumber batchnumber vouchernumber ponumber sqnumber rfqnumber partnumber projectnumber employeenumber customernumber vendornumber lock_glnumber lock_sinumber lock_sonumber lock_ponumber lock_sqnumber lock_rfqnumber lock_employeenumber lock_customernumber lock_vendornumber clearing transition paymentfile paymentfile_workflow term_days AR_paid AP_paid smtp_host smtp_port smtp_username smtp_from_name smtp_ssl smtp_sasl";
 
         # Save the defaults
         my $result = AM->save_defaults( $c->slconfig, $form );
