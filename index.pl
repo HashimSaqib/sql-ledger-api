@@ -11919,8 +11919,12 @@ $api->get(
             my $ai_processing =
               $dbs->query( "SELECT * FROM ai_processing WHERE reference_id = ?",
                 $form->{id} )->hash;
-            if ( $payment_file || $ai_processing ) {
+            if ($payment_file) {
                 $payment_file = 1;
+            }
+            elsif ($ai_processing) {
+                my $defaults = $c->get_defaults($client);
+                $payment_file = $defaults->{paymentfile_workflow} ? 1 : 0;
             }
             my $ap_row =
               $dbs->query( "SELECT external_info FROM ap WHERE id = ?",
