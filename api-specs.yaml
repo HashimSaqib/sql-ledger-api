@@ -80,18 +80,31 @@ tags:
       **Permissions:** **`stations.manage`** — list/write/delete stations and
       user assignments (**`GET /workstations*`** writes). **`stations.get`** —
       operator inbox (**`GET /workstations/user/stations`**).
-      **`vendor.transaction`** — move invoices between stations (**`POST
-      /workstations/transfer-invoice`**).
+      **`vendor.transaction`** or **`customer.transaction`** — move invoices
+      between stations (**`POST /workstations/transfer-invoice`**).
 
       **Scope:** Routings (**`invoice_station`**, **`GET …/user/stations`**,
-      **transfer**) target **vendor AP** documents (`ap.id`), not AR/customer
-      invoices.
+      **transfer**) cover both **AP** (`ap.id`, `transaction_type = 'ap'`) and
+      **AR** (`ar.id`, `transaction_type = 'ar'`) documents. The
+      **`invoice_station`** and **`invoice_station_history`** tables carry a
+      **`transaction_type`** column (`'ap'` default) to distinguish them.
+
+      **Station default types:** **`station_type`** controls which transaction
+      type a station serves as the default routing target.
+      **`default`** — default for both AP and AR.
+      **`default_ap`** — default for AP (vendor) transactions only.
+      **`default_ar`** — default for AR (customer) transactions only.
+      **`receipt`** — bank-import receipt station (direction-aware: credit →
+      AR, debit → AP). The uniqueness index allows at most one active station
+      per type.
 
       **Approval rules** are stored per station in **`station_approval_rules`**.
-      On save, if the JSON body includes a **`rules`** property (including
-      **`"rules": []`**), the server deletes all rule rows for that station and
-      inserts the list you send (**empty array ⇒ no rules**). If you **omit**
-      the **`rules`** key entirely on update, rule rows are left unchanged. See
+      Rules apply to **AP transactions only** — AR transactions may be approved
+      by any user with access to the station regardless of amount. On save, if
+      the JSON body includes a **`rules`** property (including **`"rules":
+      []`**), the server deletes all rule rows for that station and inserts the
+      list you send (**empty array ⇒ no rules**). If you **omit** the **`rules`**
+      key entirely on update, rule rows are left unchanged. See
       **`StationRuleInput`** for valid **`rule_type`** / **`operator`** /
       **`condition_value`** combos.
 
@@ -1294,22 +1307,24 @@ components:
         (`su.is_active`) joined to active `station_approval_rules`
         (`sar.is_active`) for the authenticated `profile.id`.
 
-        • Posting `"pending": "0"` (**approved** immediately): require either an
+        • Posting `”pending”: “0”` (**approved** immediately): require either an
         `all` rule on the user's matched stations, or — under `amount` rules
         only — that the document total (sum of `lines[].amount` plus computed
         taxes from `taxAccount`/`taxAmount` on lines or entries in `taxes`) is
         **≤** the **maximum** numeric `condition_value` across those `amount`
         rules (Perl takes the highest threshold).
 
-        • Posting `"pending": "1"` (**or omitting `pending`** — both set
+        • Posting `”pending”: “1”` (**or omitting `pending`** — both set
         internal **pending** truthy before the ledger) **skips denial** branches
         of **`verify_station_access`** (**`access_denied`**,
         **`amount_exceeded`**, **`no_amount_rules`** — see
         **`ARAPTransactionPostErrorResponse`**), so drafts can bypass those
         gates.
 
-        There is **no** equivalent gate for **`vc`** **`customer`** (AR paths
-        never call **`verify_station_access`**).
+        **Customer (AR) workstation approvals:** **`verify_station_access`** is
+        **never called** for AR transactions. Any user with access to the station
+        (`station_users`) can approve an AR document regardless of amount — post
+        **`”pending”: “0”`** directly to approve.
 
         Approval rules/stations are administered via **`/workstations*`**
         (**Workstations** tag).
@@ -1809,9 +1824,9 @@ components:
         Company configuration returned by **`GET /system/companydefaults`** and
         accepted (partially) by **`POST /system/companydefaults`**. Top-level
         sections mirror the API: **`company_info`** (name, address, contact,
-        identifiers), **`settings`** (precision, rounding, reporting,
-        `line_tax`, etc.), **`account_defaults`** (numeric chart ids for
-        IC/AR/AP/etc.), **`number_sequences`** (pattern + `locked` booleans per
+        identifiers), **`settings`** (reporting, `line_tax`, etc.),
+        **`account_defaults`** (numeric chart ids for AR/AP/etc.),
+        **`number_sequences`** (pattern + `locked` booleans per
         sequence), **`all_accounts`** (reference pick list), and **`smtp`**
         (host metadata; password via separate server flow). Omitted POST
         sections are left unchanged.
@@ -2167,13 +2182,13 @@ components:
           type: string
           nullable: true
           description: >-
-            Arbitrary string label used for unique **routing slots** among
-            **active** stations — at most **one** active station may use a given
-            non-null type (server returns **409** on conflict). Plugin code
-            references include **`default`** (legacy via **`is_default`**), and
-            **`receipt`** (AI bank/ingest flows in **`neo_ai_plugin/AI.pl`**).
-            You may define other types for your own automation; they are not
-            validated against a fixed enum in SQL.
+            Routing slot identifier — at most **one** active station may hold a
+            given non-null type (partial unique index; server returns **409** on
+            conflict). Known values: **`default`** — default routing for both AP
+            and AR; **`default_ap`** — default for AP (vendor) transactions only;
+            **`default_ar`** — default for AR (customer) transactions only;
+            **`receipt`** — bank-import receipt station (direction-aware).
+            Custom values are accepted by SQL with no enum validation.
         workflow_order:
           type: integer
           nullable: true
@@ -2319,16 +2334,24 @@ components:
     InvoiceTransferRequest:
       type: object
       description: >-
-        **`invoice_id`** is **`ap.id`** (vendor/AP invoice). **`to_station_id`**
-        must reference an **active** **`stations`** row. **`transfer_notes`**
-        persisted on **`invoice_station_history`** (optional, default empty
-        string).
+        **`invoice_id`** is **`ap.id`** for AP or **`ar.id`** for AR depending
+        on **`transaction_type`**. **`to_station_id`** must reference an
+        **active** **`stations`** row. **`transfer_notes`** persisted on
+        **`invoice_station_history`** (optional, default empty string).
       required: [ invoice_id, to_station_id ]
       properties:
         invoice_id:
           type: integer
         to_station_id:
           type: integer
+        transaction_type:
+          type: string
+          enum: [ ap, ar ]
+          default: ap
+          description: >-
+            **`'ap'`** (default) — targets **`ap`** table; requires
+            **`vendor.transaction`**. **`'ar'`** — targets **`ar`** table;
+            requires **`customer.transaction`**.
         transfer_notes:
           type: string
           nullable: true
@@ -2421,24 +2444,35 @@ components:
     WorkflowPendingInvoice:
       type: object
       description: >-
-        Unapproved (**`approved = false`**) **`ap`** invoice joined for the
-        operator inbox (**`GET /workstations/user/stations`**). **`amount`** /
-        **`netamount`** may be scaled by **`exchangerate`** (`round_amount` in
-        plugin). Rows include many extra vendor/bank/address/`files` columns —
-        schema allows **`additionalProperties`**.
+        Unapproved (**`approved = false`**) **AP or AR** invoice row returned
+        by the operator inbox (**`GET /workstations/user/stations`**) via a
+        UNION of `ap` and `ar` tables. **`transaction_type`** distinguishes the
+        source table. **`amount`** / **`netamount`** may be scaled by
+        **`exchangerate`**. Bank/IBAN columns (**`bank_account_iban`** etc.) are
+        **`null`** for AR rows. Vendor/customer contact fields are unified as
+        **`vc_name`**, **`vc_phone`**, **`vc_email`**. Rows include many extra
+        address/**`files`** columns — schema allows **`additionalProperties`**.
       additionalProperties: true
       properties:
         id:
           type: integer
+        transaction_type:
+          type: string
+          enum: [ ap, ar ]
+          description: Source table — **`'ap'`** (vendor) or **`'ar'`** (customer).
         invnumber:
           type: string
         transdate:
           type: string
           format: date
-        vendor_id:
-          type: integer
+        vc_name:
+          type: string
           nullable: true
-        vendor_name:
+          description: Vendor name (AP) or customer name (AR).
+        vc_phone:
+          type: string
+          nullable: true
+        vc_email:
           type: string
           nullable: true
         amount:
@@ -2449,6 +2483,18 @@ components:
           nullable: true
         curr:
           type: string
+        bank_account_iban:
+          type: string
+          nullable: true
+          description: Null for AR rows.
+        bank_account_qriban:
+          type: string
+          nullable: true
+          description: Null for AR rows.
+        bank_account_bic:
+          type: string
+          nullable: true
+          description: Null for AR rows.
         files:
           type: array
           items:
@@ -4987,14 +5033,16 @@ paths:
     post:
       tags:
         - Workstations
-      summary: Transfer AP invoice to another station
+      summary: Transfer invoice to another station
       description: >-
-        Targets **`invoice_station`** rows for **`ap`** only (**`invoice_id` =
-        `ap.id`** — not **`ar`**). Validates that the destination station exists
-        and differs from current assignment (**400** repeat). Writes
-        **`invoice_station_history`**.
+        Moves an AP or AR invoice between stations. Validates that the
+        destination station exists and differs from the current assignment
+        (**400** on repeat). Writes **`invoice_station`** and
+        **`invoice_station_history`** with the correct **`transaction_type`**.
 
-        **`vendor.transaction`** permission.
+        **Permission:** **`vendor.transaction`** for AP; **`customer.transaction`**
+        for AR (either satisfies the route guard — the server checks the
+        correct table based on **`transaction_type`** in the request body).
       security:
         - ApiKeyAuth: []
       requestBody:
@@ -5015,7 +5063,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/PluginLegacyErrorResponse"
         "403":
-          description: Missing **`vendor.transaction`**.
+          description: Missing **`vendor.transaction`** and **`customer.transaction`**.
         "404":
           content:
             application/json:
@@ -5031,13 +5079,15 @@ paths:
     get:
       tags:
         - Workstations
-      summary: My stations with pending vendor invoices
+      summary: My stations with pending invoices
       description: >-
         **`stations.get`** — returns **`{ stations: [...] }`**; each station
-        lists unapproved **`ap`** invoices joined with vendor/bank/address
-        columns, **`files`** via **`FM`**, optional plugin enrichments. Admin
-        users also receive synthetic **Unassigned** (**`id`**: **`-1`**) for AP
-        rows with no **`invoice_station`** row.
+        lists unapproved **AP** (`ap`) and **AR** (`ar`) invoices via a UNION
+        query, joined with vendor/customer/bank/address columns and **`files`**
+        via **`FM`**. Each invoice row includes **`transaction_type`**
+        (`'ap'` or `'ar'`). Bank/IBAN columns are **`null`** for AR rows. Admin
+        users also receive a synthetic **Unassigned** (**`id`**: **`-1`**) entry
+        for invoices with no **`invoice_station`** row.
       security:
         - ApiKeyAuth: []
       responses:
