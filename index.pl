@@ -82,26 +82,63 @@ helper slconfig => sub { \%myconfig };
 helper dbs => sub {
     my ( $c, $dbname ) = @_;
 
+    # Reject malformed dataset names before reaching libpq. Without this an
+    # attacker can probe arbitrary database names and (because a failed
+    # connect can take down the worker mid-request) cause a denial of service.
+    unless ( defined $dbname && $dbname =~ /^[a-z][a-z0-9_]{0,62}$/ ) {
+        $c->render(
+            status => 400,
+            json   => { message => "Invalid dataset name" }
+        );
+        return undef;
+    }
+
+    # Confirm the dataset is registered in centraldb. This blocks access to
+    # postgres system databases (postgres, template0/1, centraldb) via the
+    # /client/:client route prefix even if the Postgres role can reach them.
+    my $central;
+    eval {
+        $central = DBI->connect(
+            "dbi:Pg:dbname=centraldb", $postgres_user, $postgres_password,
+            { RaiseError => 1, PrintError => 0 }
+        );
+    };
+    unless ($central) {
+        $c->app->log->error(
+            "dbs($dbname): centraldb connect failed: "
+              . ( $DBI::errstr // $@ // 'unknown' ) );
+        $c->render(
+            status => 500,
+            json   => { message => "Backend unavailable" }
+        );
+        return undef;
+    }
+    my ($known) = $central->selectrow_array(
+        "SELECT 1 FROM dataset WHERE db_name = ?", undef, $dbname );
+    $central->disconnect;
+    unless ($known) {
+        $c->render(
+            status => 404,
+            json   => { message => "Unknown dataset: $dbname" }
+        );
+        return undef;
+    }
+
     my $dbh;
     eval {
         $dbh = DBI->connect( "dbi:Pg:dbname=$dbname", $postgres_user,
-            $postgres_password, { RaiseError => 1, PrintError => 1 } );
+            $postgres_password, { RaiseError => 1, PrintError => 0 } );
     };
 
     if ( $@ || !$dbh ) {
         my $error_message = $DBI::errstr // $@ // "Unknown error";
-
-        # Ensure no further processing or responses are sent after this
-        $c->render(
-            status => 500,
-            json   => {
-                message =>
-                  "Failed to connect to the database '$dbname': $error_message"
-            }
-        );
         $c->app->log->error(
             "Failed to connect to the database '$dbname': $error_message");
-        return undef;    # Return undef to prevent further processing
+        $c->render(
+            status => 500,
+            json   => { message => "Failed to connect to the dataset" }
+        );
+        return undef;
     }
 
     my $dbs = DBIx::Simple->connect($dbh);
@@ -2194,7 +2231,6 @@ $central->post(
 
         # If no rows have parent_id values, run the parent mapping SQL
         if ( $parent_id_count == 0 ) {
-            warn("Assigning Parent IDs to charts");
             my $parent_mapping_sql = q{
                 -- Create a CTE to get each 'A' row and the most recent preceding 'H' row
                 WITH parent_mapping AS (
@@ -2230,7 +2266,6 @@ $central->post(
         $cat_sth->finish();
 
         if ( $cat_count == 0 ) {
-            warn("Seeding chart categories from header accounts");
 
             # Create one category per header account, ordered by accno
             $dataset_dbh->do(q{
@@ -2265,7 +2300,6 @@ $central->post(
             run_sql_file( $dataset, $gifi_file );
         }
         else {
-            warn "The gifi file '$gifi_file' does not exist!";
         }
 
         # Grant privileges on the database itself
@@ -2388,7 +2422,6 @@ sub run_sql_file {
     # Check if the file content is empty
     if ( !defined($sql) || $sql =~ /^\s*$/ ) {
         if ( $sql_file !~ /-chart\.sql$/ ) {
-            warn "The SQL file '$sql_file' is empty. Skipping this file.";
             $dbh->disconnect;
             return;
         }
@@ -2442,8 +2475,6 @@ $central->delete(
 
         my $central_dbs = $c->central_dbs();
         my $profile     = $c->get_user_profile();
-        warn( Dumper $profile );
-        warn($dataset_id);
 
         # Begin transaction for atomic operations
         eval {
@@ -2459,7 +2490,6 @@ $central->delete(
                  AND da.access_level = ?",
                 $dataset_id, $profile->{profile_id}, 'owner'
             )->hash;
-            warn( Dumper $verification );
             unless ( $verification && $verification->{db_name} ) {
                 $central_dbs->rollback();
                 return $c->render(
@@ -3861,7 +3891,6 @@ $api->post(
         my $result =
           $dbs->query( "SELECT * FROM session WHERE sessionkey = ?",
             $sessionkey )->hash;
-        warn($result);
         if ($result) {
 
             # Session key is valid, return true
@@ -3956,64 +3985,6 @@ $api->post(
                 client     => $dbname,
                 company    => $company->{fldvalue},
                 acs        => $acs
-            }
-        );
-    }
-);
-
-$api->post(
-    '/auth/create_api_login' => sub {
-        my $c          = shift;
-        my $client     = $c->param('client');
-        my $params     = $c->req->params->to_hash;
-        my $employeeid = $params->{employeeid};
-        my $password   = $params->{password};
-
-        # Step 1: Check for missing parameters
-        unless ( $employeeid && $password ) {
-            return $c->render(
-                status => 400,
-                json   => {
-                    message =>
-                      "Missing required parameters 'employeeid' or 'password'"
-                }
-            );
-        }
-
-        # Step 2: Try to connect to the existing database using the client name
-        my $dbs;
-        eval { $dbs = $c->dbs($client); };
-        if ($@) {
-            return $c->render(
-                status => 500,
-                json   => {
-                    message =>
-                      "Failed to connect to the client database '$client': $@"
-                }
-            );
-        }
-
-        # Step 3: Use PostgreSQL to hash the password with bcrypt
-        my $hashed_password;
-        eval {
-            my $query = '
-            INSERT INTO login (employeeid, password)
-            VALUES (?, crypt(?, gen_salt(\'bf\')))
-        ';
-            $dbs->query( $query, $employeeid, $password );
-        };
-        if ($@) {
-            return $c->render(
-                status => 500,
-                json   => { message => "Failed to create API login: $@" }
-            );
-        }
-
-        # Step 4: Return success message
-        return $c->render(
-            json => {
-                message =>
-                  "API login created successfully for user '$employeeid'"
             }
         );
     }
@@ -5860,7 +5831,6 @@ $api->get(
         $form->{id} = $id;
         GL->transaction( $c->slconfig, $form );
 
-        warn( Dumper $form );
 
         # Extract the GL array and rename it to "LINES" in the JSON response
         my @lines;
@@ -6597,7 +6567,8 @@ $api->delete(
 
 $api->get(
     '/charts' => sub {
-        my $c      = shift;
+        my $c = shift;
+        return unless my $form = $c->check_perms("dashboard");
         my $client = $c->param('client');
 
         # Create the DBIx::Simple handle
@@ -8569,8 +8540,6 @@ $api->post(
         if ( $form->{id} ) {
             $form->{id} = $form->{id};
             my $dbs = $c->dbs($client);
-            warn( $form->{id} );
-            warn( $form->{detail} );
             $dbs->query( "UPDATE department SET detail = ? where id = ?",
                 $data->{detail}, $form->{id} );
         }
@@ -8694,7 +8663,8 @@ $api->post(
 
 $api->get(    # to be replaced with get_links
     '/items' => sub {
-        my $c      = shift;
+        my $c = shift;
+        return unless my $form = $c->check_perms("dashboard");
         my $client = $c->param('client');
         my $dbs    = $c->dbs($client);
 
@@ -8760,7 +8730,6 @@ $api->get(
         $form->{open}    = 1;
 
         IC->all_parts( $c->slconfig, $form );
-        warn( Dumper $form );
         my $parts = $form->{parts};
         $c->render(
             json => ( ref($parts) eq 'ARRAY' ? $parts : [] ),
@@ -12968,11 +12937,19 @@ $api->post(
 
 $api->delete(
     '/arap/invoice/:vc/:id' => sub {
-        my $c      = shift;
+        my $c  = shift;
+        my $vc = $c->param('vc');
+        my $form;
+        if ( $vc eq 'customer' ) {
+            return unless $form = $c->check_perms(
+                "customer.invoice, customer.invoice_return");
+        }
+        else {
+            return unless $form = $c->check_perms(
+                "vendor.invoice, vendor.invoice_return");
+        }
         my $client = $c->param('client');
         my $id     = $c->param('id');
-        my $vc     = $c->param('vc');
-        my $form   = new Form;
         $form->{id} = $id;
         $c->slconfig->{dbconnect} = "dbi:Pg:dbname=$client";
         if ( $vc eq 'customer' ) {
@@ -15296,7 +15273,6 @@ sub html_to_pdf {
         PDF::WebKit->import();
         1;
     } or do {
-        warn "PDF::WebKit or File::Temp module not found: $@";
         return 0;
     };
 
@@ -15314,7 +15290,6 @@ sub html_to_pdf {
         $kit = PDF::WebKit->new($filename);
         1;
     } or do {
-        warn "Failed to initialize PDF::WebKit: $@";
         return 0;
     };
 
@@ -15323,7 +15298,6 @@ sub html_to_pdf {
         $pdf = $kit->to_pdf;
         1;
     } or do {
-        warn "Failed to generate PDF: $@";
         return 0;
     };
 
@@ -15332,8 +15306,6 @@ sub html_to_pdf {
         return $pdf;
     }
     else {
-        warn "Generated PDF appears to be empty or too small: "
-          . ( defined $pdf ? length($pdf) . " bytes" : "undefined" );
         return 0;
     }
 }
@@ -17380,7 +17352,6 @@ $api->post(
         )->result;
         if ( $res->is_success ) {
             my $token_data = $res->json;
-            warn( Dumper $token_data );
             my $access_token = $token_data->{access_token};
             my $refresh_token =
               defined $token_data->{refresh_token}
@@ -17416,7 +17387,6 @@ $api->post(
         }
         else {
             my $error_details = $res->json || { error => $res->message };
-            warn( Dumper $res->json );
             return $c->render(
                 json => {
                     success => 0,
@@ -17432,7 +17402,8 @@ $api->post(
 
 $api->get(
     "/files/unsynced" => sub {
-        my $c      = shift;
+        my $c = shift;
+        return unless my $form = $c->check_perms("document.list");
         my $client = $c->param('client');
         my $dbs    = $c->dbs($client);
 
@@ -17452,7 +17423,8 @@ $api->get(
 
 $api->post(
     "/files/sync-to-drive" => sub {
-        my $c      = shift;
+        my $c = shift;
+        return unless my $form = $c->check_perms("document.list");
         my $client = $c->param('client');
         my $dbs    = $c->dbs($client);
 
@@ -17819,7 +17791,6 @@ app->minion->add_task(
                 my $member = $zip->addFile( $pdf_info->{file_path},
                     $pdf_info->{display_name} );
                 unless ($member) {
-                    warn "Failed to add $pdf_info->{file_path} to ZIP";
                 }
             }
 
@@ -18334,7 +18305,9 @@ $api->post(
 );
 $api->get(
     "/email_jobs" => sub {
-        my $c      = shift;
+        my $c = shift;
+        return unless my $form =
+            $c->check_perms("customer.transaction, vendor.transaction");
         my $minion = $c->minion;
         my $client = $c->param('client');
 
@@ -18342,7 +18315,6 @@ $api->get(
         my @job_data;
 
         while ( my $info = $jobs->next ) {
-            warn( Dumper $info );
             next
               unless defined $info->{notes}
               && defined $info->{notes}{client}
@@ -18390,7 +18362,9 @@ $api->get(
 );
 $api->get(
     "/email_job_status/:job_id" => sub {
-        my $c      = shift;
+        my $c = shift;
+        return unless my $form =
+            $c->check_perms("customer.transaction, vendor.transaction");
         my $job_id = $c->param('job_id');
         my $status =
           $c->param('status');  # Optional: 'success', 'error', or undef for all
@@ -18442,7 +18416,9 @@ $api->get(
 
 $api->post(
     "/manage_email_job" => sub {
-        my $c      = shift;
+        my $c = shift;
+        return unless my $form =
+            $c->check_perms("customer.transaction, vendor.transaction");
         my $minion = $c->minion;
         my $client = $c->param('client');
         my $job_id = $c->param('job_id');
@@ -18586,7 +18562,8 @@ $api->get(
 );
 $api->post(
     '/onboarding' => sub {
-        my $c      = shift;
+        my $c = shift;
+        return unless $c->is_admin;
         my $client = $c->param('client');
         my $dbs    = $c->dbs($client);
         my $data   = $c->req->json;
