@@ -2450,8 +2450,12 @@ components:
         source table. **`amount`** / **`netamount`** may be scaled by
         **`exchangerate`**. Bank/IBAN columns (**`bank_account_iban`** etc.) are
         **`null`** for AR rows. Vendor/customer contact fields are unified as
-        **`vc_name`**, **`vc_phone`**, **`vc_email`**. Rows include many extra
-        address/**`files`** columns — schema allows **`additionalProperties`**.
+        **`vc_name`**, **`vc_phone`**, **`vc_email`**. **`description`** and
+        **`notes`** are returned for client-side filtering. **`vat_accounts`**
+        lists the tax (VAT) charts touched by the transaction's `acc_trans`
+        rows (filled by a single batch query for the whole page). Rows include
+        many extra address/**`files`** columns — schema allows
+        **`additionalProperties`**.
       additionalProperties: true
       properties:
         id:
@@ -2483,6 +2487,14 @@ components:
           nullable: true
         curr:
           type: string
+        description:
+          type: string
+          nullable: true
+          description: Document description from `ap.description` / `ar.description`.
+        notes:
+          type: string
+          nullable: true
+          description: Free-text notes from `ap.notes` / `ar.notes`.
         bank_account_iban:
           type: string
           nullable: true
@@ -2495,6 +2507,26 @@ components:
           type: string
           nullable: true
           description: Null for AR rows.
+        vat_accounts:
+          type: array
+          description: >-
+            Tax (VAT) chart accounts touched by this transaction's
+            `acc_trans` rows (chart link contains `AP_tax` or `AR_tax`).
+            Empty array when the transaction has no VAT line.
+          items:
+            type: object
+            additionalProperties: true
+            properties:
+              chart_id:
+                type: integer
+              accno:
+                type: string
+              description:
+                type: string
+                nullable: true
+              amount:
+                type: number
+                nullable: true
         files:
           type: array
           items:
@@ -2552,6 +2584,54 @@ components:
           type: string
         id:
           type: integer
+
+    WorkstationBulkItem:
+      type: object
+      required: [ id, transaction_type ]
+      properties:
+        id:
+          type: integer
+          description: AP or AR row id.
+        transaction_type:
+          type: string
+          enum: [ ap, ar ]
+
+    WorkstationBulkRequest:
+      type: object
+      required: [ items ]
+      properties:
+        items:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/WorkstationBulkItem"
+
+    WorkstationBulkResultRow:
+      type: object
+      description: >-
+        Per-item result. **`ok = 1`** when the action ran; **`ok = 0`** with a
+        human-readable **`error`** when the item was skipped (already approved,
+        amount cap exceeded, closed period, already on target station, etc.).
+      properties:
+        id:
+          type: integer
+        transaction_type:
+          type: string
+          enum: [ ap, ar ]
+        ok:
+          type: integer
+          enum: [ 0, 1 ]
+        error:
+          type: string
+          nullable: true
+
+    WorkstationBulkResponse:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkstationBulkResultRow"
 
 paths:
   # ─────────────────────────────────────────────────────────────────────────────
@@ -5075,6 +5155,129 @@ paths:
               schema:
                 $ref: "#/components/schemas/PluginLegacyErrorResponse"
 
+  /workstations/bulk-approve:
+    post:
+      tags:
+        - Workstations
+      summary: Approve many AP/AR drafts at once
+      description: >-
+        Flips the **`approved`** flag on each AP or AR draft and on every
+        related **`acc_trans`** row (the original `AA->post_transaction` insert
+        already happened when the draft was created — this endpoint does **not**
+        re-post). For each AP item the caller's amount cap (highest active
+        `station_approval_rules.condition_value` across their stations, or
+        `'all'`) is enforced; AR items skip the cap (per Neo-Ledger AR rules).
+        Writes an **`audittrail`** row per approval. Each item is reported
+        independently — partial success is normal.
+
+        **Permission:** **`vendor.transaction`** or **`customer.transaction`**.
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkstationBulkRequest"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkstationBulkResponse"
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PluginLegacyErrorResponse"
+        "403":
+          description: Missing **`vendor.transaction`** and **`customer.transaction`**.
+
+  /workstations/bulk-transfer:
+    post:
+      tags:
+        - Workstations
+      summary: Transfer many AP/AR drafts to one station
+      description: >-
+        Moves each item to **`to_station_id`** using the same
+        **`invoice_station`** upsert + **`invoice_station_history`** insert as
+        the single-row `/workstations/transfer-invoice` endpoint. Items already
+        sitting on the target station are reported back with an
+        `Already on the target station.` message instead of erroring the whole
+        batch.
+
+        **Permission:** **`vendor.transaction`** or **`customer.transaction`**.
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/WorkstationBulkRequest"
+                - type: object
+                  required: [ to_station_id ]
+                  properties:
+                    to_station_id:
+                      type: integer
+                    transfer_notes:
+                      type: string
+                      nullable: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkstationBulkResponse"
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PluginLegacyErrorResponse"
+        "403":
+          description: Missing **`vendor.transaction`** and **`customer.transaction`**.
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PluginLegacyErrorResponse"
+
+  /workstations/bulk-delete:
+    post:
+      tags:
+        - Workstations
+      summary: Delete many AP/AR drafts
+      description: >-
+        Deletes each item via **`AA->delete_transaction`** (regular AP/AR
+        transactions) or **`IS->delete_invoice`** / **`IR->delete_invoice`**
+        (when `ap.invoice` / `ar.invoice` is true). The closed-period cutoff
+        (`batch_transdate_exclusive_min`) is enforced for parity with
+        `/batch/delete`.
+
+        **Permission:** **`vendor.transaction`** or **`customer.transaction`**.
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkstationBulkRequest"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkstationBulkResponse"
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PluginLegacyErrorResponse"
+        "403":
+          description: Missing **`vendor.transaction`** and **`customer.transaction`**.
+
   /workstations/user/stations:
     get:
       tags:
@@ -5085,9 +5288,13 @@ paths:
         lists unapproved **AP** (`ap`) and **AR** (`ar`) invoices via a UNION
         query, joined with vendor/customer/bank/address columns and **`files`**
         via **`FM`**. Each invoice row includes **`transaction_type`**
-        (`'ap'` or `'ar'`). Bank/IBAN columns are **`null`** for AR rows. Admin
-        users also receive a synthetic **Unassigned** (**`id`**: **`-1`**) entry
-        for invoices with no **`invoice_station`** row.
+        (`'ap'` or `'ar'`), **`description`**, **`notes`**, and **`vat_accounts`**
+        (the tax charts hit by the transaction's `acc_trans` rows — populated
+        by a single batch query against `acc_trans + chart` for all
+        transactions in the response). Bank/IBAN columns are **`null`** for AR
+        rows. Admin users also receive a synthetic **Unassigned**
+        (**`id`**: **`-1`**) entry for invoices with no **`invoice_station`**
+        row.
       security:
         - ApiKeyAuth: []
       responses:

@@ -10109,7 +10109,7 @@ $api->get(
 
         # List of valid modules
         my @valid_modules =
-          qw(customer vendor Vendor Customer ic gl chart gl_report projects incomestatement employees reminder import alltaxes tax_report payments payments_report import_bank);
+          qw(customer vendor Vendor Customer ic gl chart gl_report projects incomestatement employees reminder import alltaxes tax_report payments payments_report import_bank workstations);
 
         # Return empty JSON object if module not valid
         return $c->render( json => {} )
@@ -10442,6 +10442,18 @@ $api->get(
             $response = {
                 payment_accounts => $bank_accounts,
                 clearing_account => $clearing_account
+            };
+        }
+
+        #--------------
+        # WORKSTATIONS module
+        # Lightweight picker data for the My Workstations filter row.
+        #--------------
+        elsif ( $module eq 'workstations' ) {
+            return unless $c->check_perms('stations.get');
+            $response = {
+                customers => $customers,
+                vendors   => $vendors,
             };
         }
 
