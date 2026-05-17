@@ -13,21 +13,31 @@
 
 package GL;
 
+use DateTime;
+use JSON::PP qw(decode_json encode_json);
+
 
 sub delete_transaction {
   my ($self, $myconfig, $form) = @_;
-  
+
   # connect to database
   my $dbh = $form->dbconnect_noauto($myconfig);
-  
+
   $form->{id} *= 1;
-  
+
+  # accrual GL entries are managed through their source AR/AP — refuse direct delete
+  my ($accrual_source) = $dbh->selectrow_array(qq|SELECT accrual_source FROM gl WHERE id = $form->{id}|);
+  if ($accrual_source) {
+    $dbh->disconnect;
+    $form->error("Accrual GL entry $form->{id} cannot be deleted directly. Edit the source $accrual_source to change or remove the accrual.");
+  }
+
   my %audittrail = ( tablename  => 'gl',
                      reference  => $form->{reference},
 		     formname   => 'transaction',
 		     action     => 'deleted',
 		     id         => $form->{id} );
- 
+
   $form->audittrail($dbh, "", \%audittrail);
 
   if ($form->{batchid} *= 1) {
@@ -87,12 +97,12 @@ sub delete_transaction {
 
 sub post_transaction {
   my ($self, $myconfig, $form, $dbh) = @_;
-  
+
   my $project_id;
   my $department_id;
   my $i;
   my $keepcleared;
-  
+
   my $disconnect = ($dbh) ? 0 : 1;
 
   # connect to database, turn off AutoCommit
@@ -102,6 +112,17 @@ sub post_transaction {
 
   my $query;
   my $sth;
+
+  # accrual GL entries are managed through their source AR/AP — refuse direct edits
+  # (allow the internal accrual flow itself by passing $form->{_accrual_internal})
+  if (($form->{id} || 0) * 1 && !$form->{_accrual_internal}) {
+    my ($accrual_source) = $dbh->selectrow_array(qq|SELECT accrual_source FROM gl WHERE id = |.($form->{id} * 1));
+    if ($accrual_source) {
+      $dbh->rollback if $disconnect;
+      $dbh->disconnect if $disconnect;
+      $form->error("Accrual GL entry $form->{id} cannot be edited directly. Edit the source $accrual_source to change or remove the accrual.");
+    }
+  }
   
   my $approved = ($form->{pending}) ? '0' : '1';
   my $action = ($approved) ? 'posted' : 'saved';
@@ -715,7 +736,8 @@ sub transactions {
 		 '' AS address1, '' AS address2, '' AS city,
 		 '' AS zipcode, '' AS country,
                  CASE WHEN tc.accno IS NOT NULL THEN CONCAT(tc.accno, '--', tc.description) END AS linetax_account, ac.linetaxamount,
-                 ac.project_id, COALESCE(tp.description, p.description) AS project_description
+                 ac.project_id, COALESCE(tp.description, p.description) AS project_description,
+                 g.accrual_source
                  FROM gl g
 		 JOIN acc_trans ac ON (g.id = ac.trans_id)
 		 JOIN chart c ON (ac.chart_id = c.id)
@@ -745,14 +767,15 @@ sub transactions {
                           WHERE it.trans_id = a.id AND it.invoice_id = i.id)
                      ELSE CASE WHEN tc.accno IS NOT NULL THEN CONCAT(tc.accno, '--', tc.description) END
                  END AS linetax_account,
-                 CASE 
-                     WHEN a.invoice AND ac.id IS NOT NULL AND i.id IS NOT NULL THEN 
-                         (SELECT SUM(it.taxamount) 
-                          FROM invoicetax it 
+                 CASE
+                     WHEN a.invoice AND ac.id IS NOT NULL AND i.id IS NOT NULL THEN
+                         (SELECT SUM(it.taxamount)
+                          FROM invoicetax it
                           WHERE it.trans_id = a.id AND it.invoice_id = i.id)
-                     ELSE ac.linetaxamount 
+                     ELSE ac.linetaxamount
                  END AS linetaxamount,
-                 ac.project_id, COALESCE(tp.description, p.description) AS project_description
+                 ac.project_id, COALESCE(tp.description, p.description) AS project_description,
+                 NULL::text AS accrual_source
 		 FROM ar a
 		 JOIN acc_trans ac ON (a.id = ac.trans_id)
 		 $invoicejoin
@@ -793,14 +816,15 @@ sub transactions {
                    THEN CONCAT(tc_fx_pair.accno, '--', tc_fx_pair.description)
                      ELSE CASE WHEN tc.accno IS NOT NULL THEN CONCAT(tc.accno, '--', tc.description) END
                  END AS linetax_account,
-                 CASE 
-                     WHEN a.invoice AND ac.id IS NOT NULL AND i.id IS NOT NULL THEN 
-                         (SELECT SUM(it.taxamount) 
-                          FROM invoicetax it 
+                 CASE
+                     WHEN a.invoice AND ac.id IS NOT NULL AND i.id IS NOT NULL THEN
+                         (SELECT SUM(it.taxamount)
+                          FROM invoicetax it
                           WHERE it.trans_id = a.id AND it.invoice_id = i.id)
-                     ELSE ac.linetaxamount 
+                     ELSE ac.linetaxamount
                  END AS linetaxamount,
-                 ac.project_id, COALESCE(tp.description, p.description) AS project_description
+                 ac.project_id, COALESCE(tp.description, p.description) AS project_description,
+                 NULL::text AS accrual_source
 		 FROM ap a
 		 JOIN acc_trans ac ON (a.id = ac.trans_id)
 		 $invoicejoin
@@ -1366,6 +1390,316 @@ sub transaction {
   
   $dbh->disconnect;
 
+}
+
+
+# ---------------------------------------------------------------------------
+# Accrual accounting
+#
+# Called from SL::AA::post_transaction and SL::IS::post_invoice AFTER the source
+# AR/AP has written its own acc_trans rows and ar/ap row is UPDATEd. Operates on
+# the same $dbh so it joins the source transaction's DB transaction.
+#
+# Inputs (all on $form):
+#   $form->{id}                    source AR/AP id (already set by caller)
+#   $form->{accrual}               hashref: {period, length, startdate}
+#                                  or undef/empty when no accrual is wanted
+#   $form->{transdate}             source invoice transdate (used as default startdate)
+#   $form->{invnumber}             used as the accrual GL reference
+#   $form->{currency}, exchangerate (already locked at posting time)
+#   $form->{precision}             from get_defaults
+#   $form->{employee_id}, department_id
+#
+# $module is 'ar' or 'ap'.
+#
+# Side effects:
+#   - DELETE existing accrual GL entry if config was removed or changed
+#   - INSERT/refresh a gl row with accrual_source = "<module>:<source_id>"
+#   - INSERT acc_trans pairs (accrual + reversal) for each period and chart
+#   - UPDATE $table.accrual (JSONB) to include accrual_id so caller's UPDATE is
+#     not required to know the new gl.id
+# ---------------------------------------------------------------------------
+sub post_accrual_entry {
+  my ($self, $myconfig, $form, $dbh, $module) = @_;
+
+  $module = lc($module || '');
+  return unless $module eq 'ar' || $module eq 'ap';
+
+  my $source_id = $form->{id} * 1;
+  return unless $source_id;
+
+  # Normalize accrual config: accept hashref or JSON string
+  my $accrual = $form->{accrual};
+  if (defined $accrual && !ref($accrual)) {
+    eval { $accrual = decode_json($accrual); };
+    $accrual = undef if $@;
+  }
+
+  # Find existing accrual_id if any (UPDATE has already run for AA, may not have for IS)
+  my ($existing_accrual_id) = $dbh->selectrow_array(
+    qq|SELECT (accrual->>'accrual_id')::int FROM $module WHERE id = $source_id|
+  );
+
+  # Determine whether to post or skip
+  my $period = ($accrual && ref($accrual) eq 'HASH') ? lc($accrual->{period} || '') : '';
+  my $length = ($accrual && ref($accrual) eq 'HASH') ? ($accrual->{length} * 1) : 0;
+  my $startdate_str = ($accrual && ref($accrual) eq 'HASH') ? ($accrual->{startdate} || $form->{transdate}) : '';
+  my $valid = ($period =~ /^(monthly|quarterly|yearly)$/) && $length > 0 && $startdate_str;
+
+  # Cleanup-only path: tear down any existing accrual GL and clear the column
+  unless ($valid) {
+    if ($existing_accrual_id) {
+      $dbh->do(qq|DELETE FROM acc_trans WHERE trans_id = $existing_accrual_id|);
+      $dbh->do(qq|DELETE FROM gl WHERE id = $existing_accrual_id|);
+    }
+    $dbh->do(qq|UPDATE $module SET accrual = NULL WHERE id = $source_id|);
+    return;
+  }
+
+  # Resolve accrual chart from defaults
+  my $defaults_key = ($module eq 'ap') ? 'accrual_ap_chart_id' : 'accrual_ar_chart_id';
+  my ($accrual_chart_id) = $dbh->selectrow_array(
+    qq|SELECT fldvalue FROM defaults WHERE fldname = '$defaults_key'|
+  );
+  $accrual_chart_id = ($accrual_chart_id || '') * 1;
+  $form->error("Accrual is enabled on $module $source_id but $defaults_key is not configured in Company Defaults.")
+    unless $accrual_chart_id;
+
+  # Validate startdate parses
+  my ($sy, $sm, $sd) = $startdate_str =~ /^(\d{4})-(\d{2})-(\d{2})$/;
+  $form->error("Invalid accrual.startdate '$startdate_str' on $module $source_id")
+    unless $sy && $sm && $sd;
+  my $start_dt = DateTime->new(year => $sy + 0, month => $sm + 0, day => $sd + 0);
+
+  # Compute period_end dates and the service_end day (day AFTER last period close)
+  my @period_ends;
+  for my $k (1 .. $length) {
+    my $pe;
+    if ($period eq 'monthly') {
+      # Last day of (start_month + k - 1)
+      my $y = $start_dt->year;
+      my $m = $start_dt->month + $k - 1;
+      while ($m > 12) { $m -= 12; $y++; }
+      my $next_m = $m + 1; my $next_y = $y;
+      if ($next_m > 12) { $next_m = 1; $next_y++; }
+      $pe = DateTime->new(year => $next_y, month => $next_m, day => 1)->subtract(days => 1);
+    } elsif ($period eq 'quarterly') {
+      # Quarter containing start, plus (k - 1) quarters
+      my $sq = int(($start_dt->month - 1) / 3); # 0..3
+      my $q_index = $sq + $k - 1;
+      my $y = $start_dt->year + int($q_index / 4);
+      my $q = $q_index % 4; # 0..3
+      my $next_q_first_month = ($q + 1) * 3 + 1;
+      my $next_y = $y;
+      if ($next_q_first_month > 12) { $next_q_first_month -= 12; $next_y++; }
+      $pe = DateTime->new(year => $next_y, month => $next_q_first_month, day => 1)->subtract(days => 1);
+    } else { # yearly
+      $pe = DateTime->new(year => $start_dt->year + $k - 1, month => 12, day => 31);
+    }
+    push @period_ends, $pe;
+  }
+
+  my $service_end = $period_ends[-1]->clone->add(days => 1);
+  my $total_days = $service_end->delta_days($start_dt)->in_units('days');
+  $form->error("Accrual length too short on $module $source_id: total_days=$total_days")
+    unless $total_days > 0;
+
+  # closedto guard — applies to every posting date in the schedule (accrual + reversal)
+  my ($closedto) = $dbh->selectrow_array(qq|SELECT fldvalue FROM defaults WHERE fldname = 'closedto'|);
+  if ($closedto && $closedto =~ /^\d{8}$/) {
+    my $cd = DateTime->new(year => substr($closedto,0,4)+0, month => substr($closedto,4,2)+0, day => substr($closedto,6,2)+0);
+    for my $pe (@period_ends) {
+      $form->error("Accrual posting on " . $pe->ymd . " falls in the closed period (closedto = " . $cd->ymd . ")")
+        if $pe <= $cd;
+      my $rv = $pe->clone->add(days => 1);
+      $form->error("Accrual reversal on " . $rv->ymd . " falls in the closed period (closedto = " . $cd->ymd . ")")
+        if $rv <= $cd;
+    }
+  }
+
+  # Per-chart base-currency totals from the source AR/AP's just-written acc_trans rows.
+  # Tax lines (chart.link LIKE '%_tax') and fx_transaction rows are excluded — only the
+  # expense/income recognition lines are subject to accrual.
+  my $arap_amount_link = ($module eq 'ar') ? 'AR_amount' : 'AP_amount';
+  my $line_sth = $dbh->prepare(qq|
+    SELECT c.id AS chart_id, c.accno, SUM(ac.amount) AS amount
+    FROM acc_trans ac
+    JOIN chart c ON c.id = ac.chart_id
+    WHERE ac.trans_id = ?
+      AND ac.fx_transaction = '0'
+      AND COALESCE(c.link, '') LIKE ?
+      AND COALESCE(c.link, '') NOT LIKE '%_tax%'
+    GROUP BY c.id, c.accno
+    HAVING SUM(ac.amount) <> 0
+  |);
+  $line_sth->execute($source_id, '%' . $arap_amount_link . '%') || $form->dberror;
+  my @source_lines;
+  while (my $r = $line_sth->fetchrow_hashref) { push @source_lines, $r; }
+  $line_sth->finish;
+
+  unless (@source_lines) {
+    # Nothing accruable — clean up any stale GL and bail.
+    if ($existing_accrual_id) {
+      $dbh->do(qq|DELETE FROM acc_trans WHERE trans_id = $existing_accrual_id|);
+      $dbh->do(qq|DELETE FROM gl WHERE id = $existing_accrual_id|);
+    }
+    $dbh->do(qq|UPDATE $module SET accrual = NULL WHERE id = $source_id|);
+    return;
+  }
+
+  # Pre-compute deferred amounts per period per source chart, using "last period =
+  # total - sum(previous)" to absorb rounding so each chart's deferrals close exactly.
+  my $precision = $form->{precision} || 2;
+  my @schedule;  # array of { period_end, reversal_date, lines => [{chart_id, accno, amount}] }
+  for my $k (1 .. $length) {
+    my $pe = $period_ends[$k - 1];
+    my $rv = $pe->clone->add(days => 1);
+    push @schedule, { period_end => $pe, reversal_date => $rv, lines => [] };
+  }
+
+  for my $line (@source_lines) {
+    my $total = $line->{amount} + 0; # base currency, signed
+    my @per_period;
+    my $running = 0;
+    for my $k (1 .. $length) {
+      my $pe = $period_ends[$k - 1];
+      my $days_elapsed = $pe->clone->add(days => 1)->delta_days($start_dt)->in_units('days');
+      my $remaining_days = $total_days - $days_elapsed;
+      $remaining_days = 0 if $remaining_days < 0;
+      my $deferred;
+      if ($k == $length) {
+        # last period: by construction this is 0 (service_end == period_end + 1),
+        # but we keep the explicit formula for clarity.
+        $deferred = $remaining_days == 0 ? 0 : $form->round_amount($total * $remaining_days / $total_days, $precision);
+      } else {
+        $deferred = $form->round_amount($total * $remaining_days / $total_days, $precision);
+      }
+      $running = $deferred;
+      push @per_period, $deferred;
+    }
+    for my $k (1 .. $length) {
+      push @{ $schedule[$k - 1]{lines} }, {
+        chart_id => $line->{chart_id},
+        accno    => $line->{accno},
+        amount   => $per_period[$k - 1],
+      };
+    }
+  }
+
+  # Acquire/reuse the accrual GL header
+  my $gl_id = $existing_accrual_id;
+  my $default_currency = $form->{defaultcurrency} || $form->{currency};
+  my $reference = $dbh->quote($form->{invnumber} || ($module . '-' . $source_id));
+  my $description = $dbh->quote("Accrual schedule for " . uc($module) . " " . ($form->{invnumber} || $source_id));
+  my $notes = $dbh->quote("auto-generated; period=$period, length=$length, start=$startdate_str");
+  my $employee_id = ($form->{employee_id} || 0) * 1;
+  my $department_id = ($form->{department_id} || 0) * 1;
+  my $accrual_source_tag = $dbh->quote("$module:$source_id");
+
+  if ($gl_id) {
+    # wipe prior acc_trans rows for clean regeneration
+    $dbh->do(qq|DELETE FROM acc_trans WHERE trans_id = $gl_id|) || $form->dberror;
+    $dbh->do(qq|UPDATE gl SET
+                reference = $reference,
+                description = $description,
+                notes = $notes,
+                transdate = '$startdate_str',
+                curr = '$default_currency',
+                exchangerate = 1,
+                employee_id = $employee_id,
+                department_id = $department_id,
+                approved = '1',
+                accrual_source = $accrual_source_tag
+                WHERE id = $gl_id|) || $form->dberror;
+  } else {
+    # Insert a fresh gl row using the legacy reference-uniqueness trick used elsewhere
+    my $uid = localtime;
+    $uid .= $$ . '-acc';
+    $dbh->do(qq|INSERT INTO gl (reference, approved, accrual_source) VALUES ('$uid', '1', $accrual_source_tag)|)
+      || $form->dberror;
+    ($gl_id) = $dbh->selectrow_array(qq|SELECT id FROM gl WHERE reference = '$uid'|);
+    $dbh->do(qq|UPDATE gl SET
+                reference = $reference,
+                description = $description,
+                notes = $notes,
+                transdate = '$startdate_str',
+                curr = '$default_currency',
+                exchangerate = 1,
+                employee_id = $employee_id,
+                department_id = $department_id
+                WHERE id = $gl_id|) || $form->dberror;
+  }
+
+  # Sign convention:
+  #   AP (expense accrual): each period defers expense back to accrual.
+  #     Cr expense (source chart, negative)  ==  acc_trans.amount = -deferred
+  #     Dr accrual chart (positive)          ==  acc_trans.amount = +deferred
+  #   AR (revenue accrual): each period defers revenue into accrual.
+  #     Dr revenue (source chart, positive)  ==  acc_trans.amount = +deferred
+  #     Cr accrual chart (negative)          ==  acc_trans.amount = -deferred
+  #
+  # acc_trans uses positive=credit / negative=debit (matches SQL-Ledger convention used
+  # elsewhere in this codebase). The source AR/AP rows already follow this with $ml/$arapml.
+  #
+  # In acc_trans on the SOURCE AR/AP: expense lines are stored as negative (debit) for AP
+  # invoices. To unwind that we need to move the same magnitude in the OPPOSITE direction
+  # in the accrual GL: i.e. on AP, the source-chart row in the accrual GL is positive
+  # (credit, +deferred), and the accrual-chart row is negative (debit, -deferred).
+  # That matches the user's example: Dr 1300 (accrual) Cr 6500 (expense) for the deferral.
+  #
+  # For AR the source-chart row in the original AR is positive (revenue, credit), so
+  # the deferral debits it: source-chart row -deferred, accrual chart +deferred.
+  #
+  # Implementation: $source_sign multiplies $deferred for the source-chart row;
+  #                 the accrual-chart row uses -$source_sign.
+  my $source_sign = ($module eq 'ap') ? 1 : -1;
+
+  for my $entry (@schedule) {
+    my $pe_str = $entry->{period_end}->ymd;
+    my $rv_str = $entry->{reversal_date}->ymd;
+    for my $ln (@{ $entry->{lines} }) {
+      next unless $ln->{amount};
+      my $src_amount     =  $source_sign * $ln->{amount};
+      my $accrual_amount = -$source_sign * $ln->{amount};
+      my $src_id = $ln->{chart_id} * 1;
+      my $memo = $dbh->quote("Accrual: " . $ln->{accno});
+      my $rev_memo = $dbh->quote("Accrual reversal: " . $ln->{accno});
+
+      # Accrual posting at period end
+      $dbh->do(qq|INSERT INTO acc_trans
+        (trans_id, chart_id, amount, transdate, source, fx_transaction, memo, approved)
+        VALUES ($gl_id, $src_id, $src_amount, '$pe_str', 'accrual', '0', $memo, '1')|)
+        || $form->dberror;
+      $dbh->do(qq|INSERT INTO acc_trans
+        (trans_id, chart_id, amount, transdate, source, fx_transaction, memo, approved)
+        VALUES ($gl_id, $accrual_chart_id, $accrual_amount, '$pe_str', 'accrual', '0', $memo, '1')|)
+        || $form->dberror;
+
+      # Reversal on the next day
+      $dbh->do(qq|INSERT INTO acc_trans
+        (trans_id, chart_id, amount, transdate, source, fx_transaction, memo, approved)
+        VALUES ($gl_id, $src_id, |.(-$src_amount).qq|, '$rv_str', 'accrual_reversal', '0', $rev_memo, '1')|)
+        || $form->dberror;
+      $dbh->do(qq|INSERT INTO acc_trans
+        (trans_id, chart_id, amount, transdate, source, fx_transaction, memo, approved)
+        VALUES ($gl_id, $accrual_chart_id, |.(-$accrual_amount).qq|, '$rv_str', 'accrual_reversal', '0', $rev_memo, '1')|)
+        || $form->dberror;
+    }
+  }
+
+  # Persist the accrual config (including the new accrual_id) on the source row
+  my $accrual_json_obj = {
+    period    => $period,
+    length    => $length + 0,
+    startdate => $startdate_str,
+    accrual_id => $gl_id + 0,
+  };
+  my $accrual_json = encode_json($accrual_json_obj);
+  my $q_json = $dbh->quote($accrual_json);
+  $dbh->do(qq|UPDATE $module SET accrual = $q_json :: jsonb WHERE id = $source_id|)
+    || $form->dberror;
+
+  return $gl_id;
 }
 
 

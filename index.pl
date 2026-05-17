@@ -4030,6 +4030,26 @@ $api->get(
                 $form->{city}     // '',
                 $form->{state}    // '',
                 $form->{country}  // '' );
+
+            # Accrual GLs are visible in journal but clicks must open the source
+            # AR/AP — give the frontend a parsed pointer. Look up the source row's
+            # `invoice` flag so the frontend picks invoice vs transaction page.
+            if ( my $src = delete $transaction->{accrual_source} ) {
+                my ( $mod, $sid ) = split /:/, $src, 2;
+                $sid = ( $sid || 0 ) + 0;
+                my $invoice_flag = 0;
+                if ( $mod eq 'ar' || $mod eq 'ap' ) {
+                    my $row =
+                      $dbs->query( "SELECT invoice FROM $mod WHERE id = ?",
+                        $sid )->hash;
+                    $invoice_flag = ( $row && $row->{invoice} ) ? 1 : 0;
+                }
+                $transaction->{accrualSource} = {
+                    module  => $mod,
+                    id      => $sid,
+                    invoice => $invoice_flag,
+                };
+            }
         }
         eval {
             # Fetch files for all transactions in a single operation
@@ -4072,7 +4092,7 @@ $api->get(
         if ($dateto)   { $c->validate_date($dateto)   or return; }
 
         my $query =
-'SELECT id, reference, transdate, description, notes, curr, department_id, approved, exchangerate, created, updated FROM gl';
+'SELECT id, reference, transdate, description, notes, curr, department_id, approved, exchangerate, created, updated, accrual_source FROM gl';
         my @query_params;
 
         my @conditions;
@@ -4154,6 +4174,26 @@ $api->get(
 
             $transaction->{exchangeRate} = delete $transaction->{exchangerate};
             $transaction->{lines} = \@lines;
+
+            # Accrual GLs are visible in journal but clicks must open the source
+            # AR/AP — give the frontend a parsed pointer. Look up the source row's
+            # `invoice` flag so the frontend picks invoice vs transaction page.
+            if ( my $src = delete $transaction->{accrual_source} ) {
+                my ( $mod, $sid ) = split /:/, $src, 2;
+                $sid = ( $sid || 0 ) + 0;
+                my $invoice_flag = 0;
+                if ( $mod eq 'ar' || $mod eq 'ap' ) {
+                    my $row =
+                      $dbs->query( "SELECT invoice FROM $mod WHERE id = ?",
+                        $sid )->hash;
+                    $invoice_flag = ( $row && $row->{invoice} ) ? 1 : 0;
+                }
+                $transaction->{accrualSource} = {
+                    module  => $mod,
+                    id      => $sid,
+                    invoice => $invoice_flag,
+                };
+            }
             push @transactions, $transaction;
         }
         FM->get_files_for_transactions(
@@ -5886,6 +5926,27 @@ $api->get(
                 $offset_tax_id
             )->list;
         }
+        my $accrual_source_raw =
+          $dbs->query( "SELECT accrual_source FROM gl WHERE id = ?",
+            $form->{id} )->list;
+        my $accrual_source_obj = undef;
+        if ($accrual_source_raw) {
+            my ( $mod, $sid ) = split /:/, $accrual_source_raw, 2;
+            $sid = ( $sid || 0 ) + 0;
+            my $invoice_flag = 0;
+            if ( $mod eq 'ar' || $mod eq 'ap' ) {
+                my $row =
+                  $dbs->query( "SELECT invoice FROM $mod WHERE id = ?", $sid )
+                  ->hash;
+                $invoice_flag = ( $row && $row->{invoice} ) ? 1 : 0;
+            }
+            $accrual_source_obj = {
+                module  => $mod,
+                id      => $sid,
+                invoice => $invoice_flag,
+            };
+        }
+
         my $response = {
             id               => $form->{id},
             reference        => $form->{reference},
@@ -5905,7 +5966,8 @@ $api->get(
             offset_accno     => $offset_accno,
             offset_tax_accno => $offset_tax_accno,
             pending          => $form->{approved}    ? 0 : 1,
-            taxincluded      => $form->{taxincluded} ? 1 : 0
+            taxincluded      => $form->{taxincluded} ? 1 : 0,
+            accrualSource    => $accrual_source_obj,
         };
 
         $c->render( status => 200, json => $response );
@@ -7082,7 +7144,9 @@ $api->get(
                 ar_account_id  => $form->{ar_accno_id} || undef,
                 ap_account_id  => $form->{ap_accno_id} || undef,
                 ar_payment_id  => $form->{AR_paid}     || undef,
-                ap_payment_id  => $form->{AP_paid}     || undef
+                ap_payment_id  => $form->{AP_paid}     || undef,
+                accrual_ap_chart_id => $form->{accrual_ap_chart_id} || undef,
+                accrual_ar_chart_id => $form->{accrual_ar_chart_id} || undef,
             },
 
             number_sequences => {
@@ -7337,6 +7401,10 @@ $api->post(
               $json_data->{account_defaults}->{ar_payment_id};
             $mapped_data->{AP_paid} =
               $json_data->{account_defaults}->{ap_payment_id};
+            $mapped_data->{accrual_ap_chart_id} =
+              $json_data->{account_defaults}->{accrual_ap_chart_id};
+            $mapped_data->{accrual_ar_chart_id} =
+              $json_data->{account_defaults}->{accrual_ar_chart_id};
         }
 
         # Map number sequences
@@ -7399,7 +7467,7 @@ $api->post(
         }
 
         $form->{optional} =
-"company street post_office address address1 address2 city state zip country tel fax companyemail companywebsite yearend weightunit businessnumber closedto revtrans audittrail method cdt namesbynumber xelatex typeofcontact roundchange referenceurl annualinterest latepaymentfee restockingcharge checkinventory hideaccounts linetax forcewarehouse glnumber sinumber sonumber vinumber batchnumber vouchernumber ponumber sqnumber rfqnumber partnumber projectnumber employeenumber customernumber vendornumber lock_glnumber lock_sinumber lock_sonumber lock_ponumber lock_sqnumber lock_rfqnumber lock_employeenumber lock_customernumber lock_vendornumber clearing transition paymentfile paymentfile_workflow term_days AR_paid AP_paid smtp_host smtp_port smtp_username smtp_from_name smtp_ssl smtp_sasl";
+"company street post_office address address1 address2 city state zip country tel fax companyemail companywebsite yearend weightunit businessnumber closedto revtrans audittrail method cdt namesbynumber xelatex typeofcontact roundchange referenceurl annualinterest latepaymentfee restockingcharge checkinventory hideaccounts linetax forcewarehouse glnumber sinumber sonumber vinumber batchnumber vouchernumber ponumber sqnumber rfqnumber partnumber projectnumber employeenumber customernumber vendornumber lock_glnumber lock_sinumber lock_sonumber lock_ponumber lock_sqnumber lock_rfqnumber lock_employeenumber lock_customernumber lock_vendornumber clearing transition paymentfile paymentfile_workflow term_days AR_paid AP_paid smtp_host smtp_port smtp_username smtp_from_name smtp_ssl smtp_sasl accrual_ap_chart_id accrual_ar_chart_id";
 
         # Save the defaults
         my $result = AM->save_defaults( $c->slconfig, $form );
@@ -11961,10 +12029,100 @@ $api->get(
             $json_data->{taxincluded} = $form->{taxincluded};
         }
 
+        # Accrual settings + schedule summary (undef when no accrual)
+        $json_data->{accrual} =
+          $c->accrual_response( $dbs, $vc eq 'vendor' ? 'ap' : 'ar',
+            $form->{id} );
+
         # Render the structured response in JSON format
         $c->render( json => $json_data );
     }
 );
+
+# Build the accrual block for AR/AP GET responses.
+# Returns undef when no accrual is configured. Returns:
+#   {
+#     period, length, startdate, accrual_id,
+#     lines: [{ date, debitAccno, creditAccno, amount, kind }, ...]   # display-only summary
+#   }
+# Lines are aggregated by (transdate, kind) — each calendar day has one accrual row
+# and one reversal row per source-chart, paired into {debit,credit} for display.
+helper accrual_response => sub {
+    my ( $c, $dbs, $module, $source_id ) = @_;
+    return undef unless $module && $source_id;
+
+    my $row =
+      $dbs->query( "SELECT accrual FROM $module WHERE id = ?", $source_id )
+      ->hash;
+    return undef unless $row && $row->{accrual};
+
+    my $cfg = eval { decode_json( $row->{accrual} ) };
+    return undef unless ref($cfg) eq 'HASH' && $cfg->{accrual_id};
+
+    my $gl_id = $cfg->{accrual_id} + 0;
+
+    # Fetch every acc_trans row on the linked GL with the chart accno,
+    # then pair positive/negative entries per (transdate, source).
+    my $rows = $dbs->query(
+        q{
+            SELECT ac.transdate, ac.source, ac.amount, c.accno
+            FROM acc_trans ac
+            JOIN chart c ON c.id = ac.chart_id
+            WHERE ac.trans_id = ?
+            ORDER BY ac.transdate, ac.source, ac.entry_id
+        },
+        $gl_id
+    )->hashes;
+
+    my %bucket;
+    for my $r (@$rows) {
+        my $key = ( $r->{transdate} // '' ) . '|' . ( $r->{source} // '' );
+        $bucket{$key} //= {
+            date => $r->{transdate},
+            kind => $r->{source},
+            debits  => [],
+            credits => [],
+        };
+        if ( $r->{amount} < 0 ) {
+            push @{ $bucket{$key}{debits} },
+              { accno => $r->{accno}, amount => -$r->{amount} };
+        }
+        else {
+            push @{ $bucket{$key}{credits} },
+              { accno => $r->{accno}, amount => $r->{amount} };
+        }
+    }
+
+    my @lines;
+    for my $key ( sort keys %bucket ) {
+        my $b = $bucket{$key};
+
+        # Pair off debits and credits in order — for our accrual writer they
+        # come in matched pairs (one source-chart + one accrual-chart per line).
+        my $n = scalar @{ $b->{debits} };
+        $n = scalar @{ $b->{credits} } if scalar @{ $b->{credits} } > $n;
+        for my $i ( 0 .. $n - 1 ) {
+            my $d = $b->{debits}[$i];
+            my $cr = $b->{credits}[$i];
+            push @lines,
+              {
+                date        => $b->{date},
+                kind        => $b->{kind},     # 'accrual' or 'accrual_reversal'
+                debitAccno  => $d  ? $d->{accno} : undef,
+                creditAccno => $cr ? $cr->{accno} : undef,
+                amount      => ( $d ? $d->{amount} : $cr ? $cr->{amount} : 0 ) + 0,
+              };
+        }
+    }
+
+    return {
+        period     => $cfg->{period},
+        length     => ( $cfg->{length} || 0 ) + 0,
+        startdate  => $cfg->{startdate},
+        accrual_id => $gl_id,
+        lines      => \@lines,
+    };
+};
 
 helper process_transaction => sub {
     my ( $c, $data, $form, $client, $system ) = @_;
@@ -12099,6 +12257,20 @@ helper process_transaction => sub {
         $form->{taxaccounts} = join( ' ', @taxaccounts );
     }
     $form->{taxincluded} = $data->{taxincluded} ? 1 : 0;
+
+    # Accrual config (optional). Frontend sends { period, length, startdate }.
+    # An empty / missing object disables accrual on this transaction.
+    if ( ref( $data->{accrual} ) eq 'HASH' && $data->{accrual}{period} ) {
+        $form->{accrual} = {
+            period    => $data->{accrual}{period},
+            length    => ( $data->{accrual}{length} || 0 ) + 0,
+            startdate => $data->{accrual}{startdate} || $form->{transdate},
+        };
+    }
+    else {
+        $form->{accrual} = undef;
+    }
+
     unless ($system) {
         if ( $vc eq 'vendor' && $ai_plugin ) {
             my $access = $c->verify_station_access($form);
@@ -12449,6 +12621,11 @@ $api->get(
             $json_data->{shipto}->{$item} = $form->{"shipto$item"};
         }
 
+        # Accrual settings + schedule summary (undef when no accrual)
+        $json_data->{accrual} =
+          $c->accrual_response( $dbs, $vc eq 'vendor' ? 'ap' : 'ar',
+            $form->{id} );
+
         $c->render( json => $json_data );
     }
 );
@@ -12623,6 +12800,19 @@ helper process_invoice => sub {
     $form->{employee_id}   = undef;
     $form->{language_code} = '';
     $form->{precision}     = $data->{selectedCurrency}->{prec} || 2;
+
+    # Accrual config (optional). Frontend sends { period, length, startdate }.
+    # An empty / missing object disables accrual on this invoice.
+    if ( ref( $data->{accrual} ) eq 'HASH' && $data->{accrual}{period} ) {
+        $form->{accrual} = {
+            period    => $data->{accrual}{period},
+            length    => ( $data->{accrual}{length} || 0 ) + 0,
+            startdate => $data->{accrual}{startdate} || $form->{transdate},
+        };
+    }
+    else {
+        $form->{accrual} = undef;
+    }
 
     # Finally, post invoice to LedgerSMB
     if ( $invoice_type eq 'AR' ) {

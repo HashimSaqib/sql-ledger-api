@@ -613,6 +613,10 @@ sub post_transaction {
     }
   }
 
+  # accrual schedule (writes a linked gl entry; safe no-op when accrual is empty)
+  require GL;
+  GL->post_accrual_entry($myconfig, $form, $dbh, $table);
+
   # save printed and queued
   $form->save_status($dbh);
 

@@ -2413,6 +2413,10 @@ qq|id = $form->{voucher}{payment}{$voucherid}{br_id}|,
     $form->{name} =~ s/--$form->{customer_id}//;
     $form->add_shipto( $dbh, $form->{id} );
 
+    # accrual schedule (writes a linked gl entry; safe no-op when accrual is empty)
+    use SL::GL;
+    GL->post_accrual_entry( $myconfig, $form, $dbh, 'ar' );
+
     # save printed, emailed and queued
     $form->save_status($dbh);
 
