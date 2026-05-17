@@ -10525,8 +10525,9 @@ $api->get(
         ON a.trans_id = gl.id
         LEFT JOIN department AS d
         ON d.id = gl.department_id
+        WHERE gl.accrual_source IS NULL
         ORDER BY gl.transdate DESC, gl.id DESC
-        LIMIT 5; 
+        LIMIT 5;
         }
         }
         elsif ( $module eq 'ar' || $module eq 'ap' ) {
@@ -15207,6 +15208,27 @@ $api->get(
             $response->{accno}        = $heading_row->{accno};
             $response->{description}  = $heading_row->{description};
         }
+        # Enrich accrual GL rows with a parsed accrualSource pointer so the
+        # frontend can navigate to the source AR/AP instead of the GL entry.
+        foreach my $txn ( @{ $response->{transactions} || [] } ) {
+            if ( my $src = delete $txn->{accrual_source} ) {
+                my ( $mod, $sid ) = split /:/, $src, 2;
+                $sid = ( $sid || 0 ) + 0;
+                my $invoice_flag = 0;
+                if ( $mod eq 'ar' || $mod eq 'ap' ) {
+                    my $row =
+                      $dbs->query( "SELECT invoice FROM $mod WHERE id = ?",
+                        $sid )->hash;
+                    $invoice_flag = ( $row && $row->{invoice} ) ? 1 : 0;
+                }
+                $txn->{accrualSource} = {
+                    module  => $mod,
+                    id      => $sid,
+                    invoice => $invoice_flag,
+                };
+            }
+        }
+
         eval {
             # Fetch files for all transactions in a single operation
             FM->get_files_for_transactions(

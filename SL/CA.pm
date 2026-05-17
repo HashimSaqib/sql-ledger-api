@@ -249,7 +249,7 @@ sub all_transactions {
                  SELECT a.id, a.reference, a.description, ac.transdate,
 	         $false AS invoice, ac.amount, 'gl' as module, ac.cleared,
 		 ac.source,
-		 '' AS till, ac.chart_id, '0' AS vc_id
+		 '' AS till, ac.chart_id, '0' AS vc_id, a.accrual_source
 		 FROM gl a
 		 JOIN acc_trans ac ON (ac.trans_id = a.id)
 		 $dpt_join
@@ -259,13 +259,13 @@ sub all_transactions {
 		 $todate_where
 		 $dpt_where
 		 $project
-      
+
              UNION ALL
-      
+
                  SELECT a.id, a.invnumber, a.description, ac.transdate,
 	         a.invoice, ac.amount, 'ar' as module, ac.cleared,
 		 ac.source,
-		 a.till, ac.chart_id, c.id AS vc_id
+		 a.till, ac.chart_id, c.id AS vc_id, NULL AS accrual_source
 		 FROM ar a
 		 JOIN acc_trans ac ON (ac.trans_id = a.id)
 		 JOIN customer c ON (a.customer_id = c.id)
@@ -276,13 +276,13 @@ sub all_transactions {
 		 $todate_where
 		 $dpt_where
 		 $project
-      
+
              UNION ALL
-      
+
                  SELECT a.id, a.invnumber, a.description, ac.transdate,
 	         a.invoice, ac.amount, 'ap' as module, ac.cleared,
 		 ac.source,
-		 a.till, ac.chart_id, v.id AS vc_id
+		 a.till, ac.chart_id, v.id AS vc_id, NULL AS accrual_source
 		 FROM ap a
 		 JOIN acc_trans ac ON (ac.trans_id = a.id)
 		 JOIN vendor v ON (a.vendor_id = v.id)
