@@ -760,13 +760,37 @@ sub format_amount {
 sub parse_amount {
   my ($self, $myconfig, $amount) = @_;
 
-  if (($myconfig->{numberformat} eq '1.000,00') ||
-      ($myconfig->{numberformat} eq '1000,00')) {
+  return 0 if !defined $amount || $amount eq '';
+
+  my $nf = $myconfig->{numberformat} // '';
+
+  # API / JSON amounts use a plain decimal point (2439.40), not locale grouping.
+  # Skip locale rules unless the value looks like European thousands (e.g. 1.234.567).
+  if (   $amount !~ /,/
+      && $amount !~ /'/
+      && $amount =~ /^\s*-?(?:\d+\.\d+|\d+)\s*$/)
+  {
+    my $s = $amount;
+    $s =~ s/\s//g;
+    if ( $s =~ /^\d+$/ || $s =~ /^\d+\.\d+$/ ) {
+      if ( ($nf eq '1.000,00' || $nf eq '1000,00')
+        && $s =~ /^\d{1,3}(?:\.\d{3})+$/ )
+      {
+        # e.g. 2.439 or 1.234.567 — thousands separators, not a decimal
+      }
+      else {
+        return $s * 1;
+      }
+    }
+  }
+
+  if (($nf eq '1.000,00') ||
+      ($nf eq '1000,00')) {
     $amount =~ s/\.//g;
     $amount =~ s/,/\./;
   }
 
-  if ($myconfig->{numberformat} eq "1'000.00") {
+  if ($nf eq "1'000.00") {
     $amount =~ s/'//g;
   }
 
@@ -781,7 +805,12 @@ sub round_amount {
   my ($self, $amount, $places) = @_;
 
   $amount *= 1;
-  $places *= 1;
+  if ( !defined $places || $places eq '' ) {
+    $places = 2;
+  }
+  else {
+    $places *= 1;
+  }
   
   my $neg = ($amount < 0) ? -1 : 1;
 
@@ -2725,6 +2754,18 @@ sub get_onhand {
 }
 
  
+# Default monetary decimal places when defaults.precision is missing/empty.
+# Explicit precision 0 (whole units) is preserved.
+sub ensure_precision {
+  my ( $self, $h ) = @_;
+  return 2 unless ref $h eq 'HASH';
+  $h->{precision} = 2
+    if !defined $h->{precision} || $h->{precision} eq '';
+  $h->{precision} *= 1;
+  return $h->{precision};
+}
+
+
 sub get_defaults {
   my ($self, $dbh, $flds) = @_;
   
@@ -2744,6 +2785,10 @@ sub get_defaults {
       $defaults{$ref->{fldname}} = $ref->{fldvalue};
     }
     $sth->finish;
+  }
+
+  if ( grep { $_ eq 'precision' || $_ eq '%' } @{$flds} ) {
+    $self->ensure_precision( \%defaults );
   }
 
   %defaults;
